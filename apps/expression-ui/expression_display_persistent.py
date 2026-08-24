@@ -282,6 +282,7 @@ class SystemStatus:
     def __init__(self) -> None:
         self.last_update = 0.0
         self.wifi_quality = 0
+        self.wifi_enabled = False
         self.tokens_today = 0
         self.camera_active = False
         self.camera_active_sources: tuple[str, ...] = ()
@@ -310,6 +311,21 @@ class SystemStatus:
         except (OSError, ValueError, IndexError):
             pass
         return 0
+
+    @staticmethod
+    def read_wifi_enabled() -> bool:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/nmcli", "radio", "wifi"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=0.7,
+                check=False,
+            )
+            return result.returncode == 0 and result.stdout.strip() == "enabled"
+        except (OSError, subprocess.TimeoutExpired):
+            return False
 
     @staticmethod
     def read_wifi_details() -> tuple[str, str]:
@@ -542,6 +558,7 @@ class SystemStatus:
     def snapshot_values(self) -> tuple:
         return (
             self.wifi_quality,
+            self.wifi_enabled,
             self.tokens_today,
             self.camera_active,
             self.camera_active_sources,
@@ -572,6 +589,7 @@ class SystemStatus:
         health_healthy_count, health_total_count = cls.read_health_summary()
         return (
             wifi_quality,
+            cls.read_wifi_enabled(),
             cls.read_tokens_today(),
             camera_active,
             camera_sources,
@@ -594,6 +612,7 @@ class SystemStatus:
         before = self.snapshot_values()
         (
             self.wifi_quality,
+            self.wifi_enabled,
             self.tokens_today,
             self.camera_active,
             self.camera_active_sources,
@@ -617,6 +636,7 @@ class SystemStatus:
     def as_dict(self) -> dict:
         return {
             "wifi_quality": self.wifi_quality,
+            "wifi_enabled": self.wifi_enabled,
             "tokens_today": self.tokens_today,
             "camera_active": self.camera_active,
             "camera_active_sources": list(self.camera_active_sources),
@@ -1267,12 +1287,20 @@ class PersistentExpressionDisplay:
             max_workers=1,
             thread_name_prefix="display-status",
         )
+        self.control_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="display-control",
+        )
         self.balance_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="display-balance",
         )
         self.status_future: Future[tuple] | None = None
         self.status_next_update_at = 0.0
+        self.wifi_toggle_future: Future[tuple[bool, str]] | None = None
+        self.wifi_toggle_target: bool | None = None
+        self.wifi_toggle_error = ""
+        self.wifi_toggle_notice_until = 0.0
         self.cache_limit = int(float(config.get("cache_limit_mb", 512)) * 1024 * 1024)
         configured_preload = config.get("preload_states", DEFAULT_PRELOAD)
         self.preload_states = tuple(
@@ -2550,8 +2578,11 @@ class PersistentExpressionDisplay:
         self.screen.blit(incoming, (round(direction * travel * (1.0 - eased)), 0))
         self.screen.set_clip(previous_clip)
 
+    def gallery_back_button_center(self) -> tuple[int, int]:
+        return round(self.width * 0.22), round(self.height * 0.175)
+
     def draw_gallery_back_button(self) -> None:
-        center = (176, 140)
+        center = self.gallery_back_button_center()
         self.draw_aa_circle(self.screen, (5, 27, 37), center, 37)
         self.draw_aa_ring(self.screen, (70, 178, 213), center, 37, 2)
         chevron = self.pygame.Surface((32 * UI_AA_SCALE, 42 * UI_AA_SCALE), self.pygame.SRCALPHA)
@@ -2765,7 +2796,7 @@ class PersistentExpressionDisplay:
     def gallery_control_at(self, position: tuple[int, int]) -> tuple[str, Path | None] | None:
         if self.gallery_page_transition_active:
             return None
-        if math.dist(position, (176, 140)) <= 48:
+        if math.dist(position, self.gallery_back_button_center()) <= 48:
             return "back", None
         if self.gallery_selected is not None:
             return None
@@ -3016,6 +3047,64 @@ class PersistentExpressionDisplay:
         self.needs_redraw = True
         return True
 
+    @staticmethod
+    def set_wifi_radio(active: bool) -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/nmcli", "radio", "wifi", "on" if active else "off"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=6.0,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True, ""
+            message = (result.stderr or result.stdout).strip()
+            return False, message or "NetworkManager 拒绝了操作"
+        except subprocess.TimeoutExpired:
+            return False, "Wi-Fi 切换超时"
+        except OSError as exc:
+            return False, str(exc)
+
+    def request_wifi_toggle(self, active: bool) -> bool:
+        if self.wifi_toggle_future is not None:
+            return False
+        self.wifi_toggle_target = bool(active)
+        self.wifi_toggle_error = ""
+        self.wifi_toggle_notice_until = 0.0
+        self.wifi_toggle_future = self.control_executor.submit(
+            self.set_wifi_radio,
+            bool(active),
+        )
+        self.needs_redraw = True
+        self.write_state()
+        log(f"wifi radio toggle requested active={bool(active)}")
+        return True
+
+    def update_wifi_toggle(self, now: float) -> bool:
+        if self.wifi_toggle_future is None or not self.wifi_toggle_future.done():
+            return False
+        target = bool(self.wifi_toggle_target)
+        try:
+            success, error = self.wifi_toggle_future.result()
+        except Exception as exc:
+            success, error = False, str(exc)
+        self.wifi_toggle_future = None
+        self.wifi_toggle_target = None
+        if success:
+            self.system_status.wifi_enabled = target
+            self.wifi_toggle_error = ""
+            log(f"wifi radio toggle completed active={target}")
+        else:
+            self.wifi_toggle_error = error or "Wi-Fi 切换失败"
+            log(f"wifi radio toggle failed error={self.wifi_toggle_error}")
+        self.wifi_toggle_notice_until = now + 2.0
+        self.status_next_update_at = 0.0
+        self.request_system_status_refresh(now)
+        self.needs_redraw = True
+        return True
+
     def open_settings(self) -> None:
         now = time.monotonic()
         self.settings_active = True
@@ -3054,22 +3143,43 @@ class PersistentExpressionDisplay:
             for index, name in enumerate(names)
         }
 
-    def settings_navigation_centers(
-        self,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        inset = round(min(self.width, self.height) * 0.1875)
-        return (inset, inset), (self.width - inset, inset)
+    def settings_detail_rects(self) -> tuple[object, ...]:
+        left = round(self.width * 0.15)
+        width = round(self.width * 0.70)
+        row_height = round(self.height * 0.105)
+        gap = round(self.height * 0.018)
+        top = round(self.height * 0.2625)
+        return tuple(
+            self.pygame.Rect(
+                left,
+                top + index * (row_height + gap),
+                width,
+                row_height,
+            )
+            for index in range(4)
+        )
+
+    def settings_wifi_switch_rect(self) -> object:
+        first_row = self.settings_detail_rects()[0]
+        switch = self.pygame.Rect(0, 0, 88, 46)
+        switch.center = (first_row.right - 74, first_row.centery)
+        return switch
+
+    def settings_back_center(self) -> tuple[int, int]:
+        return self.gallery_back_button_center()
 
     def settings_target_at(self, position: tuple[int, int]) -> str | None:
-        back_center, refresh_center = self.settings_navigation_centers()
-        if math.dist(position, back_center) <= 54:
+        if math.dist(position, self.settings_back_center()) <= 48:
             return "back"
-        if math.dist(position, refresh_center) <= 54:
-            return "refresh"
         if self.settings_section is None:
             for name, rect in self.settings_card_rects().items():
                 if rect.collidepoint(position):
                     return name
+        elif (
+            self.settings_section == "wifi"
+            and self.settings_wifi_switch_rect().inflate(18, 18).collidepoint(position)
+        ):
+            return "wifi_toggle"
         return None
 
     def settings_back_swipe_detected(
@@ -3093,9 +3203,13 @@ class PersistentExpressionDisplay:
                 return
             self.settings_section = None
             log("settings detail returned to root")
-        elif target == "refresh":
-            self.request_system_status_refresh(now)
-            log("settings status refresh requested")
+        elif target == "wifi_toggle":
+            current = (
+                self.wifi_toggle_target
+                if self.wifi_toggle_target is not None
+                else self.system_status.wifi_enabled
+            )
+            self.request_wifi_toggle(not current)
         elif target in {"wifi", "bluetooth", "version", "system"}:
             self.settings_section = target
             log(f"settings detail opened section={target}")
@@ -3190,27 +3304,68 @@ class PersistentExpressionDisplay:
             self.settings_card_cache.popitem(last=False)
         return surface
 
+    def settings_wifi_switch_surface(
+        self,
+        enabled: bool,
+        pending: bool,
+        pressed: bool,
+    ) -> object:
+        size = (88, 46)
+        key = ("wifi-switch", enabled, pending, pressed)
+        cached = self.settings_card_cache.get(key)
+        if cached is not None:
+            self.settings_card_cache.move_to_end(key)
+            return cached
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (size[0] * scale, size[1] * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        track = self.pygame.Rect(
+            1 * scale,
+            1 * scale,
+            (size[0] - 2) * scale,
+            (size[1] - 2) * scale,
+        )
+        if enabled:
+            fill = (38, 177, 215, 230) if not pending else (44, 139, 165, 220)
+            border = (102, 231, 255, 210)
+            knob_x = size[0] - 23
+        else:
+            fill = (40, 65, 75, 230) if not pending else (44, 71, 81, 220)
+            border = (102, 137, 148, 185)
+            knob_x = 23
+        if pressed:
+            fill = tuple(min(255, channel + 16) for channel in fill[:3]) + (fill[3],)
+        self.pygame.draw.rect(
+            high,
+            fill,
+            track,
+            border_radius=22 * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            border,
+            track,
+            width=scale,
+            border_radius=22 * scale,
+        )
+        self.pygame.draw.circle(
+            high,
+            (224, 246, 251, 245),
+            (knob_x * scale, size[1] * scale // 2),
+            17 * scale,
+        )
+        surface = self.pygame.transform.smoothscale(high, size)
+        self.settings_card_cache[key] = surface
+        self.settings_card_cache.move_to_end(key)
+        while len(self.settings_card_cache) > self.settings_card_cache_limit:
+            self.settings_card_cache.popitem(last=False)
+        return surface
+
     def draw_settings_navigation(self, title: str) -> None:
-        back_center, refresh_center = self.settings_navigation_centers()
-        for center, pressed in (
-            (back_center, self.settings_pointer_target == "back"),
-            (refresh_center, self.settings_pointer_target == "refresh"),
-        ):
-            self.draw_aa_circle(
-                self.screen,
-                (18, 54, 69) if pressed else (7, 28, 39),
-                center,
-                38,
-            )
-            self.draw_aa_ring(
-                self.screen,
-                (92, 194, 219, 120),
-                center,
-                38,
-                width=2,
-            )
-        self.draw_centered_text("<", self.font_large, (205, 235, 243), back_center)
-        self.draw_centered_text("刷", self.font_medium, (177, 222, 234), refresh_center)
+        self.draw_gallery_back_button()
         self.draw_centered_text(
             title,
             self.font_large,
@@ -3221,12 +3376,14 @@ class PersistentExpressionDisplay:
     def settings_root_items(self) -> tuple[tuple[str, str, str, bool], ...]:
         status = self.system_status
         wifi_active = bool(status.wifi_ssid or status.wifi_ipv4)
-        if wifi_active:
+        if not status.wifi_enabled:
+            wifi_summary = "已关闭"
+        elif wifi_active:
             wifi_summary = (
                 f"{status.wifi_ssid or '已连接'} · {status.wifi_quality}%"
             )
         else:
-            wifi_summary = "未连接"
+            wifi_summary = "已开启 · 未连接"
         if status.bluetooth_devices:
             bluetooth_summary = f"已连接 · {status.bluetooth_devices[0]}"
         elif status.bluetooth_powered:
@@ -3240,7 +3397,7 @@ class PersistentExpressionDisplay:
         else:
             health = "自检读取中"
         return (
-            ("wifi", "Wi-Fi", wifi_summary, wifi_active),
+            ("wifi", "Wi-Fi", wifi_summary, status.wifi_enabled),
             (
                 "bluetooth",
                 "蓝牙",
@@ -3261,10 +3418,15 @@ class PersistentExpressionDisplay:
         if section == "wifi":
             connected = bool(status.wifi_ssid or status.wifi_ipv4)
             return "Wi-Fi", (
-                ("状态", "已连接" if connected else "未连接"),
+                ("状态", "已开启" if status.wifi_enabled else "已关闭"),
                 ("网络", status.wifi_ssid or "—"),
                 ("IPv4", status.wifi_ipv4 or "—"),
-                ("信号", f"{status.wifi_quality}%" if connected else "—"),
+                (
+                    "信号",
+                    f"{status.wifi_quality}%"
+                    if status.wifi_enabled and connected
+                    else "—",
+                ),
             )
         if section == "bluetooth":
             device_text = "、".join(status.bluetooth_devices) or "—"
@@ -3337,32 +3499,58 @@ class PersistentExpressionDisplay:
 
         title, rows = self.settings_detail_rows(self.settings_section)
         self.draw_settings_navigation(title)
-        left = round(self.width * 0.15)
-        width = round(self.width * 0.70)
-        row_height = round(self.height * 0.105)
-        gap = round(self.height * 0.018)
-        top = round(self.height * 0.2625)
-        for index, (label, value) in enumerate(rows):
-            rect = self.pygame.Rect(
-                left,
-                top + index * (row_height + gap),
-                width,
-                row_height,
-            )
+        for index, ((label, value), rect) in enumerate(
+            zip(rows, self.settings_detail_rects())
+        ):
             self.screen.blit(
                 self.settings_card_surface(rect.size, False, True),
                 rect.topleft,
             )
             label_surface = self.font_small.render(label, True, (111, 177, 195))
-            value_surface = self.font_medium.render(
-                self.ellipsize_text(value, self.font_medium, rect.width - 185),
-                True,
-                (218, 239, 245),
-            )
             self.screen.blit(label_surface, (rect.left + 48, rect.centery - 12))
-            self.screen.blit(
-                value_surface,
-                value_surface.get_rect(midright=(rect.right - 38, rect.centery)),
+            if self.settings_section == "wifi" and index == 0:
+                enabled = (
+                    self.wifi_toggle_target
+                    if self.wifi_toggle_target is not None
+                    else self.system_status.wifi_enabled
+                )
+                pending = self.wifi_toggle_future is not None
+                pressed = (
+                    self.pointer_down
+                    and self.settings_pointer_target == "wifi_toggle"
+                )
+                switch_rect = self.settings_wifi_switch_rect()
+                self.screen.blit(
+                    self.settings_wifi_switch_surface(enabled, pending, pressed),
+                    switch_rect.topleft,
+                )
+            else:
+                value_surface = self.font_medium.render(
+                    self.ellipsize_text(value, self.font_medium, rect.width - 185),
+                    True,
+                    (218, 239, 245),
+                )
+                self.screen.blit(
+                    value_surface,
+                    value_surface.get_rect(midright=(rect.right - 38, rect.centery)),
+                )
+        if self.settings_section == "wifi" and self.wifi_toggle_future is not None:
+            self.draw_centered_text(
+                "正在切换…",
+                self.font_small,
+                (112, 183, 200),
+                (self.width // 2, round(self.height * 0.80)),
+            )
+        elif (
+            self.settings_section == "wifi"
+            and self.wifi_toggle_error
+            and time.monotonic() < self.wifi_toggle_notice_until
+        ):
+            self.draw_centered_text(
+                "切换失败，请检查网络权限",
+                self.font_small,
+                (224, 139, 145),
+                (self.width // 2, round(self.height * 0.80)),
             )
         self.draw_centered_text(
             "右滑或点击左上角返回",
@@ -6078,7 +6266,14 @@ class PersistentExpressionDisplay:
                 "section": self.settings_section,
                 "pointer_target": self.settings_pointer_target,
                 "version": self.system_status.app_version,
-                "read_only": True,
+                "read_only": False,
+                "auto_refresh_seconds": 2.0,
+                "wifi_control": {
+                    "enabled": self.system_status.wifi_enabled,
+                    "pending": self.wifi_toggle_future is not None,
+                    "target": self.wifi_toggle_target,
+                    "error": self.wifi_toggle_error or None,
+                },
             },
             "photo_screensaver": {
                 "enabled": self.screensaver_idle_seconds > 0,
@@ -6212,6 +6407,12 @@ class PersistentExpressionDisplay:
         if self.update_system_status_async(now):
             self.needs_redraw = True
             self.write_state()
+        if self.update_wifi_toggle(now):
+            self.write_state()
+        if self.wifi_toggle_notice_until and now >= self.wifi_toggle_notice_until:
+            self.wifi_toggle_notice_until = 0.0
+            self.wifi_toggle_error = ""
+            self.needs_redraw = True
         if self.settings_active:
             if self.needs_redraw:
                 self.draw()
@@ -6314,6 +6515,7 @@ class PersistentExpressionDisplay:
             self.camera_capture_future.cancel()
         self.camera_executor.shutdown(wait=False, cancel_futures=True)
         self.status_executor.shutdown(wait=False, cancel_futures=True)
+        self.control_executor.shutdown(wait=False, cancel_futures=True)
         self.balance_executor.shutdown(wait=False, cancel_futures=True)
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.pygame.display.quit()

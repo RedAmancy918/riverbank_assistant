@@ -7,6 +7,7 @@
 | 圆屏布局、动画、状态栏、设置页、相机和相册 | `apps/expression-ui/expression_display_persistent.py` |
 | 表情素材路径、菜单项、尺寸和时间参数 | `apps/expression-ui/expressions.json` |
 | 设置页显示的软件版本号 | `apps/expression-ui/VERSION` |
+| 允许本机 `netdev` 组切换 Wi-Fi 的最小权限规则 | `system/polkit/60-riverbank-wifi.rules` |
 | 语音 VAD、Whisper、Hermes、TTS 和多轮追问 | `apps/expression-ui/daily_voice_assistant.py` |
 | Hermes 状态映射为表情 | `apps/expression-ui/hermes_expression_bridge.py` |
 | 开机 Wayland 接力 | `apps/expression-ui/boot_handoff.py` |

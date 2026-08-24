@@ -1,0 +1,10 @@
+// Permit the appliance UI to toggle only the NetworkManager Wi-Fi radio.
+// Membership in netdev is managed by the device administrator.
+polkit.addRule(function(action, subject) {
+    if (
+        action.id == "org.freedesktop.NetworkManager.enable-disable-wifi" &&
+        subject.isInGroup("netdev")
+    ) {
+        return polkit.Result.YES;
+    }
+});

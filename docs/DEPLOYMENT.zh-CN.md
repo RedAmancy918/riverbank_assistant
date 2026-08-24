@@ -53,6 +53,15 @@ sudo scripts/install.sh --generated build/generated --apply
 
 安装器会复制核心 systemd 单元、健康监控配置、Plymouth 主题和 udev 规则，但不会安装 Hermes、Hailo、ViewTurbo、模型权重或 API 密钥。可选代理/VPN 单元不会自动启用。
 
+若要启用圆屏设置页的 Wi-Fi 开关，确认运行用户属于 `netdev` 组后安装最小 Polkit 规则：
+
+```bash
+sudo install -m 0644 system/polkit/60-riverbank-wifi.rules \
+  /etc/polkit-1/rules.d/60-riverbank-wifi.rules
+```
+
+该规则只允许 `netdev` 组启用或关闭 NetworkManager 的 Wi-Fi 无线电，不授予其他系统管理权限。
+
 按实际已安装能力启用服务，例如：
 
 ```bash
