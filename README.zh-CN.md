@@ -84,6 +84,6 @@ scripts/             配置渲染、安装和发布检查工具
 
 外部访问建议使用 Tailscale ACL 或带认证的 HTTPS 反向代理，不建议路由器直接做公网端口映射。
 
-## 公开发布前
+## 许可证
 
-仓库所有者仍需选择源码许可证。若希望宽松开源且重视明确的专利授权，通常可考虑 Apache-2.0；若希望文本更短，可考虑 MIT。请根据公司和贡献者权属自行决定，详见 [发布清单](docs/PUBLISHING.zh-CN.md)。RiverBank 名称与 Logo 的商标/品牌使用应与源码许可证分开处理。
+源码采用 [Apache License 2.0](LICENSE) 开源。RiverBank 名称、公司名称与 Logo 等品牌资产不因源码许可证而开放一般使用，详见 [许可证与品牌说明](LICENSE-NOTICE.md)。

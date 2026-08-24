@@ -14,6 +14,6 @@ packs and proprietary software are deliberately excluded.
 Start with [README.zh-CN.md](README.zh-CN.md), then read
 [docs/DEPLOYMENT.zh-CN.md](docs/DEPLOYMENT.zh-CN.md).
 
-> A source-code license has intentionally not been selected on the owner's
-> behalf. Choose one before making the GitHub repository public; see
-> [docs/PUBLISHING.zh-CN.md](docs/PUBLISHING.zh-CN.md).
+Source code is released under the [Apache License 2.0](LICENSE). RiverBank
+names and logos remain separate from the source-code license; see
+[LICENSE-NOTICE.md](LICENSE-NOTICE.md).

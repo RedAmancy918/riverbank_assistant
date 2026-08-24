@@ -1,7 +1,8 @@
-# License selection required
+# License and brand notice
 
-No source-code license has been selected by the copyright owner yet. Add an
-approved `LICENSE` file before publishing this repository as open source.
+The source code in this repository is licensed under the Apache License 2.0;
+see [LICENSE](LICENSE).
 
-Until then, the absence of a license means the code is provided for review only
-and no general permission to copy, modify or redistribute is granted.
+The RiverBank name, company names, logos and other brand assets are not granted
+for general use by the source-code license, except as required for reasonable
+and customary attribution under the Apache License 2.0.

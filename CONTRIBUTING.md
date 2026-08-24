@@ -14,5 +14,5 @@ Before opening a pull request:
 5. Preserve the Paper Radar thresholds and security rule that external papers
    and web pages are untrusted data.
 
-The copyright owner must select a project license before external contributions
-can be accepted.
+Unless explicitly stated otherwise, contributions submitted for inclusion in
+this project are licensed under the Apache License 2.0.
