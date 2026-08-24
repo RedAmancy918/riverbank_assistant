@@ -191,6 +191,10 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+class InteractionInterrupted(RuntimeError):
+    """Raised when a newer hardware wake word supersedes the active turn."""
+
+
 def load_wake() -> dict | None:
     try:
         payload = json.loads(LISTENGO_STATE.read_text(encoding="utf-8"))
@@ -871,15 +875,23 @@ class StreamingSpeechSession:
         self.llm_complete_at = time.monotonic()
 
     def finish(self) -> bool:
-        for chunk in self.chunker.flush():
-            self._enqueue(chunk)
-        try:
-            self.text_queue.put(self._DONE, timeout=2.0)
-        except queue.Full:
-            self.error = "streaming TTS completion queue full"
-            self.abort()
-        self.worker.join(timeout=300)
-        if self.worker.is_alive():
+        if not self.aborted.is_set():
+            for chunk in self.chunker.flush():
+                self._enqueue(chunk)
+            try:
+                self.text_queue.put(self._DONE, timeout=2.0)
+            except queue.Full:
+                self.error = "streaming TTS completion queue full"
+                self.abort()
+        deadline = time.monotonic() + 300.0
+        while self.worker.is_alive() and not self.aborted.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self.worker.join(timeout=min(0.1, remaining))
+        if self.aborted.is_set():
+            self.worker.join(timeout=0.15)
+        elif self.worker.is_alive():
             self.error = "streaming TTS playback timed out"
             self.abort()
         log(
@@ -891,7 +903,8 @@ class StreamingSpeechSession:
             f"playback_complete={self.elapsed(self.started_at, self.playback_complete_at)}s "
             f"deltas={self.delta_chars} chunks={self.chunk_count} "
             f"chunk_chars={self.chunk_chars} boundaries={self.boundary_count} "
-            f"audible={self.audible} error={self.error}"
+            f"audible={self.audible} aborted={self.aborted.is_set()} "
+            f"error={self.error}"
         )
         return self.audible
 
@@ -917,6 +930,8 @@ class PersistentHermesRuntime:
         self.turn_count = 0
         self.lock = threading.RLock()
         self.clarify_handler = None
+        self.request_active = threading.Event()
+        self.interrupt_requested = threading.Event()
 
     def handle_clarification(
         self,
@@ -1003,6 +1018,7 @@ class PersistentHermesRuntime:
             captured = io.StringIO()
             previous_stream_callback = self.agent.stream_delta_callback
             self.agent.stream_delta_callback = stream_callback
+            self.request_active.set()
             try:
                 with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
                     result = self.agent.run_conversation(prompt)
@@ -1010,15 +1026,45 @@ class PersistentHermesRuntime:
                 self.close()
                 raise
             finally:
+                self.request_active.clear()
                 if self.agent is not None:
                     self.agent.stream_delta_callback = previous_stream_callback
+                    if self.interrupt_requested.is_set():
+                        clear_interrupt = getattr(self.agent, "clear_interrupt", None)
+                        if callable(clear_interrupt):
+                            try:
+                                clear_interrupt()
+                            except Exception as exc:
+                                log(f"Hermes interrupt reset warning: {exc}")
+                self.interrupt_requested.clear()
             self.turn_count += 1
             response = str(result.get("final_response") or "").strip()
             if not response:
                 raise RuntimeError("Daily Hermes returned an empty response")
             return response
 
+    def interrupt(self) -> bool:
+        """Hard-cancel the active model/tool request from another thread."""
+        if not self.request_active.is_set():
+            return False
+        agent = self.agent
+        if agent is None:
+            return False
+        self.interrupt_requested.set()
+        hard_interrupt = getattr(agent, "hard_interrupt", None)
+        try:
+            if callable(hard_interrupt):
+                hard_interrupt()
+            else:
+                agent.interrupt(hard_cancel=True)
+            return True
+        except Exception as exc:
+            log(f"Hermes hard interrupt warning: {exc}")
+            return False
+
     def close(self) -> None:
+        self.request_active.clear()
+        self.interrupt_requested.clear()
         if self.agent is not None:
             try:
                 self.agent.shutdown_memory_provider()
@@ -1112,6 +1158,16 @@ class DailyVoiceAssistant:
     def __init__(self) -> None:
         self.running = True
         self.busy = False
+        self.interrupt_event = threading.Event()
+        self.barge_in_lock = threading.Lock()
+        self.pending_wake: dict | None = None
+        self.active_speech_session: StreamingSpeechSession | None = None
+        self.active_player: subprocess.Popen | None = None
+        self.active_async_loop: asyncio.AbstractEventLoop | None = None
+        self.active_async_task: asyncio.Task | None = None
+        self.barge_in_count = 0
+        self.last_barge_in_at: float | None = None
+        self.last_interrupted_stage: str | None = None
         self.started_at = time.time()
         self.last_token = wake_token(load_wake())
         self.last_trigger_monotonic = 0.0
@@ -1169,6 +1225,13 @@ class DailyVoiceAssistant:
                 "last_error": self.wake_ack.last_error,
             },
             "busy": self.busy,
+            "wake_barge_in": {
+                "enabled": True,
+                "pending": self.pending_wake is not None,
+                "count": self.barge_in_count,
+                "last_at": self.last_barge_in_at,
+                "last_interrupted_stage": self.last_interrupted_stage,
+            },
             "last_result": self.last_result,
             "last_error": self.last_error,
             "interaction_count": self.interaction_count,
@@ -1207,12 +1270,90 @@ class DailyVoiceAssistant:
             "started_at": self.started_at,
             "updated_at": time.time(),
         }
-        temporary = STATE_PATH.with_suffix(".tmp")
+        temporary = STATE_PATH.with_suffix(f".{threading.get_ident()}.tmp")
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         os.replace(temporary, STATE_PATH)
+
+    def raise_if_interrupted(self, event: threading.Event | None = None) -> None:
+        target = event if event is not None else self.interrupt_event
+        if target.is_set():
+            raise InteractionInterrupted("superseded by a newer wake word")
+
+    def has_pending_wake(self) -> bool:
+        with self.barge_in_lock:
+            return self.pending_wake is not None
+
+    def pop_pending_wake(self) -> dict | None:
+        with self.barge_in_lock:
+            wake = self.pending_wake
+            self.pending_wake = None
+            return wake
+
+    def set_active_speech_session(
+        self,
+        session: StreamingSpeechSession | None,
+    ) -> None:
+        with self.barge_in_lock:
+            self.active_speech_session = session
+
+    def set_active_player(self, player: subprocess.Popen | None) -> None:
+        with self.barge_in_lock:
+            self.active_player = player
+
+    def request_barge_in(self, wake: dict) -> bool:
+        """Supersede the active turn and queue the newest hardware wake."""
+        if not self.busy:
+            return False
+        token = wake_token(wake)
+        with self.barge_in_lock:
+            if token and token == self.last_token:
+                return False
+            if token:
+                self.last_token = token
+            self.pending_wake = wake
+            self.interrupt_event.set()
+            speech_session = self.active_speech_session
+            player = self.active_player
+            async_loop = self.active_async_loop
+            async_task = self.active_async_task
+            interrupted_stage = self.last_result
+            self.barge_in_count += 1
+            self.last_barge_in_at = time.time()
+            self.last_interrupted_stage = interrupted_stage
+        if speech_session is not None:
+            speech_session.abort()
+        if player is not None:
+            try:
+                player.terminate()
+            except Exception:
+                pass
+        if async_loop is not None and async_task is not None:
+            try:
+                async_loop.call_soon_threadsafe(async_task.cancel)
+            except (RuntimeError, OSError):
+                pass
+        hermes_interrupted = self.hermes.interrupt()
+        self.publish_speech_bubble(False)
+        self.last_result = "interrupting_for_wake"
+        self.write_state()
+        log(
+            "Wake barge-in requested "
+            f"stage={interrupted_stage} hermes_interrupted={hermes_interrupted}"
+        )
+        return True
+
+    def monitor_hardware_wake(self) -> None:
+        """Watch wake events even while the foreground interaction is blocked."""
+        while self.running:
+            if self.busy:
+                wake = load_wake()
+                token = wake_token(wake)
+                if wake is not None and token and token != self.last_token:
+                    self.request_barge_in(wake)
+            time.sleep(0.05)
 
     def publish_speech_bubble(
         self,
@@ -1294,6 +1435,7 @@ class DailyVoiceAssistant:
         partial_previous = ""
         log(f"Adaptive VAD threshold={threshold:.0f}")
         while self.running:
+            self.raise_if_interrupted()
             now = time.monotonic()
             if now - started >= 45.0:
                 break
@@ -1405,6 +1547,7 @@ class DailyVoiceAssistant:
         if played:
             self.last_wake_ack_at = time.time()
             time.sleep(WAKE_ACK_TAIL_SECONDS)
+        self.raise_if_interrupted()
         discarded = self.microphone.discard_buffer()
         elapsed_ms = round((time.monotonic() - started) * 1000)
         log(
@@ -1423,17 +1566,27 @@ class DailyVoiceAssistant:
                 log(f"Local faster-whisper base ready in {time.monotonic() - started:.2f}s")
             return self.whisper
 
-    def transcribe(self, wav_path: Path) -> str:
+    def transcribe(
+        self,
+        wav_path: Path,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
         expression("thinking")
         log("Transcribing with resident local faster-whisper base...")
         with self.whisper_inference_lock:
+            self.raise_if_interrupted(cancel_event)
             segments, _ = self.ensure_whisper().transcribe(
                 str(wav_path),
                 language="zh",
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 400},
             )
-            transcript = "".join(segment.text for segment in segments).strip()
+            transcript_parts: list[str] = []
+            for segment in segments:
+                self.raise_if_interrupted(cancel_event)
+                transcript_parts.append(segment.text)
+            transcript = "".join(transcript_parts).strip()
+        self.raise_if_interrupted(cancel_event)
         if transcript:
             self.publish_speech_bubble(
                 True,
@@ -1445,6 +1598,34 @@ class DailyVoiceAssistant:
         else:
             self.publish_speech_bubble(False)
         return transcript
+
+    def transcribe_interruptibly(self, wav_path: Path) -> str:
+        """Let a new wake proceed while a stale native Whisper call unwinds."""
+        cancel_event = self.interrupt_event
+        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                result_queue.put(("result", self.transcribe(wav_path, cancel_event)))
+            except BaseException as exc:
+                result_queue.put(("error", exc))
+
+        worker = threading.Thread(
+            target=run,
+            name="interruptible-whisper-turn",
+            daemon=True,
+        )
+        worker.start()
+        while worker.is_alive():
+            if cancel_event.wait(0.05):
+                raise InteractionInterrupted(
+                    "speech recognition superseded by a newer wake word"
+                )
+        kind, value = result_queue.get_nowait()
+        self.raise_if_interrupted(cancel_event)
+        if kind == "error":
+            raise value
+        return str(value)
 
     def handle_agent_clarification(
         self,
@@ -1480,7 +1661,8 @@ class DailyVoiceAssistant:
             )
             if wav_path is None:
                 return "[用户在连续对话等待窗口内没有回答，请结束本轮并说明稍后可以再次唤醒补充。]"
-            answer = self.transcribe(wav_path).strip()
+            answer = self.transcribe_interruptibly(wav_path).strip()
+            self.raise_if_interrupted()
             if not answer:
                 return "[没有识别到用户的补充，请结束本轮并允许稍后再次唤醒。]"
             self.conversation_turn += 1
@@ -1499,6 +1681,8 @@ class DailyVoiceAssistant:
             self.write_state()
 
     def handle_streaming_tts_first_audio(self) -> None:
+        if self.interrupt_event.is_set():
+            return
         self.last_result = "speaking"
         self.write_state()
         log("Streaming TTS first audio submitted")
@@ -1515,6 +1699,7 @@ class DailyVoiceAssistant:
             if STREAM_TTS_ENABLED
             else None
         )
+        self.set_active_speech_session(speech_session)
         if visual_routed:
             log("Visual intent detected -> fresh camera-hub frame + Qwen vision")
             self.visual_request_active = True
@@ -1535,7 +1720,9 @@ class DailyVoiceAssistant:
             except Exception:
                 if speech_session is not None:
                     speech_session.abort()
+                self.raise_if_interrupted()
                 raise
+            self.raise_if_interrupted()
             if speech_session is not None:
                 speech_session.mark_llm_complete()
             if visual_routed:
@@ -1547,8 +1734,12 @@ class DailyVoiceAssistant:
             log(f"Hermes: {response}")
             log(f"Voice follow-up required={needs_follow_up}")
             streamed = speech_session.finish() if speech_session is not None else False
+            self.raise_if_interrupted()
             return response, needs_follow_up, streamed
         finally:
+            self.set_active_speech_session(None)
+            if self.interrupt_event.is_set() and speech_session is not None:
+                speech_session.abort()
             if visual_routed:
                 self.visual_request_active = False
                 vision_activity(False)
@@ -1572,6 +1763,7 @@ class DailyVoiceAssistant:
             )
             with local_opener.open(request, timeout=4.0) as response:
                 image_bytes = response.read(12 * 1024 * 1024 + 1)
+            self.raise_if_interrupted()
             if (
                 len(image_bytes) < 1024
                 or len(image_bytes) > 12 * 1024 * 1024
@@ -1600,7 +1792,24 @@ class DailyVoiceAssistant:
                     user_prompt=question,
                 )
 
-            raw_result = asyncio.run(analyze())
+            analysis_loop = asyncio.new_event_loop()
+            analysis_task = analysis_loop.create_task(analyze())
+            with self.barge_in_lock:
+                self.active_async_loop = analysis_loop
+                self.active_async_task = analysis_task
+            try:
+                raw_result = analysis_loop.run_until_complete(analysis_task)
+            except asyncio.CancelledError as exc:
+                raise InteractionInterrupted(
+                    "visual inference superseded by a newer wake word"
+                ) from exc
+            finally:
+                with self.barge_in_lock:
+                    if self.active_async_task is analysis_task:
+                        self.active_async_task = None
+                        self.active_async_loop = None
+                analysis_loop.close()
+            self.raise_if_interrupted()
             try:
                 payload = json.loads(raw_result)
             except (TypeError, json.JSONDecodeError) as exc:
@@ -1689,11 +1898,11 @@ class DailyVoiceAssistant:
         log(f"Local device command action={action} transcript={transcript}")
         return response
 
-    @staticmethod
-    def speak(response: str) -> None:
+    def speak(self, response: str) -> None:
         speech = clean_for_speech(response)
         if not speech:
             return
+
         async def stream_to_player() -> None:
             player = subprocess.Popen(
                 [
@@ -1711,25 +1920,36 @@ class DailyVoiceAssistant:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            self.set_active_player(player)
             try:
                 async for chunk in edge_tts.Communicate(
-                    speech, "zh-CN-XiaoxiaoNeural"
+                    speech, STREAM_TTS_VOICE
                 ).stream():
+                    self.raise_if_interrupted()
                     if chunk["type"] == "audio" and player.stdin is not None:
                         player.stdin.write(chunk["data"])
                         player.stdin.flush()
             finally:
-                if player.stdin is not None:
-                    player.stdin.close()
+                try:
+                    if player.stdin is not None:
+                        player.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
                 try:
                     return_code = player.wait(timeout=300)
                 except subprocess.TimeoutExpired:
                     player.terminate()
                     return_code = player.wait(timeout=5)
-                if return_code != 0:
+                self.set_active_player(None)
+                if return_code != 0 and not self.interrupt_event.is_set():
                     raise RuntimeError(f"ffplay exited with {return_code}")
 
-        asyncio.run(stream_to_player())
+        try:
+            asyncio.run(stream_to_player())
+        except Exception:
+            self.raise_if_interrupted()
+            raise
+        self.raise_if_interrupted()
 
     def interact(
         self,
@@ -1744,6 +1964,7 @@ class DailyVoiceAssistant:
         ):
             return
         camera_mode_at_start = self.visual_mode_active
+        self.interrupt_event = threading.Event()
         self.busy = True
         self.microphone.set_learning(False)
         self.last_error = None
@@ -1760,14 +1981,17 @@ class DailyVoiceAssistant:
         try:
             if wake is not None:
                 self.acknowledge_hardware_wake()
+            self.raise_if_interrupted()
             wav_path = self.record_until_silence()
+            self.raise_if_interrupted()
             if wav_path is None:
                 self.last_result = "no_speech"
                 expression("idle")
                 return
             self.last_result = "transcribing"
             self.write_state()
-            transcript = self.transcribe(wav_path)
+            transcript = self.transcribe_interruptibly(wav_path)
+            self.raise_if_interrupted()
             if not transcript:
                 self.last_result = "empty_transcript"
                 expression("idle")
@@ -1795,6 +2019,7 @@ class DailyVoiceAssistant:
                 else:
                     needs_follow_up = False
                     expression("happy", 2.5)
+                self.raise_if_interrupted()
                 self.last_result = "speaking"
                 self.write_state()
                 if response_streamed:
@@ -1803,6 +2028,7 @@ class DailyVoiceAssistant:
                     log("TTS playback started")
                     self.speak(response)
                     log("TTS playback completed")
+                self.raise_if_interrupted()
                 if not needs_follow_up:
                     self.last_result = "completed"
                     break
@@ -1821,13 +2047,17 @@ class DailyVoiceAssistant:
                         follow_up=True,
                         no_speech_timeout=FOLLOW_UP_NO_SPEECH_SECONDS,
                     )
+                    self.raise_if_interrupted()
                     if follow_up_wav is None:
                         self.last_result = "follow_up_timeout"
                         log("Voice follow-up window timed out")
                         break
                     self.last_result = "transcribing_follow_up"
                     self.write_state()
-                    current_transcript = self.transcribe(follow_up_wav).strip()
+                    current_transcript = self.transcribe_interruptibly(
+                        follow_up_wav
+                    ).strip()
+                    self.raise_if_interrupted()
                     if not current_transcript:
                         self.last_result = "empty_follow_up"
                         log("Whisper returned an empty follow-up transcript")
@@ -1847,6 +2077,11 @@ class DailyVoiceAssistant:
                         except FileNotFoundError:
                             pass
             self.interaction_count += 1
+        except InteractionInterrupted:
+            self.last_error = None
+            self.last_result = "interrupted_by_wake"
+            self.publish_speech_bubble(False)
+            log("Voice interaction interrupted by a newer wake word")
         except Exception as exc:
             self.last_error = str(exc)
             self.last_result = "error"
@@ -1864,8 +2099,7 @@ class DailyVoiceAssistant:
             self.conversation_turn = 0
             self.busy = False
             self.microphone.set_learning(True)
-            self.last_token = wake_token(load_wake())
-            if self.last_result != "error":
+            if self.last_result != "error" and not self.has_pending_wake():
                 expression("idle")
             self.write_state()
 
@@ -1874,6 +2108,7 @@ class DailyVoiceAssistant:
         now = time.monotonic()
         if not transcript or self.busy or now - self.last_trigger_monotonic < 1.0:
             return
+        self.interrupt_event = threading.Event()
         self.busy = True
         self.microphone.set_learning(False)
         self.last_error = None
@@ -1891,6 +2126,7 @@ class DailyVoiceAssistant:
                 response, _, response_streamed = self.ask_hermes(transcript)
             else:
                 expression("happy", 2.5)
+            self.raise_if_interrupted()
             self.last_result = "speaking"
             self.write_state()
             if response_streamed:
@@ -1899,8 +2135,14 @@ class DailyVoiceAssistant:
                 log("TTS playback started")
                 self.speak(response)
                 log("TTS playback completed")
+            self.raise_if_interrupted()
             self.interaction_count += 1
             self.last_result = "completed"
+        except InteractionInterrupted:
+            self.last_error = None
+            self.last_result = "interrupted_by_wake"
+            self.publish_speech_bubble(False)
+            log("Text interaction interrupted by a newer wake word")
         except Exception as exc:
             self.last_error = str(exc)
             self.last_result = "error"
@@ -1909,7 +2151,6 @@ class DailyVoiceAssistant:
         finally:
             self.busy = False
             self.microphone.set_learning(True)
-            self.last_token = wake_token(load_wake())
             self.write_state()
 
     def set_visual_mode(self, active: bool) -> None:
@@ -1922,7 +2163,7 @@ class DailyVoiceAssistant:
         token = wake_token(wake)
         if token and token != self.last_token:
             self.last_token = token
-            self.interact(wake)
+            self.interact(wake, bypass_debounce=True)
 
 
 def main() -> int:
@@ -1949,10 +2190,22 @@ def main() -> int:
         name="whisper-base-warmup",
         daemon=True,
     ).start()
+    threading.Thread(
+        target=assistant.monitor_hardware_wake,
+        name="hardware-wake-barge-in",
+        daemon=True,
+    ).start()
     assistant.write_state()
     log("Daily voice assistant ready; hardware wake phrase: 猪逼猪逼")
     try:
         while assistant.running:
+            pending_wake = assistant.pop_pending_wake()
+            if pending_wake is not None:
+                assistant.interact(
+                    pending_wake,
+                    bypass_debounce=True,
+                )
+                continue
             ready, _, _ = select.select([control], [], [], 0.15)
             if ready:
                 try:

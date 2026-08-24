@@ -42,9 +42,19 @@ def main() -> int:
     if caption.get("final_engine") != "faster-whisper-base":
         print("final speech recognizer is not ready")
         return 1
+    streaming_tts = payload.get("streaming_tts")
+    if not isinstance(streaming_tts, dict) or not streaming_tts.get("enabled"):
+        print("streaming TTS is not enabled")
+        return 1
+    barge_in = payload.get("wake_barge_in")
+    if not isinstance(barge_in, dict) or not barge_in.get("enabled"):
+        print("wake-word barge-in is not enabled")
+        return 1
     print(
-        "streaming caption ready "
-        f"engine={caption.get('draft_engine')} model={model_directory}"
+        "voice interaction chain ready "
+        f"caption={caption.get('draft_engine')} "
+        f"stream_tts={streaming_tts.get('strategy')} barge_in=enabled "
+        f"model={model_directory}"
     )
     return 0
 
