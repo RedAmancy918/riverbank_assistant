@@ -25,6 +25,7 @@
   "radial_menu_offset_mm": 3.0,
   "volume_slider_idle_seconds": 1.0,
   "volume_slider_transition_seconds": 0.28,
+  "settings_transition_seconds": 0.26,
   "camera_snapshot_url": "http://127.0.0.1:19733/snapshot",
   "camera_view_fps": 30,
   "camera_gallery_dir": "${RIVERBANK_DATA}/camera/gallery",

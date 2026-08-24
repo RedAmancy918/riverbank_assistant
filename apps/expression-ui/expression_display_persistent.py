@@ -1157,6 +1157,19 @@ class PersistentExpressionDisplay:
         self.settings_last_interaction_at = 0.0
         self.settings_card_cache: OrderedDict[tuple, object] = OrderedDict()
         self.settings_card_cache_limit = 16
+        self.settings_background_cache: object | None = None
+        self.settings_transition_seconds = max(
+            0.16,
+            min(float(config.get("settings_transition_seconds", 0.26)), 0.45),
+        )
+        self.settings_transition_active = False
+        self.settings_transition_started_at = 0.0
+        self.settings_transition_direction = 0
+        self.settings_transition_from_section: str | None = None
+        self.settings_transition_to_section: str | None = None
+        self.settings_transition_from_surface: object | None = None
+        self.settings_transition_to_surface: object | None = None
+        self.settings_transition_exits_settings = False
         self.last_overlay_redraw = 0.0
         self.camera_indicator_angle_degrees = max(
             -170.0,
@@ -3107,6 +3120,9 @@ class PersistentExpressionDisplay:
 
     def open_settings(self) -> None:
         now = time.monotonic()
+        source_surface = self.screen.copy()
+        animate_entry = not self.settings_active
+        self.clear_settings_transition()
         self.settings_active = True
         self.settings_section = None
         self.settings_pointer_target = None
@@ -3115,13 +3131,38 @@ class PersistentExpressionDisplay:
         self.token_popup_visible = False
         self.note_screensaver_activity(now)
         self.request_system_status_refresh(now)
+        if animate_entry:
+            target_surface = self.render_settings_page_surface(None)
+            self.begin_settings_transition(
+                source_surface,
+                target_surface,
+                "expression",
+                None,
+                1,
+            )
         self.needs_redraw = True
         self.write_state()
         log("settings page opened")
 
-    def close_settings(self) -> None:
+    def close_settings(self, animated: bool = True) -> None:
         if not self.settings_active:
             return
+        if animated and not self.settings_transition_active:
+            self.begin_settings_transition(
+                self.screen.copy(),
+                self.render_expression_surface(),
+                self.settings_section,
+                "expression",
+                -1,
+                exits_settings=True,
+            )
+            self.settings_pointer_target = None
+            self.settings_last_interaction_at = time.monotonic()
+            self.needs_redraw = True
+            self.write_state()
+            log("settings page exit transition started")
+            return
+        self.clear_settings_transition()
         self.settings_active = False
         self.settings_section = None
         self.settings_pointer_target = None
@@ -3130,6 +3171,65 @@ class PersistentExpressionDisplay:
         self.needs_redraw = True
         self.write_state()
         log("settings page closed")
+
+    def clear_settings_transition(self) -> None:
+        self.settings_transition_active = False
+        self.settings_transition_started_at = 0.0
+        self.settings_transition_direction = 0
+        self.settings_transition_from_section = None
+        self.settings_transition_to_section = None
+        self.settings_transition_from_surface = None
+        self.settings_transition_to_surface = None
+        self.settings_transition_exits_settings = False
+
+    def begin_settings_transition(
+        self,
+        source_surface: object,
+        target_surface: object,
+        source_label: str | None,
+        target_label: str | None,
+        direction: int,
+        exits_settings: bool = False,
+    ) -> None:
+        self.settings_transition_active = True
+        self.settings_transition_started_at = time.monotonic()
+        self.settings_transition_direction = 1 if direction >= 0 else -1
+        self.settings_transition_from_section = source_label
+        self.settings_transition_to_section = target_label
+        self.settings_transition_from_surface = source_surface
+        self.settings_transition_to_surface = target_surface
+        self.settings_transition_exits_settings = exits_settings
+        self.settings_pointer_target = None
+        self.needs_redraw = True
+
+    def start_settings_transition(
+        self,
+        target_section: str | None,
+        direction: int,
+    ) -> bool:
+        if (
+            self.settings_transition_active
+            or target_section == self.settings_section
+        ):
+            return False
+        source_section = self.settings_section
+        source_surface = self.screen.copy()
+        target_surface = self.render_settings_page_surface(target_section)
+        self.settings_section = target_section
+        self.begin_settings_transition(
+            source_surface,
+            target_surface,
+            source_section,
+            target_section,
+            direction,
+        )
+        log(
+            "settings transition started "
+            f"from={source_section or 'root'} "
+            f"to={target_section or 'root'} "
+            f"direction={self.settings_transition_direction}"
+        )
+        return True
 
     def settings_card_rects(self) -> dict[str, object]:
         left = round(self.width * 0.15)
@@ -3201,7 +3301,7 @@ class PersistentExpressionDisplay:
             if self.settings_section is None:
                 self.close_settings()
                 return
-            self.settings_section = None
+            self.start_settings_transition(None, -1)
             log("settings detail returned to root")
         elif target == "wifi_toggle":
             current = (
@@ -3211,7 +3311,7 @@ class PersistentExpressionDisplay:
             )
             self.request_wifi_toggle(not current)
         elif target in {"wifi", "bluetooth", "version", "system"}:
-            self.settings_section = target
+            self.start_settings_transition(target, 1)
             log(f"settings detail opened section={target}")
         self.settings_pointer_target = None
         self.needs_redraw = True
@@ -3455,16 +3555,98 @@ class PersistentExpressionDisplay:
             ("界面", f"{self.render_fps:.1f} FPS" if self.render_fps else "启动中"),
         )
 
-    def draw_settings(self, _now: float) -> None:
-        self.screen.fill((0, 0, 0))
-        center = (self.width // 2, self.height // 2)
-        self.draw_aa_ring(
-            self.screen,
-            (42, 120, 148, 32),
-            center,
-            min(self.width, self.height) // 2 - 10,
-            width=3,
+    def render_settings_page_surface(self, section: str | None) -> object:
+        original_screen = self.screen
+        original_section = self.settings_section
+        original_pointer_down = self.pointer_down
+        original_pointer_target = self.settings_pointer_target
+        surface = self.pygame.Surface(self.target_size)
+        try:
+            self.screen = surface
+            self.settings_section = section
+            self.pointer_down = False
+            self.settings_pointer_target = None
+            self.draw_settings_page(time.monotonic())
+        finally:
+            self.screen = original_screen
+            self.settings_section = original_section
+            self.pointer_down = original_pointer_down
+            self.settings_pointer_target = original_pointer_target
+        return surface
+
+    def render_expression_surface(self) -> object:
+        animation = self.current_animation()
+        frame = animation.frames[self.frame_index % len(animation.frames)]
+        surface = self.pygame.Surface(self.target_size)
+        surface.fill(animation.background)
+        surface.blit(frame, (0, 0))
+        return surface
+
+    def settings_background_surface(self) -> object:
+        if self.settings_background_cache is None:
+            background = self.pygame.Surface(self.target_size)
+            background.fill((0, 0, 0))
+            self.draw_aa_ring(
+                background,
+                (42, 120, 148, 32),
+                (self.width // 2, self.height // 2),
+                min(self.width, self.height) // 2 - 10,
+                width=3,
+            )
+            self.settings_background_cache = background
+        return self.settings_background_cache
+
+    def draw_settings(self, now: float) -> None:
+        if not self.settings_transition_active:
+            self.draw_settings_page(now)
+            return
+        source = self.settings_transition_from_surface
+        target = self.settings_transition_to_surface
+        if source is None or target is None:
+            self.clear_settings_transition()
+            self.draw_settings_page(now)
+            return
+        raw = min(
+            1.0,
+            max(
+                0.0,
+                (now - self.settings_transition_started_at)
+                / self.settings_transition_seconds,
+            ),
         )
+        if raw >= 1.0:
+            exits_settings = self.settings_transition_exits_settings
+            source_label = self.settings_transition_from_section
+            target_label = self.settings_transition_to_section
+            self.screen.blit(target, (0, 0))
+            self.clear_settings_transition()
+            if exits_settings:
+                self.settings_active = False
+                self.settings_section = None
+                self.settings_pointer_target = None
+                self.settings_last_interaction_at = now
+                self.note_screensaver_activity(now)
+                self.write_state()
+                log("settings page exit transition completed")
+            else:
+                self.write_state()
+                log(
+                    "settings transition completed "
+                    f"from={source_label or 'root'} "
+                    f"to={target_label or 'root'}"
+                )
+            return
+        eased = raw * raw * (3.0 - 2.0 * raw)
+        travel = self.width
+        direction = self.settings_transition_direction
+        source_x = -round(direction * travel * eased)
+        target_x = round(direction * travel * (1.0 - eased))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(source, (source_x, 0))
+        self.screen.blit(target, (target_x, 0))
+
+    def draw_settings_page(self, _now: float) -> None:
+        self.screen.blit(self.settings_background_surface(), (0, 0))
         if self.settings_section is None:
             self.draw_settings_navigation("设置")
             rects = self.settings_card_rects()
@@ -5663,6 +5845,10 @@ class PersistentExpressionDisplay:
         self.edge_exit_ready = False
         self.edge_exit_progress = 0.0
         if self.settings_active:
+            if self.settings_transition_active:
+                self.pointer_down = False
+                self.settings_pointer_target = None
+                return
             self.settings_pointer_target = self.settings_target_at(position)
             self.settings_last_interaction_at = now
             self.needs_redraw = True
@@ -6268,6 +6454,15 @@ class PersistentExpressionDisplay:
                 "version": self.system_status.app_version,
                 "read_only": False,
                 "auto_refresh_seconds": 2.0,
+                "transition": {
+                    "active": self.settings_transition_active,
+                    "duration_ms": round(self.settings_transition_seconds * 1000),
+                    "direction": self.settings_transition_direction,
+                    "from": self.settings_transition_from_section,
+                    "to": self.settings_transition_to_section,
+                    "exits_settings": self.settings_transition_exits_settings,
+                    "style": "cached-carousel-slide",
+                },
                 "wifi_control": {
                     "enabled": self.system_status.wifi_enabled,
                     "pending": self.wifi_toggle_future is not None,
@@ -6414,6 +6609,11 @@ class PersistentExpressionDisplay:
             self.wifi_toggle_error = ""
             self.needs_redraw = True
         if self.settings_active:
+            if (
+                self.settings_transition_active
+                and now - self.last_overlay_redraw >= self.render_interval
+            ):
+                self.needs_redraw = True
             if self.needs_redraw:
                 self.draw()
             self.refresh_always_on_top()
