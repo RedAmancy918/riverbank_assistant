@@ -1,0 +1,13 @@
+[Unit]
+Description=Disable autosuspend for the RiverBank USB camera
+After=systemd-udev-settle.service
+Before=camera-hub.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/udevadm trigger --action=change --subsystem-match=usb --attr-match=idVendor=2ce3 --attr-match=idProduct=c670
+ExecStart=/usr/bin/udevadm settle
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

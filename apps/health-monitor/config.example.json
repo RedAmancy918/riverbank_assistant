@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "interval_seconds": 20,
+  "startup_grace_seconds": 30,
+  "failure_threshold": 2,
+  "repeat_alert_seconds": 1800,
+  "popup_timeout_seconds": 10,
+  "notify_startup_success": false,
+  "status_file": "/var/lib/riverbank-health-monitor/status.json",
+  "desktop": {
+    "display": ":0",
+    "xauthority": "@RIVERBANK_HOME@/.Xauthority",
+    "runtime_dir": "/run/user/@RIVERBANK_UID@",
+    "home": "@RIVERBANK_HOME@",
+    "zenity": "/usr/bin/zenity"
+  },
+  "checks": [
+    {
+      "id": "camera-hub-service",
+      "name": "摄像头共享中枢服务",
+      "type": "systemd_service",
+      "target": "camera-hub.service"
+    },
+    {
+      "id": "camera-stream",
+      "name": "摄像头实时画面",
+      "type": "http_json",
+      "target": "http://127.0.0.1:19733/state",
+      "json_path": "result.source.online",
+      "equals": true
+    },
+    {
+      "id": "hermes-gateway",
+      "name": "Hermes 网关",
+      "type": "systemd_service",
+      "target": "hermes-gateway.service"
+    },
+    {
+      "id": "hermes-voice",
+      "name": "Hermes Daily 语音助手",
+      "type": "systemd_service",
+      "target": "hermes-voice.service"
+    },
+    {
+      "id": "expression-display",
+      "name": "小屏表情播放服务",
+      "type": "systemd_service",
+      "target": "expression-display.service"
+    },
+    {
+      "id": "reboot-request-path",
+      "name": "小屏确认重启执行器",
+      "type": "systemd_service",
+      "target": "riverbank-reboot-request.path"
+    },
+    {
+      "id": "dsi-touch-hardware",
+      "name": "DSI Goodix 触摸屏",
+      "type": "path",
+      "target": "/dev/input/by-path/platform-1f00080000.i2c-event"
+    },
+    {
+      "id": "hermes-expression-bridge",
+      "name": "Hermes 表情联动服务",
+      "type": "systemd_service",
+      "target": "hermes-expression-bridge.service"
+    },
+    {
+      "id": "listengo-mic-service",
+      "name": "六麦阵列控制服务",
+      "type": "systemd_service",
+      "target": "listengo-mic.service"
+    },
+    {
+      "id": "listengo-mic-hardware",
+      "name": "六麦阵列 USB 与控制链路",
+      "type": "command",
+      "command": [
+        "/usr/local/bin/listengo-micctl",
+        "health"
+      ]
+    },
+    {
+      "id": "paper-radar-service",
+      "name": "论文日报网页服务",
+      "type": "systemd_service",
+      "target": "paper-radar-web.service"
+    },
+    {
+      "id": "paper-radar-page",
+      "name": "论文日报页面",
+      "type": "http",
+      "target": "http://127.0.0.1:19732/healthz"
+    },
+    {
+      "id": "paper-radar-daily-integrity",
+      "name": "论文日报日期、数量与定时任务",
+      "type": "command",
+      "command": [
+        "@RIVERBANK_REPO@/apps/paper-radar/.venv/bin/python",
+        "@RIVERBANK_REPO@/apps/paper-radar/scripts/health_check.py"
+      ],
+      "interval_seconds": 300,
+      "timeout_seconds": 15
+    },
+    {
+      "id": "tailscale",
+      "name": "Tailscale 服务",
+      "type": "systemd_service",
+      "target": "tailscaled.service"
+    },
+    {
+      "id": "viewturbo-service",
+      "name": "ViewTurbo VPN 服务",
+      "type": "systemd_service",
+      "target": "viewturbo.service",
+      "enabled": false
+    },
+    {
+      "id": "vpn-proxy-port",
+      "name": "本地 VPN 代理端口",
+      "type": "tcp",
+      "target": "127.0.0.1:15732",
+      "enabled": false
+    },
+    {
+      "id": "vpn-proxy-egress",
+      "name": "VPN 代理外网访问",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/health-monitor/proxy_egress_check.py"
+      ],
+      "interval_seconds": 300,
+      "timeout_seconds": 15,
+      "enabled": false
+    },
+    {
+      "id": "nvme-storage",
+      "name": "NVMe 数据盘",
+      "type": "mount",
+      "target": "@RIVERBANK_DATA@"
+    },
+    {
+      "id": "hailo-device",
+      "name": "Hailo-8 推理设备",
+      "type": "path",
+      "target": "/dev/hailo0"
+    },
+    {
+      "id": "face-tracker-service",
+      "name": "Hailo 人脸追踪服务",
+      "type": "systemd_service",
+      "target": "riverbank-face-tracker.service"
+    },
+    {
+      "id": "face-tracker-state",
+      "name": "人脸追踪实时结果",
+      "type": "fresh_path",
+      "target": "/run/riverbank-face-tracker/state.json",
+      "max_age_seconds": 15
+    }
+  ]
+}

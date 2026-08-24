@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="VLA、World Model 与机器人研究的每日精选与深度解读。">
+  <title>{{ report.headline }} · 具身智讯</title>
+  <link rel="stylesheet" href="/assets/site.css">
+  <script defer src="/assets/site.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到正文</a>
+  <div class="reading-progress" aria-hidden="true"><span></span></div>
+  <main class="shell" id="content">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="具身智讯首页">
+        <span class="brand-mark">EI</span>
+        <span><strong>具身智讯</strong><small>Embodied Intelligence Daily</small></span>
+      </a>
+      <nav class="site-nav" aria-label="主要导航">
+        {% if is_latest %}
+        <button class="focus-toggle" id="special-focus-toggle" type="button" aria-expanded="false" aria-pressed="false" aria-controls="special-focus-console">
+          <span class="focus-toggle-track" aria-hidden="true"><span></span></span>
+          <span class="focus-toggle-label">明日焦点</span>
+        </button>
+        {% endif %}
+        <a class="archive-link" href="/candidates/">候选论文</a>
+        <a class="archive-link" href="/archive/">历史日报 <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
+
+    {% if is_latest %}
+    <section class="special-focus-console" id="special-focus-console" aria-hidden="true">
+      <div class="special-focus-console-inner">
+        <div class="focus-console-copy">
+          <p>ONE-SHOT SEARCH</p>
+          <h2>为明天的日报指定一个方向</h2>
+          <span>明天 08:00 额外检索一次，最多形成 5 篇“特别关注”；成功生成后自动失效。</span>
+        </div>
+        <form class="focus-form" id="special-focus-form">
+          <label for="special-focus-description">关键词或自然语言描述</label>
+          <textarea id="special-focus-description" name="description" rows="3" minlength="2" maxlength="800" placeholder="例如：关注能从视频学习物理动力学、并可用于机器人规划的新型 JEPA 工作" required></textarea>
+          <div class="focus-form-actions">
+            <button class="focus-submit" id="special-focus-submit" type="submit"><span id="special-focus-submit-label">加入明日检索</span> <span aria-hidden="true">→</span></button>
+            <button class="focus-cancel" id="special-focus-cancel" type="button" hidden>关闭并清空全部</button>
+          </div>
+          <p class="focus-form-status" id="special-focus-status" role="status" aria-live="polite">正在读取安排状态…</p>
+        </form>
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">DAILY BRIEFING · {{ report.display_date }}</p>
+        {% if is_latest %}
+        <aside class="focus-pending-banner" id="special-focus-pending-banner" aria-live="polite" hidden>
+          <div class="focus-pending-heading">
+            <span>明日焦点已提交</span>
+            <span id="special-focus-pending-count">待执行</span>
+          </div>
+          <ul id="special-focus-pending-list"></ul>
+        </aside>
+        {% endif %}
+        <h1>{{ report.headline }}</h1>
+        <p class="dek">{{ report.summary }}</p>
+      </div>
+      <aside class="radar-card" aria-label="日报范围">
+        <span class="radar-orbit orbit-one"></span><span class="radar-orbit orbit-two"></span>
+        <div class="radar-center">EI</div>
+        <p>VLA · WORLD MODEL<br>ROBOT LEARNING</p>
+      </aside>
+      <dl class="stats" aria-label="今日日报统计">
+        <div><dt><a href="/candidates/">{{ "%02d"|format(report.candidate_count) }}</a></dt><dd><a href="/candidates/">候选论文</a></dd></div>
+        <div><dt>{{ "%02d"|format(report.deep_read_count) }}</dt><dd>深度阅读</dd></div>
+        <div><dt><a href="#industry">{{ "%02d"|format(report.industry_updates|length) }}</a></dt><dd><a href="#industry">产业动态</a></dd></div>
+      </dl>
+    </section>
+
+    {% if report.special_focus_request %}
+    <section class="latest special-focus-results" aria-labelledby="special-focus-heading">
+      <div class="section-heading">
+        <div><p>ONE-SHOT FOCUS</p><h2 id="special-focus-heading">特别关注</h2></div>
+        <p class="section-note">一次性定向检索 · 额外最多 {{ report.max_special_focus_papers }} 篇</p>
+      </div>
+      <blockquote class="focus-brief">{{ report.special_focus_request.description }}</blockquote>
+      <div class="paper-list focus-paper-list">
+      {% for paper in report.special_focus %}
+        <article class="paper-card special-focus-card" id="focus-paper-{{ loop.index }}">
+          <div class="paper-index">F{{ "%02d"|format(loop.index) }}</div>
+          <div class="paper-body">
+            <div class="paper-meta">
+              <span class="paper-tag">{{ paper.tags|join(' · ') }}</span>
+              <span class="depth-badge {{ 'full' if paper.reading_depth == 'full' else 'abstract' }}">
+                {{ '全文精读' if paper.reading_depth == 'full' else '摘要速览' }}
+              </span>
+              <span class="score">相关度 {{ paper.relevance_score }}</span>
+            </div>
+            <h3><a href="{{ paper.url }}" target="_blank" rel="noreferrer">{{ paper.title }}</a></h3>
+            <p class="authors">{{ paper.authors|join(' · ') }}</p>
+            <p class="paper-summary">{{ paper.summary }}</p>
+            <div class="innovation">
+              <span>核心创新</span>
+              <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
+            </div>
+            {% if paper.method or paper.results or paper.limitations %}
+            <details class="deep-notes">
+              <summary>展开方法、实验与判断</summary>
+              <div class="deep-grid">
+                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
+                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
+                {% if paper.limitations %}<section><h4>局限与价值</h4><p>{{ paper.limitations }}</p></section>{% endif %}
+              </div>
+            </details>
+            {% endif %}
+          </div>
+          <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
+        </article>
+      {% else %}
+        <div class="empty-state"><strong>本次没有合格结果</strong><p>已按你的描述完成定向检索，但没有为了填满栏目而降低匹配要求。</p></div>
+      {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="latest" aria-labelledby="papers-heading">
+      <div class="section-heading">
+        <div><p>RESEARCH NOTES</p><h2 id="papers-heading">今日精选</h2></div>
+        <p class="section-note">{{ report.report_score_threshold }} 分以上 · 最多 {{ report.max_report_papers }} 篇 · 优先全文阅读</p>
+      </div>
+
+      <div class="paper-list">
+      {% for paper in report.papers %}
+        <article class="paper-card" id="paper-{{ loop.index }}">
+          <div class="paper-index">{{ "%02d"|format(loop.index) }}</div>
+          <div class="paper-body">
+            <div class="paper-meta">
+              <span class="paper-tag">{{ paper.tags|join(' · ') }}</span>
+              <span class="depth-badge {{ 'full' if paper.reading_depth == 'full' else 'abstract' }}">
+                {{ '全文精读' if paper.reading_depth == 'full' else '摘要速览' }}
+              </span>
+              <span class="score">相关度 {{ paper.relevance_score }}</span>
+            </div>
+            <h3><a href="{{ paper.url }}" target="_blank" rel="noreferrer">{{ paper.title }}</a></h3>
+            <p class="authors">{{ paper.authors|join(' · ') }}</p>
+            <p class="paper-summary">{{ paper.summary }}</p>
+            <div class="innovation">
+              <span>核心创新</span>
+              <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
+            </div>
+            {% if paper.method or paper.results or paper.limitations %}
+            <details class="deep-notes">
+              <summary>展开方法、实验与判断</summary>
+              <div class="deep-grid">
+                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
+                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
+                {% if paper.limitations %}<section><h4>局限与价值</h4><p>{{ paper.limitations }}</p></section>{% endif %}
+              </div>
+            </details>
+            {% endif %}
+          </div>
+          <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
+        </article>
+      {% else %}
+        <div class="empty-state"><strong>近半年暂无未收录的合格研究</strong><p>检索正常完成，没有为了填满页面而降低筛选标准。</p></div>
+      {% endfor %}
+      </div>
+    </section>
+
+    {% if report.potential_methods %}
+    <section class="latest potential-section" aria-labelledby="methods-heading">
+      <div class="section-heading">
+        <div><p>METHOD WATCH</p><h2 id="methods-heading">潜在方法</h2></div>
+        <p class="section-note">尚无机器人实验也可收录 · 迁移路径明确标注为推断</p>
+      </div>
+      <div class="paper-list">
+      {% for paper in report.potential_methods %}
+        <article class="paper-card potential-card">
+          <div class="paper-index">M{{ "%02d"|format(loop.index) }}</div>
+          <div class="paper-body">
+            <div class="paper-meta">
+              <span class="paper-tag">{{ paper.tags|join(' · ') }}</span>
+              <span class="depth-badge {{ 'full' if paper.reading_depth == 'full' else 'abstract' }}">
+                {{ '全文精读' if paper.reading_depth == 'full' else '摘要速览' }}
+              </span>
+              <span class="score">相关度 {{ paper.relevance_score }}</span>
+            </div>
+            <h3><a href="{{ paper.url }}" target="_blank" rel="noreferrer">{{ paper.title }}</a></h3>
+            <p class="authors">{{ paper.authors|join(' · ') }}</p>
+            <p class="paper-summary">{{ paper.summary }}</p>
+            <div class="innovation">
+              <span>核心创新</span>
+              <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
+            </div>
+            <aside class="inference-note"><strong>潜在机器人影响</strong><p>{{ paper.robotics_outlook }}</p></aside>
+            {% if paper.method or paper.results or paper.limitations %}
+            <details class="deep-notes">
+              <summary>展开方法、实验与局限</summary>
+              <div class="deep-grid">
+                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
+                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
+                {% if paper.limitations %}<section><h4>局限</h4><p>{{ paper.limitations }}</p></section>{% endif %}
+              </div>
+            </details>
+            {% endif %}
+          </div>
+          <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
+        </article>
+      {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if report.industry_updates %}
+    <section class="industry" id="industry" aria-labelledby="industry-heading">
+      <div class="section-heading inverse"><div><p>LAB & INDUSTRY</p><h2 id="industry-heading">产业与实验室动态</h2></div></div>
+      <div class="industry-grid">
+      {% for item in report.industry_updates %}
+        <a class="industry-card" href="{{ item.url }}" target="_blank" rel="noreferrer">
+          <span>{{ item.source }}</span><h3>{{ item.title }}</h3><p>{{ item.summary }}</p><b>查看来源 ↗</b>
+        </a>
+      {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <footer>
+      <p>具身智讯 · 由 Hermes 每日筛选与整理</p>
+      <p>{{ report.date }} · <a href="/archive/">查看全部 {{ report.archive_count }} 期</a></p>
+    </footer>
+  </main>
+</body>
+</html>

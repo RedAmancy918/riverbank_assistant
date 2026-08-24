@@ -1,0 +1,31 @@
+[Unit]
+Description=RiverBank ListenGo microphone control and direction service
+After=sound.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+SupplementaryGroups=dialout audio
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/python3 /usr/local/lib/listengo-mic/listengo_daemon.py --control-device /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --audio-card-name L6Microphone --runtime-dir /run/listengo-mic
+Restart=always
+RestartSec=2
+RuntimeDirectory=listengo-mic
+RuntimeDirectoryMode=0750
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/run/listengo-mic
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

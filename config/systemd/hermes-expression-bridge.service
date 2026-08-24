@@ -1,0 +1,24 @@
+[Unit]
+Description=RiverBank Hermes voice-to-expression bridge
+After=expression-display.service hermes-voice.service
+Requires=expression-display.service
+Wants=hermes-voice.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+WorkingDirectory=@RIVERBANK_REPO@/apps/expression-ui
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/expression-ui/hermes_expression_bridge.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=expression-display.service

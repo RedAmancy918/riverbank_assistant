@@ -1,0 +1,33 @@
+[Unit]
+Description=RiverBank DSI graphical boot handoff
+After=display-manager.service
+Wants=display-manager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_HOME=@RIVERBANK_HOME@"
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=@RIVERBANK_HOME@/.Xauthority"
+Environment="XDG_RUNTIME_DIR=/run/user/@RIVERBANK_UID@"
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="SDL_VIDEODRIVER=wayland"
+Environment="SDL_VIDEO_WAYLAND_WMCLASS=RiverBankBootHandoff"
+Environment="PYGAME_HIDE_SUPPORT_PROMPT=1"
+Environment="RIVERBANK_OUTPUT=DSI-2"
+Environment="RIVERBANK_DISPLAY_SIZE=800x800"
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/expression-ui/boot_handoff.py
+Restart=on-failure
+RestartSec=0.2
+TimeoutStartSec=60
+TimeoutStopSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+StandardOutput=journal
+StandardError=journal

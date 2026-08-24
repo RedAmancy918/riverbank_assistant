@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for a confirmed RiverBank DSI reboot request
+
+[Path]
+PathExists=/run/riverbank-expression/reboot.request
+Unit=riverbank-reboot-request.service
+
+[Install]
+WantedBy=paths.target

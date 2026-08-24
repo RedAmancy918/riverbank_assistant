@@ -1,0 +1,38 @@
+[Unit]
+Description=RiverBank Hailo SCRFD persistent face tracker
+After=camera-hub.service hailort.service
+Requires=camera-hub.service hailort.service
+RequiresMountsFor=@RIVERBANK_DATA@
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+SupplementaryGroups=video
+WorkingDirectory=/run/riverbank-face-tracker
+RuntimeDirectory=riverbank-face-tracker
+RuntimeDirectoryMode=0750
+Environment="PYTHONUNBUFFERED=1"
+Environment="XDG_CACHE_HOME=/run/riverbank-face-tracker/cache"
+Environment="XDG_CONFIG_HOME=/run/riverbank-face-tracker/config"
+Environment="RIVERBANK_DATA=@RIVERBANK_DATA@"
+Environment="HAILO_ENV_FILE=@RIVERBANK_DATA@/ai/apps/hailo-rpi5-examples/.env"
+Environment="RIVERBANK_FACE_MODEL=@RIVERBANK_DATA@/ai/models/face/scrfd_2.5g_hailo8_v2.14.hef"
+Environment="RIVERBANK_FACE_POSTPROCESS=@RIVERBANK_DATA@/ai/resources/so/libscrfd_v2_14.so"
+Environment="RIVERBANK_FACE_CONFIG=@RIVERBANK_DATA@/ai/models/face/scrfd_640.json"
+ExecStart=@RIVERBANK_HAILO_VENV@/bin/python @RIVERBANK_REPO@/apps/face-tracker/face_tracker.py --input http://127.0.0.1:19733/stream --hef-path @RIVERBANK_DATA@/ai/models/face/scrfd_2.5g_hailo8_v2.14.hef --arch hailo8 --disable-sync --frame-rate 30
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/run/riverbank-face-tracker @RIVERBANK_HOME@/.hailo/hailort
+
+[Install]
+WantedBy=multi-user.target

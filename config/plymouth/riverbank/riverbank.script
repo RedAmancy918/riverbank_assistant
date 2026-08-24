@@ -1,0 +1,50 @@
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+screen_width = Window.GetWidth();
+screen_height = Window.GetHeight();
+
+# The DSI panel is a physical circle even though DRM exposes an 800x800
+# framebuffer.  Use a compact, vertically stacked mark there so no important
+# content falls into the clipped corners.  Wide HDMI outputs keep the complete
+# company wordmark.
+if (screen_width < screen_height * 1.35)
+{
+    logo = Image("RiverBank-compact.png");
+    target_width = screen_width * 0.70;
+    if (target_width > screen_height * 0.70)
+    {
+        target_width = screen_height * 0.70;
+    }
+    target_height = target_width;
+}
+else
+{
+    logo = Image("RiverBankco-white.png");
+    logo_width = logo.GetWidth();
+    logo_height = logo.GetHeight();
+    target_width = screen_width * 0.78;
+    scale = target_width / logo_width;
+    target_height = logo_height * scale;
+
+    if (target_height > screen_height * 0.28)
+    {
+        target_height = screen_height * 0.28;
+        scale = target_height / logo_height;
+        target_width = logo_width * scale;
+    }
+}
+
+resized = logo.Scale(target_width, target_height);
+sprite = Sprite(resized);
+sprite.SetPosition(
+    (screen_width - target_width) / 2,
+    (screen_height - target_height) / 2,
+    100
+);
+
+fun message_callback(text)
+{
+}
+
+Plymouth.SetUpdateStatusFunction(message_callback);

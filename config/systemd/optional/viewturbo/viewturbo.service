@@ -1,0 +1,25 @@
+[Unit]
+Description=ViewTurbo VPN proxy
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+Before=hermes-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=@RIVERBANK_HOME@
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="USER=@RIVERBANK_USER@"
+Environment="LOGNAME=@RIVERBANK_USER@"
+Environment="XDG_CONFIG_HOME=@RIVERBANK_HOME@/.config"
+ExecStart=/usr/local/bin/viewturbocore -server=true
+ExecStartPost=/usr/sbin/runuser -u @RIVERBANK_USER@ -- /usr/bin/env HOME=@RIVERBANK_HOME@ USER=@RIVERBANK_USER@ LOGNAME=@RIVERBANK_USER@ XDG_CONFIG_HOME=@RIVERBANK_HOME@/.config /usr/local/bin/viewturbocore -start
+ExecStartPost=/bin/sh -c 'i=0; until /usr/bin/ss -ltn | /usr/bin/grep -q "127.0.0.1:15732"; do i=$$((i + 1)); test "$$i" -ge 60 && exit 1; /usr/bin/sleep 1; done'
+ExecStop=/usr/sbin/runuser -u @RIVERBANK_USER@ -- /usr/bin/env HOME=@RIVERBANK_HOME@ USER=@RIVERBANK_USER@ LOGNAME=@RIVERBANK_USER@ XDG_CONFIG_HOME=@RIVERBANK_HOME@/.config /usr/local/bin/viewturbocore -stop
+Restart=always
+RestartSec=5
+TimeoutStartSec=75
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

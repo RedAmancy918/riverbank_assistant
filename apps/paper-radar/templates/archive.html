@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="具身智讯历史日报归档。"><title>历史日报 · 具身智讯</title>
+  <link rel="stylesheet" href="/assets/site.css"><script defer src="/assets/site.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到正文</a>
+  <main class="shell archive-shell" id="content">
+    <header class="site-header">
+      <a class="brand" href="/"><span class="brand-mark">EI</span><span><strong>具身智讯</strong><small>Embodied Intelligence Daily</small></span></a>
+      <nav class="site-nav" aria-label="主要导航"><a class="archive-link" href="/candidates/">候选论文</a><a class="archive-link" href="/">返回最新日报 ←</a></nav>
+    </header>
+    <section class="archive-hero"><p class="eyebrow">ARCHIVE</p><h1>历史日报</h1><p>每天只把最新一期放在首页；所有旧日报在这里按日期归档。</p></section>
+    <section class="archive-list" aria-label="历史日报列表">
+    {% for entry in entries %}
+      <a class="archive-row" href="{{ entry.url }}">
+        <time datetime="{{ entry.date }}">{{ entry.date }}</time>
+        <div><h2>{{ entry.headline }}</h2><p>{{ entry.summary }}</p></div>
+        <dl><div><dt>{{ entry.paper_count }}</dt><dd>论文</dd></div><div><dt>{{ entry.deep_count }}</dt><dd>精读</dd></div></dl>
+        <span aria-hidden="true">→</span>
+      </a>
+    {% else %}
+      <div class="empty-state"><strong>归档正在建立</strong><p>第一期日报生成后会出现在这里。</p></div>
+    {% endfor %}
+    </section>
+    <footer><p>具身智讯 · Private research radar</p><p><a href="/">返回首页</a></p></footer>
+  </main>
+</body>
+</html>

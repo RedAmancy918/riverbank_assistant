@@ -1,0 +1,23 @@
+{
+  "report_date": "2026-08-18",
+  "generated_at": "2026-08-18T08:00:00+08:00",
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "title": "A Vision-Language-Action Policy for Generalist Manipulation",
+      "abstract": "A representative embodied-robotics candidate used to validate the title-and-abstract candidate page.",
+      "summary_zh": "一篇用于验证候选页面的具身机器人论文，研究面向通用操作的视觉—语言—动作策略。",
+      "url": "https://arxiv.org/",
+      "candidate_score": 78,
+      "candidate_section": "embodied_robotics"
+    },
+    {
+      "title": "Few-Step Continuous-Time Generative Modeling",
+      "abstract": "A representative upstream generative-method candidate without robot experiments, retained because it may affect action and trajectory generation.",
+      "summary_zh": "一项不包含机器人实验的上游少步连续时间生成方法；由于它可能影响动作与轨迹生成，因此进入潜在方法候选。",
+      "url": "https://arxiv.org/",
+      "candidate_score": 54,
+      "candidate_section": "potential_method"
+    }
+  ]
+}

@@ -1,0 +1,365 @@
+{
+  "timezone": "Asia/Shanghai",
+  "fresh_window_hours": 72,
+  "paper_lookback_days": 183,
+  "max_results_per_query": 75,
+  "request_interval_seconds": 4.5,
+  "max_candidates": 30,
+  "candidate_section_targets": {
+    "world_model": 5,
+    "spatial_foundation": 5,
+    "vlm": 5,
+    "potential_method": 4
+  },
+  "max_report_papers": 10,
+  "max_special_focus_papers": 5,
+  "max_deep_reads": 10,
+  "candidate_score": 10,
+  "report_score": 40,
+  "deep_read_score": 40,
+  "industry_lookback_days": 183,
+  "max_industry_updates": 9,
+  "max_industry_updates_per_source": 1,
+  "retrieval_streams": [
+    {
+      "id": "embodied_intelligence",
+      "label": "具身智能领域论文",
+      "queries": [
+        "cat:cs.RO",
+        "all:\"embodied intelligence\" OR all:\"embodied ai\" OR all:\"vision-language-action\" OR all:\"vision language action\" OR all:\"world action model\" OR all:\"robot world model\""
+      ]
+    },
+    {
+      "id": "upstream_methods",
+      "label": "上游机器学习与生成建模",
+      "queries": [
+        "(cat:cs.AI OR cat:cs.CV OR cat:cs.LG OR cat:stat.ML) AND (all:\"generative model\" OR all:diffusion OR all:\"flow matching\" OR all:\"predictive learning\" OR all:\"sequence model\" OR all:\"test-time adaptation\" OR all:\"inference-time scaling\")"
+      ]
+    },
+    {
+      "id": "robot_method_crossovers",
+      "label": "新方法与机器人交叉应用",
+      "queries": [
+        "(all:robot OR all:control OR all:action OR all:trajectory OR all:policy) AND (all:generative OR all:diffusion OR all:\"world model\" OR all:\"video prediction\" OR all:multimodal OR all:\"vision-language model\" OR all:\"visual reasoning\")"
+      ]
+    },
+    {
+      "id": "category_latest",
+      "label": "重点分类最新论文",
+      "queries": [
+        "cat:cs.RO",
+        "cat:cs.AI",
+        "cat:cs.CV",
+        "cat:cs.LG",
+        "cat:stat.ML"
+      ]
+    },
+    {
+      "id": "vision_language_models",
+      "label": "VLM 与大型多模态模型",
+      "queries": [
+        "(cat:cs.AI OR cat:cs.CV OR cat:cs.LG) AND (all:\"vision-language model\" OR all:\"vision language model\" OR all:VLM OR all:\"multimodal large language model\" OR all:\"large multimodal model\" OR all:\"vision-language reasoning\" OR all:\"video-language model\")",
+        "(cat:cs.AI OR cat:cs.CV OR cat:cs.LG) AND (all:\"visual grounding\" OR all:\"grounded perception\" OR all:\"spatial reasoning\" OR all:\"multimodal reasoning\") AND (all:vision OR all:video OR all:multimodal)"
+      ]
+    },
+    {
+      "id": "foundation_vision_spatial",
+      "label": "基础视觉、三维几何与空间智能",
+      "queries": [
+        "(cat:cs.CV OR cat:cs.AI OR cat:cs.GR) AND (all:\"visual geometry\" OR all:\"spatial intelligence\" OR all:\"3D foundation model\" OR all:\"feed-forward 3D reconstruction\" OR all:\"multi-view reconstruction\" OR all:\"multiview reconstruction\" OR all:\"camera pose\" OR all:\"point map\" OR all:pointmap)",
+        "(cat:cs.CV OR cat:cs.GR) AND (all:\"3D reconstruction\" OR all:\"4D reconstruction\" OR all:\"depth estimation\" OR all:\"novel view synthesis\" OR all:\"scene representation\" OR all:\"dynamic scene\") AND (all:generalist OR all:unified OR all:foundation OR all:feed-forward OR all:scalable OR all:generalizable)"
+      ]
+    },
+    {
+      "id": "predictive_world_models",
+      "label": "JEPA、世界模型与预测学习",
+      "queries": [
+        "(cat:cs.CV OR cat:cs.LG OR cat:cs.AI OR cat:cs.RO) AND (all:JEPA OR all:\"joint-embedding predictive architecture\" OR all:\"joint embedding predictive architecture\" OR all:\"predictive representation learning\" OR all:\"predictive learning\")",
+        "(cat:cs.CV OR cat:cs.LG OR cat:cs.AI OR cat:cs.RO) AND (all:\"video world model\" OR all:\"latent world model\" OR all:\"action-conditioned world model\" OR all:\"physical world model\" OR all:\"predictive world model\" OR all:\"latent dynamics\" OR all:\"model-based planning\")",
+        "(cat:cs.CV OR cat:cs.LG OR cat:cs.AI OR cat:cs.RO) AND all:\"world model\" AND (all:prediction OR all:predictive OR all:planning OR all:dynamics OR all:video OR all:action OR all:physical)"
+      ]
+    }
+  ],
+  "domain_keyword_weights": {
+    "vision-language-action": 18,
+    "vision language action": 18,
+    "vla": 14,
+    "world action model": 16,
+    "world model": 13,
+    "embodied ai": 12,
+    "embodied intelligence": 12,
+    "robot foundation model": 12,
+    "generalist robot": 10,
+    "robot learning": 8,
+    "vision-language model": 24,
+    "vision language model": 24,
+    "vlm": 8,
+    "multimodal large language model": 20,
+    "large multimodal model": 18,
+    "vision-language reasoning": 24,
+    "video-language model": 24,
+    "visuomotor": 8,
+    "manipulation": 7,
+    "dexterous": 7,
+    "humanoid": 7,
+    "diffusion policy": 7,
+    "flow matching": 6,
+    "action chunk": 6,
+    "sim-to-real": 6,
+    "imitation learning": 5,
+    "robotic": 4,
+    "robot": 4,
+    "navigation": 3
+  },
+  "foundation_vision_weights": {
+    "vggt": 24,
+    "visual geometry": 20,
+    "geometric vision": 16,
+    "spatial intelligence": 20,
+    "3d foundation model": 20,
+    "geometric foundation model": 20,
+    "feed-forward 3d reconstruction": 20,
+    "3d reconstruction": 10,
+    "4d reconstruction": 14,
+    "multi-view reconstruction": 16,
+    "multiview reconstruction": 16,
+    "camera pose": 14,
+    "camera parameters": 10,
+    "point map": 14,
+    "pointmap": 14,
+    "depth estimation": 10,
+    "video depth": 12,
+    "novel view synthesis": 9,
+    "scene representation": 9,
+    "dynamic scene": 7,
+    "visual localization": 8,
+    "open-vocabulary 3d": 12,
+    "3d scene understanding": 12,
+    "world-centric representation": 12
+  },
+  "world_model_weights": {
+    "jepa": 28,
+    "v-jepa": 28,
+    "i-jepa": 28,
+    "a-jepa": 28,
+    "joint-embedding predictive architecture": 30,
+    "joint embedding predictive architecture": 30,
+    "predictive representation learning": 22,
+    "predictive learning": 18,
+    "predictive world model": 22,
+    "latent world model": 22,
+    "video world model": 20,
+    "action-conditioned world model": 24,
+    "physical world model": 22,
+    "object-centric world model": 18,
+    "latent dynamics": 16,
+    "world model": 14,
+    "model-based planning": 16,
+    "future prediction": 10,
+    "future representation": 12,
+    "self-supervised prediction": 14,
+    "energy-based prediction": 14,
+    "representation geometry": 12
+  },
+  "method_signal_weights": {
+    "alternative to diffusion": 20,
+    "diffusion alternative": 20,
+    "new generative framework": 18,
+    "generative framework": 12,
+    "new training objective": 18,
+    "training objective": 10,
+    "few-step generation": 20,
+    "few-step": 14,
+    "one-step generation": 18,
+    "continuous-time generative": 18,
+    "continuous-time": 10,
+    "predictive learning framework": 18,
+    "predictive learning": 12,
+    "new sequence architecture": 18,
+    "sequence architecture": 12,
+    "sequence model": 8,
+    "test-time adaptation": 16,
+    "inference-time scaling": 16,
+    "flow matching": 10,
+    "consistency model": 12,
+    "state space model": 10,
+    "autoregressive": 6,
+    "unified framework": 8,
+    "generalist model": 8,
+    "feed-forward": 6,
+    "generalizable": 5
+  },
+  "robotics_impact_weights": {
+    "action generation": 14,
+    "trajectory generation": 14,
+    "trajectory prediction": 10,
+    "world model": 13,
+    "video prediction": 14,
+    "video generation": 10,
+    "policy learning": 12,
+    "multimodal representation": 12,
+    "multimodal": 6,
+    "visual grounding": 10,
+    "grounded perception": 10,
+    "visual reasoning": 9,
+    "multimodal reasoning": 9,
+    "spatial reasoning": 9,
+    "temporal reasoning": 7,
+    "video understanding": 7,
+    "fast inference": 10,
+    "inference speed": 10,
+    "few-step": 10,
+    "cross-embodiment": 14,
+    "cross embodiment": 14,
+    "robot data": 10,
+    "scaling": 5
+  },
+  "robot_anchor_terms": [
+    "robot", "robotic", "embodied", "manipulation", "humanoid", "visuomotor",
+    "control policy", "locomotion", "navigation", "sim-to-real", "vision-language-action"
+  ],
+  "negative_override_robot_terms": [
+    "robot", "robotic", "embodied", "manipulation", "humanoid", "visuomotor"
+  ],
+  "negative_keywords": [
+    "autonomous driving",
+    "driving world model",
+    "satellite",
+    "on-orbit",
+    "spacecraft",
+    "medical",
+    "clinical",
+    "pulmonary",
+    "radiology",
+    "pathology",
+    "remote sensing",
+    "satellite imagery",
+    "geospatial",
+    "face recognition",
+    "cell morphing",
+    "single-cell",
+    "acoustic shift",
+    "speech recognition",
+    "wireless communication",
+    "molecular",
+    "financial market",
+    "recommendation system"
+  ],
+  "company_sources": [
+    {
+      "name": "Physical Intelligence",
+      "url": "https://www.physicalintelligence.company/blog",
+      "focus": "VLA、通用机器人策略、动作生成与跨本体泛化"
+    },
+    {
+      "name": "Google DeepMind / Gemini",
+      "url": "https://deepmind.google/blog/",
+      "focus": "Gemini、Gemma、Veo、Genie、世界模型、通用多模态模型、Gemini Robotics 与具身推理"
+    },
+    {
+      "name": "NVIDIA Robotics",
+      "url": "https://developer.nvidia.com/blog/blog/tag/humanoid-robots/",
+      "focus": "GR00T、Cosmos、Isaac Lab 与机器人学习基础设施"
+    },
+    {
+      "name": "Figure",
+      "url": "https://www.figure.ai/news",
+      "focus": "Helix、通用人形机器人控制与真实部署"
+    },
+    {
+      "name": "1X",
+      "url": "https://www.1x.tech/discover",
+      "focus": "机器人 World Model、家庭人形机器人与数据闭环"
+    },
+    {
+      "name": "Skild AI",
+      "url": "https://www.skild.ai/blogs",
+      "focus": "跨本体机器人基础模型、视频学习与部署"
+    },
+    {
+      "name": "Unitree",
+      "url": "https://www.unitree.com/news/",
+      "focus": "人形机器人、具身智能平台与模型能力更新"
+    },
+    {
+      "name": "Qwen",
+      "url": "https://qwenlm.github.io/blog/",
+      "focus": "VLM/多模态、视频理解与生成、智能体、模型架构和推理效率中可能影响具身智能的技术发布"
+    },
+    {
+      "name": "DeepSeek",
+      "url": "https://github.com/deepseek-ai",
+      "focus": "VLM/多模态、视觉与视频建模、新架构与训练目标、推理扩展和效率优化中可能影响机器人学习的官方模型发布"
+    },
+    {
+      "name": "Anthropic / Claude",
+      "url": "https://www.anthropic.com/news",
+      "focus": "Claude 的视觉、多模态、长上下文、智能体、计算机使用、推理和工具调用能力"
+    },
+    {
+      "name": "xAI / Grok",
+      "url": "https://x.ai/news",
+      "focus": "Grok 的视觉、视频、语音、智能体、推理与低延迟模型能力"
+    },
+    {
+      "name": "MiniMax",
+      "url": "https://www.minimax.io/news",
+      "focus": "多模态基础模型、视频与语音生成、长上下文、新架构、智能体和高效推理"
+    },
+    {
+      "name": "Z.ai / GLM（智谱）",
+      "url": "https://z.ai/blog",
+      "focus": "GLM/GLM-V、视觉与视频理解、图像生成、智能体、长上下文、训练和推理架构"
+    },
+    {
+      "name": "OpenAI",
+      "url": "https://openai.com/news/",
+      "focus": "GPT/o 系列的视觉、语音、视频、智能体、推理、工具使用和机器人相关研究"
+    },
+    {
+      "name": "Meta AI",
+      "url": "https://ai.meta.com/blog/",
+      "focus": "Llama、VLM、视频与世界建模、感知、具身研究、开源模型和高效推理"
+    },
+    {
+      "name": "Mistral AI",
+      "url": "https://mistral.ai/news/",
+      "focus": "开放模型、VLM、物理 AI、具身导航、语音、智能体和高效推理"
+    },
+    {
+      "name": "Moonshot AI / Kimi",
+      "url": "https://www.kimi.com/blog/",
+      "focus": "Kimi-VL、视觉与视频感知、长上下文、多智能体、训练方法和推理效率"
+    },
+    {
+      "name": "ByteDance Seed",
+      "url": "https://seed.bytedance.com/en/blog",
+      "focus": "Seed 系列多模态模型、视频生成、世界模型、智能体、机器人学习与模型效率"
+    },
+    {
+      "name": "Tencent Hunyuan",
+      "url": "https://github.com/Tencent-Hunyuan",
+      "focus": "混元 VLM、视频与 3D 世界模型、具身基础模型、动作生成、多模态强化学习和高效部署"
+    },
+    {
+      "name": "自变量机器人 / X Square Robot",
+      "url": "https://x2robot.com/en",
+      "focus": "WALL 系列具身基础模型、VLA 与世界模型融合、动作分词器、机器人数据采集和真实场景部署"
+    },
+    {
+      "name": "Sunday Robotics",
+      "url": "https://www.sunday.ai/blog",
+      "focus": "ACT 机器人基础模型、无机器人数据训练、家庭机器人、技能采集与长期可靠性"
+    },
+    {
+      "name": "AGIBOT / 智元机器人",
+      "url": "https://agibot.com/research/index_zh",
+      "focus": "GO 系列具身模型、世界模型、百万轨迹数据集、通用操作框架与规模化真实部署"
+    },
+    {
+      "name": "DYNA Robotics",
+      "url": "https://www.dyna.co/",
+      "focus": "DYNA 机器人基础模型、开放世界灵巧操作、自我改进数据闭环与商业级长时间自主运行"
+    }
+  ]
+}

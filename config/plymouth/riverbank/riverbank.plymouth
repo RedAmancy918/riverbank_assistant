@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=RiverBank
+Description=RiverBank black boot handoff
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/riverbank
+ScriptFile=/usr/share/plymouth/themes/riverbank/riverbank.script

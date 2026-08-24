@@ -1,0 +1,36 @@
+[Unit]
+Description=RiverBank persistent DSI expression display
+After=display-manager.service
+Wants=display-manager.service
+RequiresMountsFor=@RIVERBANK_DATA@
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+WorkingDirectory=@RIVERBANK_REPO@/apps/expression-ui
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_DATA=@RIVERBANK_DATA@"
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=@RIVERBANK_HOME@/.Xauthority"
+Environment="XDG_RUNTIME_DIR=/run/user/@RIVERBANK_UID@"
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="SDL_VIDEODRIVER=x11"
+RuntimeDirectory=riverbank-expression
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/expression-ui/expression_display_persistent.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/riverbank-expression @RIVERBANK_DATA@/camera/gallery
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target

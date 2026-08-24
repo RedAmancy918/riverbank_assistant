@@ -1,0 +1,31 @@
+[Unit]
+Description=RiverBank extensible boot and service health monitor
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="PYTHONUNBUFFERED=1"
+ExecStartPre=/usr/bin/python3 @RIVERBANK_REPO@/apps/health-monitor/health_monitor.py --config /etc/riverbank/health-monitor.json --validate-config
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/health-monitor/health_monitor.py --config /etc/riverbank/health-monitor.json
+Restart=always
+RestartSec=5
+StateDirectory=riverbank-health-monitor
+StateDirectoryMode=0750
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/riverbank-health-monitor
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

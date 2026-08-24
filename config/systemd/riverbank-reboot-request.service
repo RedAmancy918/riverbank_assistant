@@ -1,0 +1,8 @@
+[Unit]
+Description=Execute a confirmed RiverBank DSI reboot request
+ConditionPathExists=/run/riverbank-expression/reboot.request
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -f /run/riverbank-expression/reboot.request
+ExecStart=/usr/bin/systemctl --no-wall reboot

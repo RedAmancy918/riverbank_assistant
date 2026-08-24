@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Command-line client for listengo-mic.service."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import sys
+
+
+SOCKET_PATH = "/run/listengo-mic/control.sock"
+
+
+def request(payload: dict) -> dict:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(5)
+        client.connect(SOCKET_PATH)
+        client.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode())
+        response = bytearray()
+        while not response.endswith(b"\n"):
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            response.extend(chunk)
+    return json.loads(response.decode("utf-8"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("status")
+    subparsers.add_parser("health")
+    subparsers.add_parser("version")
+    for name in ("manual-wakeup", "set-beam"):
+        command_parser = subparsers.add_parser(name)
+        command_parser.add_argument("beam", nargs="?", type=int, default=0)
+    keyword_parser = subparsers.add_parser("set-keyword")
+    keyword_parser.add_argument("keyword")
+    keyword_parser.add_argument("--threshold", type=int, default=700)
+    args = parser.parse_args()
+
+    command = args.command or "status"
+    if command == "health":
+        result = request({"command": "status"})
+        state = result.get("state", {})
+        healthy = bool(
+            result.get("ok")
+            and state.get("control_connected")
+            and state.get("audio_device_present")
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if healthy else 1
+    payload = {"command": command.replace("-", "_")}
+    if hasattr(args, "beam"):
+        payload["beam"] = args.beam
+    if command == "set-keyword":
+        payload.update(keyword=args.keyword, threshold=args.threshold)
+    result = request(payload)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ConnectionError, FileNotFoundError, socket.timeout) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        raise SystemExit(2)

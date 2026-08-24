@@ -1,0 +1,6 @@
+edge-tts>=7.0,<8
+faster-whisper>=1.1,<2
+numpy>=2.0,<3
+Pillow>=11,<13
+pygame>=2.6,<3
+sounddevice>=0.5,<1

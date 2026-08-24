@@ -1,0 +1,32 @@
+[Unit]
+Description=RiverBank local hands-free Hermes voice surface
+After=network-online.target listengo-mic.service hermes-gateway.service
+Wants=network-online.target
+Requires=listengo-mic.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+SupplementaryGroups=audio dialout
+WorkingDirectory=@RIVERBANK_HOME@
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_DATA=@RIVERBANK_DATA@"
+Environment="PATH=@RIVERBANK_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="XDG_RUNTIME_DIR=/run/user/@RIVERBANK_UID@"
+Environment="PULSE_SERVER=unix:/run/user/@RIVERBANK_UID@/pulse/native"
+Environment="TERM=xterm-256color"
+Environment="LANG=C.UTF-8"
+Environment="PYTHONUNBUFFERED=1"
+ExecStartPre=/usr/local/bin/listengo-micctl health
+ExecStart=/bin/bash -lc 'set -o pipefail; /usr/bin/tail -f /dev/null | /usr/bin/script -qefc "@RIVERBANK_HOME@/.local/bin/hermes --cli" /dev/null'
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

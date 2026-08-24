@@ -1,0 +1,23 @@
+[Unit]
+Description=RiverBank shared USB camera hub
+After=camera-usb-power.service
+Requires=camera-usb-power.service
+
+[Service]
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+SupplementaryGroups=video
+ExecStart=/usr/bin/ustreamer --device=/dev/video0 --resolution=1280x720 --format=MJPEG --encoder=HW --desired-fps=30 --buffers=4 --workers=1 --persistent --host=127.0.0.1 --port=19733 --tcp-nodelay --process-name-prefix=camera-hub --no-log-colors
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
