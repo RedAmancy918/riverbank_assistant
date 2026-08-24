@@ -13,6 +13,18 @@
 
 设备名、USB VID/PID、串口稳定路径、DSI 输出名和触摸设备名可能随硬件批次变化，部署前必须在目标机确认。
 
+## 共享 PCIe 扩展板稳定性
+
+NVMe 与 Hailo 共用带 PCIe 交换芯片的 x1 扩展板时，部分 NVMe 控制器会在 D3cold 省电状态中无法恢复，表现为挂载点仍在但读取报 `I/O error`。只有在内核日志明确出现这类错误时，才将下列参数加到 `/boot/firmware/cmdline.txt` 的同一行：
+
+```text
+nvme_core.default_ps_max_latency_us=0 pcie_aspm=off pcie_port_pm=off
+```
+
+这会增加少量空闲功耗，但可避免共享链路在 Hailo/NVMe 重启或负载切换时掉线。修改前应备份原文件，重启后确认 `lsblk` 中 NVMe 为 `live`，并检查本次启动的内核日志不再有 controller reset 或 I/O error。
+
+若没有接任何 1-Wire 传感器，不要在 `config.txt` 中启用 `dtoverlay=w1-gpio`；空总线会产生没有业务价值的轮询工作。
+
 ## 不随仓库分发
 
 | 依赖 | 原因 |

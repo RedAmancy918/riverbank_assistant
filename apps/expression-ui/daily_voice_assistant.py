@@ -27,6 +27,7 @@ import edge_tts
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from voice_latency import VoiceLatencyMonitor
 
 try:
     import sherpa_onnx
@@ -92,6 +93,53 @@ STREAM_TTS_VOICE = os.environ.get(
     "RIVERBANK_STREAM_TTS_VOICE",
     "zh-CN-XiaoxiaoNeural",
 )
+VOICE_METRICS_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_VOICE_METRICS_PATH",
+        RIVERBANK_HOME / ".local/state/riverbank/voice-latency.jsonl",
+    )
+)
+WHISPER_MODEL = os.environ.get("RIVERBANK_WHISPER_MODEL", "base").strip() or "base"
+WHISPER_POOL_SIZE = max(
+    1,
+    min(3, int(os.environ.get("RIVERBANK_WHISPER_POOL_SIZE", "2"))),
+)
+WHISPER_HOTWORDS = os.environ.get(
+    "RIVERBANK_WHISPER_HOTWORDS",
+    "",
+).strip()
+WHISPER_PRIMARY_OPTIONS = {
+    "beam_size": 5,
+    "best_of": 5,
+    "temperature": 0.0,
+    "condition_on_previous_text": False,
+    "without_timestamps": True,
+    "vad_filter": False,
+}
+WHISPER_FALLBACK_OPTIONS = {
+    "beam_size": 1,
+    "best_of": 5,
+    "temperature": 0.2,
+    "condition_on_previous_text": False,
+    "without_timestamps": True,
+    "vad_filter": False,
+}
+DAILY_TOOLSETS = tuple(
+    value.strip()
+    for value in os.environ.get(
+        "RIVERBANK_DAILY_TOOLSETS",
+        "clarify,cronjob,memory,session_search,skills,todo,vision,web",
+    ).split(",")
+    if value.strip()
+)
+DAILY_AGENT_MAX_TURNS = max(
+    4,
+    int(os.environ.get("RIVERBANK_DAILY_AGENT_MAX_TURNS", "12")),
+)
+DAILY_MCP_DISCOVERY = os.environ.get(
+    "RIVERBANK_DAILY_MCP_DISCOVERY",
+    "0",
+).strip().lower() in {"1", "true", "yes", "on"}
 STREAMING_ASR_MODEL_DIR = Path(
     os.environ.get(
         "RIVERBANK_STREAMING_ASR_MODEL_DIR",
@@ -744,11 +792,18 @@ class StreamingSpeechSession:
 
     _DONE = object()
 
-    def __init__(self, on_first_audio=None) -> None:
+    def __init__(
+        self,
+        on_first_delta=None,
+        on_first_chunk=None,
+        on_first_audio=None,
+    ) -> None:
         self.chunker = StreamingSpeechChunker(
             STREAM_TTS_MIN_CHARS,
             STREAM_TTS_HARD_CHARS,
         )
+        self.on_first_delta = on_first_delta
+        self.on_first_chunk = on_first_chunk
         self.on_first_audio = on_first_audio
         self.text_queue: queue.Queue[object] = queue.Queue(maxsize=64)
         self.started_at = time.monotonic()
@@ -782,6 +837,11 @@ class StreamingSpeechSession:
             return
         if self.first_chunk_at is None:
             self.first_chunk_at = time.monotonic()
+            if callable(self.on_first_chunk):
+                try:
+                    self.on_first_chunk()
+                except Exception as exc:
+                    log(f"streaming TTS first-chunk callback warning: {exc}")
         try:
             self.text_queue.put_nowait(value)
             self.chunk_chars += len(value)
@@ -802,6 +862,11 @@ class StreamingSpeechSession:
             return
         if self.first_delta_at is None:
             self.first_delta_at = time.monotonic()
+            if callable(self.on_first_delta):
+                try:
+                    self.on_first_delta()
+                except Exception as exc:
+                    log(f"streaming TTS first-delta callback warning: {exc}")
         self.delta_chars += len(value)
         for chunk in self.chunker.feed(value):
             self._enqueue(chunk)
@@ -973,11 +1038,18 @@ class PersistentHermesRuntime:
             requested=provider,
             target_model=model or None,
         )
-        toolsets = sorted(_get_platform_tools(config, "cli"))
-        ensure_mcp_discovery_before_agent_build(
-            logger=logging.getLogger(__name__),
-            single_query=True,
-        )
+        available_toolsets = set(_get_platform_tools(config, "cli"))
+        toolsets = sorted(available_toolsets.intersection(DAILY_TOOLSETS))
+        if not toolsets:
+            raise RuntimeError("Daily Hermes toolset filter matched no available tools")
+        missing_toolsets = sorted(set(DAILY_TOOLSETS).difference(available_toolsets))
+        if missing_toolsets:
+            log(f"Daily Hermes unavailable toolsets ignored: {missing_toolsets}")
+        if DAILY_MCP_DISCOVERY:
+            ensure_mcp_discovery_before_agent_build(
+                logger=logging.getLogger(__name__),
+                single_query=True,
+            )
         self.session_db = SessionDB()
         self.agent = AIAgent(
             api_key=runtime.get("api_key"),
@@ -998,7 +1070,10 @@ class PersistentHermesRuntime:
         self.agent.stream_delta_callback = None
         self.agent.tool_gen_callback = None
         self.turn_count = 0
-        log(f"Persistent Daily Hermes ready in {time.monotonic() - started:.2f}s")
+        log(
+            "Persistent Daily Hermes ready "
+            f"in {time.monotonic() - started:.2f}s toolsets={toolsets}"
+        )
 
     def warmup(self) -> None:
         """Build the Daily-profile agent before the first wake-up."""
@@ -1012,7 +1087,7 @@ class PersistentHermesRuntime:
 
     def ask(self, prompt: str, stream_callback=None) -> str:
         with self.lock:
-            if self.agent is None or self.turn_count >= 20:
+            if self.agent is None or self.turn_count >= DAILY_AGENT_MAX_TURNS:
                 self.close()
                 self._build()
             captured = io.StringIO()
@@ -1168,6 +1243,7 @@ class DailyVoiceAssistant:
         self.barge_in_count = 0
         self.last_barge_in_at: float | None = None
         self.last_interrupted_stage: str | None = None
+        self.latency = VoiceLatencyMonitor(VOICE_METRICS_PATH)
         self.started_at = time.time()
         self.last_token = wake_token(load_wake())
         self.last_trigger_monotonic = 0.0
@@ -1179,9 +1255,10 @@ class DailyVoiceAssistant:
         self.visual_mode_active = False
         self.visual_request_active = False
         vision_activity(False)
-        self.whisper: WhisperModel | None = None
-        self.whisper_lock = threading.Lock()
-        self.whisper_inference_lock = threading.Lock()
+        self.whisper_models: list[WhisperModel] = []
+        self.whisper_pool_lock = threading.Lock()
+        self.whisper_available: queue.Queue[int] = queue.Queue()
+        self.last_streaming_transcript = ""
         self.streaming_caption = StreamingCaptionRecognizer()
         self.live_caption_active = False
         self.live_caption_final = False
@@ -1257,6 +1334,9 @@ class DailyVoiceAssistant:
                 "draft_engine_error": self.streaming_caption.last_error,
                 "model_directory": str(self.streaming_caption.model_dir),
                 "final_engine": "faster-whisper-base",
+                "final_decoder": "deterministic-beam5-bounded-fallback",
+                "resident_model_pool": len(self.whisper_models),
+                "configured_model_pool": WHISPER_POOL_SIZE,
             },
             "streaming_tts": {
                 "enabled": STREAM_TTS_ENABLED,
@@ -1265,6 +1345,7 @@ class DailyVoiceAssistant:
                 "minimum_chunk_chars": STREAM_TTS_MIN_CHARS,
                 "hard_chunk_chars": STREAM_TTS_HARD_CHARS,
             },
+            "latency_monitor": self.latency.state(),
             "last_trigger_at": self.last_trigger_at,
             "last_wake": self.last_wake,
             "started_at": self.started_at,
@@ -1281,6 +1362,17 @@ class DailyVoiceAssistant:
         target = event if event is not None else self.interrupt_event
         if target.is_set():
             raise InteractionInterrupted("superseded by a newer wake word")
+
+    def finish_latency(self, status: str) -> None:
+        record = self.latency.finish(status)
+        if record is None:
+            return
+        metrics = " ".join(
+            f"{name}={value}s"
+            for name, value in record.items()
+            if name.endswith("_seconds")
+        )
+        log(f"Voice latency metrics status={status} {metrics}".rstrip())
 
     def has_pending_wake(self) -> bool:
         with self.barge_in_lock:
@@ -1433,6 +1525,7 @@ class DailyVoiceAssistant:
         consecutive_voice = 0
         caption_stream: object | None = None
         partial_previous = ""
+        self.last_streaming_transcript = ""
         log(f"Adaptive VAD threshold={threshold:.0f}")
         while self.running:
             self.raise_if_interrupted()
@@ -1464,6 +1557,7 @@ class DailyVoiceAssistant:
                                 ),
                             )
                             if partial_text:
+                                self.last_streaming_transcript = partial_text
                                 self.publish_speech_bubble(
                                     True,
                                     partial_text,
@@ -1491,6 +1585,7 @@ class DailyVoiceAssistant:
                     log(f"streaming caption warning: {exc}")
                     partial_text = ""
                 if partial_text and partial_text != partial_previous:
+                    self.last_streaming_transcript = partial_text
                     stable_chars = common_prefix_length(
                         partial_previous,
                         partial_text,
@@ -1509,16 +1604,18 @@ class DailyVoiceAssistant:
         if caption_stream is not None:
             try:
                 partial_text = self.streaming_caption.finish(caption_stream)
-                if partial_text and partial_text != partial_previous:
-                    stable_chars = common_prefix_length(
-                        partial_previous,
-                        partial_text,
-                    )
-                    self.publish_speech_bubble(
-                        True,
-                        partial_text,
-                        stable_chars=stable_chars,
-                    )
+                if partial_text:
+                    self.last_streaming_transcript = partial_text
+                    if partial_text != partial_previous:
+                        stable_chars = common_prefix_length(
+                            partial_previous,
+                            partial_text,
+                        )
+                        self.publish_speech_bubble(
+                            True,
+                            partial_text,
+                            stable_chars=stable_chars,
+                        )
             except Exception as exc:
                 log(f"streaming caption finalization warning: {exc}")
 
@@ -1558,13 +1655,90 @@ class DailyVoiceAssistant:
         self.last_result = "recording"
         self.write_state()
 
-    def ensure_whisper(self) -> WhisperModel:
-        with self.whisper_lock:
-            if self.whisper is None:
-                started = time.monotonic()
-                self.whisper = WhisperModel("base", device="cpu", compute_type="int8")
-                log(f"Local faster-whisper base ready in {time.monotonic() - started:.2f}s")
-            return self.whisper
+    def ensure_whisper_pool(self) -> list[WhisperModel]:
+        """Preload independent decoders so barge-in never waits on stale native work."""
+        with self.whisper_pool_lock:
+            if len(self.whisper_models) == WHISPER_POOL_SIZE:
+                return self.whisper_models
+            started = time.monotonic()
+            models = [
+                WhisperModel(
+                    WHISPER_MODEL,
+                    device="cpu",
+                    compute_type="int8",
+                    local_files_only=True,
+                )
+                for _index in range(WHISPER_POOL_SIZE)
+            ]
+            self.whisper_models = models
+            while not self.whisper_available.empty():
+                try:
+                    self.whisper_available.get_nowait()
+                except queue.Empty:
+                    break
+            for index in range(len(models)):
+                self.whisper_available.put(index)
+            log(
+                f"Local faster-whisper {WHISPER_MODEL} pool="
+                f"{WHISPER_POOL_SIZE} ready in {time.monotonic() - started:.2f}s"
+            )
+            self.write_state()
+            return self.whisper_models
+
+    def acquire_whisper_slot(
+        self,
+        cancel_event: threading.Event | None,
+    ) -> tuple[int, WhisperModel]:
+        models = self.ensure_whisper_pool()
+        while True:
+            self.raise_if_interrupted(cancel_event)
+            try:
+                index = self.whisper_available.get(timeout=0.05)
+                return index, models[index]
+            except queue.Empty:
+                continue
+
+    @staticmethod
+    def whisper_quality(segments: list[object]) -> tuple[float, float, float]:
+        if not segments:
+            return -10.0, 0.0, 1.0
+        logprob = float(
+            sum(float(segment.avg_logprob) for segment in segments) / len(segments)
+        )
+        compression = max(float(segment.compression_ratio) for segment in segments)
+        no_speech = max(float(segment.no_speech_prob) for segment in segments)
+        return logprob, compression, no_speech
+
+    def decode_whisper(
+        self,
+        model: WhisperModel,
+        wav_path: Path,
+        options: dict,
+        cancel_event: threading.Event | None,
+    ) -> tuple[str, tuple[float, float, float]]:
+        started = time.monotonic()
+        segments, _ = model.transcribe(
+            str(wav_path),
+            language="zh",
+            hotwords=WHISPER_HOTWORDS or None,
+            **options,
+        )
+        resolved: list[object] = []
+        transcript_parts: list[str] = []
+        for segment in segments:
+            self.raise_if_interrupted(cancel_event)
+            resolved.append(segment)
+            transcript_parts.append(segment.text)
+        transcript = "".join(transcript_parts).strip()
+        quality = self.whisper_quality(resolved)
+        log(
+            "Whisper decode "
+            f"temperature={options['temperature']} beam={options['beam_size']} "
+            f"elapsed={time.monotonic() - started:.2f}s "
+            f"logprob={quality[0]:.3f} compression={quality[1]:.3f} "
+            f"no_speech={quality[2]:.3f}"
+        )
+        return transcript, quality
 
     def transcribe(
         self,
@@ -1572,20 +1746,39 @@ class DailyVoiceAssistant:
         cancel_event: threading.Event | None = None,
     ) -> str:
         expression("thinking")
-        log("Transcribing with resident local faster-whisper base...")
-        with self.whisper_inference_lock:
+        log("Transcribing with resident deterministic faster-whisper pool...")
+        slot, model = self.acquire_whisper_slot(cancel_event)
+        try:
             self.raise_if_interrupted(cancel_event)
-            segments, _ = self.ensure_whisper().transcribe(
-                str(wav_path),
-                language="zh",
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 400},
+            transcript, quality = self.decode_whisper(
+                model,
+                wav_path,
+                WHISPER_PRIMARY_OPTIONS,
+                cancel_event,
             )
-            transcript_parts: list[str] = []
-            for segment in segments:
-                self.raise_if_interrupted(cancel_event)
-                transcript_parts.append(segment.text)
-            transcript = "".join(transcript_parts).strip()
+            suspicious = bool(
+                not transcript
+                or quality[0] < -0.85
+                or quality[1] > 2.4
+            )
+            if suspicious:
+                log("Whisper primary result suspicious; running one bounded fallback")
+                fallback_text, fallback_quality = self.decode_whisper(
+                    model,
+                    wav_path,
+                    WHISPER_FALLBACK_OPTIONS,
+                    cancel_event,
+                )
+                if fallback_text and (
+                    not transcript or fallback_quality[0] >= quality[0]
+                ):
+                    transcript = fallback_text
+                    quality = fallback_quality
+            if not transcript and self.last_streaming_transcript:
+                transcript = self.last_streaming_transcript.strip()
+                log("Whisper empty; using wake-session-only sherpa final draft")
+        finally:
+            self.whisper_available.put(slot)
         self.raise_if_interrupted(cancel_event)
         if transcript:
             self.publish_speech_bubble(
@@ -1680,9 +1873,16 @@ class DailyVoiceAssistant:
                     pass
             self.write_state()
 
+    def handle_streaming_tts_first_delta(self) -> None:
+        self.latency.mark("llm_first_delta")
+
+    def handle_streaming_tts_first_chunk(self) -> None:
+        self.latency.mark("tts_started")
+
     def handle_streaming_tts_first_audio(self) -> None:
         if self.interrupt_event.is_set():
             return
+        self.latency.mark("tts_first_frame")
         self.last_result = "speaking"
         self.write_state()
         log("Streaming TTS first audio submitted")
@@ -1695,7 +1895,11 @@ class DailyVoiceAssistant:
         log(f"Transcript: {transcript}")
         prompt, visual_routed = route_user_request(transcript, force_visual=force_visual)
         speech_session = (
-            StreamingSpeechSession(on_first_audio=self.handle_streaming_tts_first_audio)
+            StreamingSpeechSession(
+                on_first_delta=self.handle_streaming_tts_first_delta,
+                on_first_chunk=self.handle_streaming_tts_first_chunk,
+                on_first_audio=self.handle_streaming_tts_first_audio,
+            )
             if STREAM_TTS_ENABLED
             else None
         )
@@ -1707,6 +1911,7 @@ class DailyVoiceAssistant:
             self.write_state()
         try:
             routed_prompt = f"{VOICE_DIALOGUE_PROTOCOL}\n\n用户本轮输入：{prompt}"
+            self.latency.mark("llm_started")
             try:
                 raw_response = ANSI_RE.sub(
                     "",
@@ -1723,6 +1928,7 @@ class DailyVoiceAssistant:
                 self.raise_if_interrupted()
                 raise
             self.raise_if_interrupted()
+            self.latency.mark("llm_finished")
             if speech_session is not None:
                 speech_session.mark_llm_complete()
             if visual_routed:
@@ -1798,6 +2004,7 @@ class DailyVoiceAssistant:
                 self.active_async_loop = analysis_loop
                 self.active_async_task = analysis_task
             try:
+                self.latency.mark("llm_started")
                 raw_result = analysis_loop.run_until_complete(analysis_task)
             except asyncio.CancelledError as exc:
                 raise InteractionInterrupted(
@@ -1810,6 +2017,8 @@ class DailyVoiceAssistant:
                         self.active_async_loop = None
                 analysis_loop.close()
             self.raise_if_interrupted()
+            self.latency.mark("llm_first_delta")
+            self.latency.mark("llm_finished")
             try:
                 payload = json.loads(raw_result)
             except (TypeError, json.JSONDecodeError) as exc:
@@ -1902,8 +2111,10 @@ class DailyVoiceAssistant:
         speech = clean_for_speech(response)
         if not speech:
             return
+        self.latency.mark("tts_started")
 
         async def stream_to_player() -> None:
+            first_audio_submitted = False
             player = subprocess.Popen(
                 [
                     "/usr/bin/ffplay",
@@ -1929,6 +2140,9 @@ class DailyVoiceAssistant:
                     if chunk["type"] == "audio" and player.stdin is not None:
                         player.stdin.write(chunk["data"])
                         player.stdin.flush()
+                        if not first_audio_submitted:
+                            first_audio_submitted = True
+                            self.latency.mark("tts_first_frame")
             finally:
                 try:
                     if player.stdin is not None:
@@ -1966,6 +2180,7 @@ class DailyVoiceAssistant:
         camera_mode_at_start = self.visual_mode_active
         self.interrupt_event = threading.Event()
         self.busy = True
+        self.latency.start("hardware_voice" if wake is not None else "voice_control")
         self.microphone.set_learning(False)
         self.last_error = None
         self.last_result = "recording"
@@ -1982,7 +2197,9 @@ class DailyVoiceAssistant:
             if wake is not None:
                 self.acknowledge_hardware_wake()
             self.raise_if_interrupted()
+            self.latency.mark("recording_started")
             wav_path = self.record_until_silence()
+            self.latency.mark("speech_end")
             self.raise_if_interrupted()
             if wav_path is None:
                 self.last_result = "no_speech"
@@ -1990,7 +2207,9 @@ class DailyVoiceAssistant:
                 return
             self.last_result = "transcribing"
             self.write_state()
+            self.latency.mark("stt_started")
             transcript = self.transcribe_interruptibly(wav_path)
+            self.latency.mark("stt_finished")
             self.raise_if_interrupted()
             if not transcript:
                 self.last_result = "empty_transcript"
@@ -2029,6 +2248,8 @@ class DailyVoiceAssistant:
                     self.speak(response)
                     log("TTS playback completed")
                 self.raise_if_interrupted()
+                self.latency.mark("playback_finished")
+                self.finish_latency("completed")
                 if not needs_follow_up:
                     self.last_result = "completed"
                     break
@@ -2041,12 +2262,15 @@ class DailyVoiceAssistant:
                 self.last_result = "awaiting_follow_up"
                 self.last_follow_up_at = time.time()
                 self.write_state()
+                self.latency.start("voice_follow_up")
+                self.latency.mark("recording_started")
                 follow_up_wav: Path | None = None
                 try:
                     follow_up_wav = self.record_until_silence(
                         follow_up=True,
                         no_speech_timeout=FOLLOW_UP_NO_SPEECH_SECONDS,
                     )
+                    self.latency.mark("speech_end")
                     self.raise_if_interrupted()
                     if follow_up_wav is None:
                         self.last_result = "follow_up_timeout"
@@ -2054,9 +2278,11 @@ class DailyVoiceAssistant:
                         break
                     self.last_result = "transcribing_follow_up"
                     self.write_state()
+                    self.latency.mark("stt_started")
                     current_transcript = self.transcribe_interruptibly(
                         follow_up_wav
                     ).strip()
+                    self.latency.mark("stt_finished")
                     self.raise_if_interrupted()
                     if not current_transcript:
                         self.last_result = "empty_follow_up"
@@ -2099,6 +2325,14 @@ class DailyVoiceAssistant:
             self.conversation_turn = 0
             self.busy = False
             self.microphone.set_learning(True)
+            latency_status = (
+                "interrupted"
+                if self.last_result == "interrupted_by_wake"
+                else "error"
+                if self.last_result == "error"
+                else self.last_result
+            )
+            self.finish_latency(latency_status)
             if self.last_result != "error" and not self.has_pending_wake():
                 expression("idle")
             self.write_state()
@@ -2110,6 +2344,7 @@ class DailyVoiceAssistant:
             return
         self.interrupt_event = threading.Event()
         self.busy = True
+        self.latency.start(f"text:{source}")
         self.microphone.set_learning(False)
         self.last_error = None
         self.last_result = "asking_hermes"
@@ -2136,6 +2371,8 @@ class DailyVoiceAssistant:
                 self.speak(response)
                 log("TTS playback completed")
             self.raise_if_interrupted()
+            self.latency.mark("playback_finished")
+            self.finish_latency("completed")
             self.interaction_count += 1
             self.last_result = "completed"
         except InteractionInterrupted:
@@ -2151,6 +2388,14 @@ class DailyVoiceAssistant:
         finally:
             self.busy = False
             self.microphone.set_learning(True)
+            latency_status = (
+                "interrupted"
+                if self.last_result == "interrupted_by_wake"
+                else "error"
+                if self.last_result == "error"
+                else self.last_result
+            )
+            self.finish_latency(latency_status)
             self.write_state()
 
     def set_visual_mode(self, active: bool) -> None:
@@ -2186,8 +2431,8 @@ def main() -> int:
         daemon=True,
     ).start()
     threading.Thread(
-        target=assistant.ensure_whisper,
-        name="whisper-base-warmup",
+        target=assistant.ensure_whisper_pool,
+        name="whisper-pool-warmup",
         daemon=True,
     ).start()
     threading.Thread(

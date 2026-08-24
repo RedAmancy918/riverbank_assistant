@@ -42,6 +42,12 @@ def main() -> int:
     if caption.get("final_engine") != "faster-whisper-base":
         print("final speech recognizer is not ready")
         return 1
+    if caption.get("final_decoder") != "deterministic-beam5-bounded-fallback":
+        print("final speech recognizer still permits unbounded decode fallback")
+        return 1
+    if int(caption.get("resident_model_pool") or 0) < 2:
+        print("resident speech recognizer pool is not ready for barge-in")
+        return 1
     streaming_tts = payload.get("streaming_tts")
     if not isinstance(streaming_tts, dict) or not streaming_tts.get("enabled"):
         print("streaming TTS is not enabled")
@@ -49,6 +55,10 @@ def main() -> int:
     barge_in = payload.get("wake_barge_in")
     if not isinstance(barge_in, dict) or not barge_in.get("enabled"):
         print("wake-word barge-in is not enabled")
+        return 1
+    latency = payload.get("latency_monitor")
+    if not isinstance(latency, dict) or latency.get("privacy") != "timings-only-no-transcripts":
+        print("privacy-preserving voice latency monitor is not ready")
         return 1
     print(
         "voice interaction chain ready "

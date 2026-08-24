@@ -9,6 +9,7 @@
 | 设置页显示的软件版本号 | `apps/expression-ui/VERSION` |
 | 允许本机 `netdev` 组切换 Wi-Fi 的最小权限规则 | `system/polkit/60-riverbank-wifi.rules` |
 | 语音 VAD、Whisper、Hermes、TTS 和多轮追问 | `apps/expression-ui/daily_voice_assistant.py` |
+| 语音端到端 P50/P95 耗时统计 | `apps/expression-ui/voice_latency.py` |
 | Hermes 状态映射为表情 | `apps/expression-ui/hermes_expression_bridge.py` |
 | 开机 Wayland 接力 | `apps/expression-ui/boot_handoff.py` |
 | 麦克风串口协议和唤醒事件 | `apps/listengo-mic/listengo_daemon.py` |
@@ -54,6 +55,7 @@
 - 唤醒后切换 `listening` 表情并立即显示气泡，但气泡内不显示“正在听”；
 - 气泡增量文字最多三行，最终转写停留约 0.8 秒后平滑淡出；
 - 流式草稿引擎为 sherpa-onnx 14M Zipformer，最终 Hermes 输入仍来自 Faster-Whisper Base；
+- Faster-Whisper 应在启动时预热两个本地实例，使用固定温度 beam-5 解码，低置信结果最多只允许一次有界回退；
 - Hermes 回复使用自然标点优先的流式 TTS，首段语音应在完整回答生成前开始，失败时应回退到完整回复朗读；
 - Hermes 推理、Qwen 视觉或扬声器播放期间再次说出唤醒词，旧轮次应立即停止，播放新的唤醒回应并重新录音；
 - Paper Radar 候选/精选/焦点/产业数量上限保持不变。
@@ -68,5 +70,11 @@ Daily Voice 默认使用实机验证过的“标点优先 + 连续 MP3 流”组
 | `RIVERBANK_STREAM_TTS_MIN_CHARS` | `10` | 只在缓冲达到该长度后才在自然标点处切分 |
 | `RIVERBANK_STREAM_TTS_HARD_CHARS` | `24` | 长时没有标点时的强制切分上限 |
 | `RIVERBANK_STREAM_TTS_VOICE` | `zh-CN-XiaoxiaoNeural` | Edge TTS 音色 |
+| `RIVERBANK_WHISPER_POOL_SIZE` | `2` | 常驻的最终转写实例数，避免插话时等待旧解码 |
+| `RIVERBANK_WHISPER_HOTWORDS` | 空 | 可选领域热词；默认不强行偏置普通口语 |
+| `RIVERBANK_DAILY_AGENT_MAX_TURNS` | `12` | 常驻 Agent 重建前的轮数上限 |
+| `RIVERBANK_DAILY_TOOLSETS` | 8 项 Daily 工具 | 限制语音模式工具表，保留记忆、任务、视觉和网页能力 |
 
 每轮会记录一行 `Streaming TTS metrics`，其中 `first_delta`、`first_audio`、`llm_complete` 和 `playback_complete` 分别表示模型首字、首个音频包、文字生成完成和播放完成相对于该轮开始的时间。验收时同时确认 `audible=True` 且 `error=None`。
+
+端到端监测仅把各阶段耗时写入 `~/.local/state/riverbank/voice-latency.jsonl`，不写入转写文字或模型回复。`state.json` 会提供最近 500 轮的 STT、LLM 首字、LLM 完成、TTS 首帧和“说完到出声” P50/P95。

@@ -29,6 +29,7 @@ MODULE_PATH = Path(
         / "daily_voice_assistant.py",
     )
 )
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("daily_voice_assistant", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 voice = importlib.util.module_from_spec(SPEC)

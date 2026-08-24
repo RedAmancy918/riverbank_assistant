@@ -39,6 +39,8 @@ apps/paper-radar/.venv/bin/pip install -r apps/paper-radar/requirements.txt
 - Hailo 示例虚拟环境、HEF、后处理库和 JSON 路径；
 - 数据盘是否在 systemd 启动服务前完成挂载。
 
+如果 NVMe 与 Hailo 共用 PCIe 扩展板，先按 `HARDWARE.zh-CN.md` 的稳定性章节进行长时读取和重启验证；不要把仍然挂载但底层已经掉线的 NVMe 误判为正常。
+
 ## 4. 安装服务
 
 先查看将要安装的内容：
