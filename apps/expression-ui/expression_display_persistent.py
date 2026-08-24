@@ -1423,24 +1423,32 @@ class PersistentExpressionDisplay:
                 amplitude *= 1.0 - settle_ratio
             jump = round(-amplitude * wave)
             base_color = (base_value, base_value, base_value)
-            if state == "pending":
-                color = self.mix_color(base_color, (55, 192, 235), 0.18 + 0.28 * wave)
-            elif state == "failed":
+            # Keep the live self-check in the same neutral palette as the
+            # finished mark.  A white luminance mask supplies the motion cue,
+            # then dissolves continuously into the static grayscale tiles.
+            highlight_fade = (
+                1.0 - settle_ratio
+                if settling
+                else (0.0 if self.boot_phase in {"static", "fade"} else 1.0)
+            )
+            white_strength = (0.28 + 0.58 * wave) * highlight_fade
+            if state == "failed":
                 alert = (232, 71, 77) if self.boot_phase == "critical_hold" else (228, 159, 66)
-                color = self.mix_color(base_color, alert, 0.42 + 0.30 * wave)
+                alert_strength = (0.42 + 0.30 * wave) * highlight_fade
+                color = self.mix_color(base_color, alert, alert_strength)
             else:
-                color = self.mix_color(base_color, (205, 245, 255), 0.08 * wave)
+                color = self.mix_color(base_color, (255, 255, 255), white_strength)
             rect = self.pygame.Rect(
                 grid_left + column * (tile_size + gap),
                 grid_top + row * (tile_size + gap) + jump,
                 tile_size,
                 tile_size,
             )
-            glow_alpha = round((28 if state == "healthy" else 70) * wave)
+            glow_alpha = round((36 + 82 * wave) * highlight_fade)
             glow_rect = rect.inflate(14, 14)
             self.pygame.draw.rect(
                 canvas,
-                (55, 188, 230, glow_alpha),
+                (255, 255, 255, glow_alpha),
                 glow_rect,
                 border_radius=round(tile_size * 0.25),
             )
@@ -1453,7 +1461,14 @@ class PersistentExpressionDisplay:
 
         if self.boot_wordmark_surface is not None:
             wordmark = self.boot_wordmark_surface
-            wordmark_alpha = 210 if self.boot_phase in {"checking", "critical_hold"} else 255
+            if settling:
+                wordmark_alpha = round(210 + 45 * settle_ratio)
+            else:
+                wordmark_alpha = (
+                    210
+                    if self.boot_phase in {"checking", "critical_hold"}
+                    else 255
+                )
             wordmark.set_alpha(wordmark_alpha)
             self.screen.blit(
                 canvas,
