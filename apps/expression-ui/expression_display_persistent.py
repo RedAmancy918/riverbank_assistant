@@ -38,8 +38,11 @@ DAILY_HOME = Path(
     )
 )
 CONFIG_PATH = Path(os.environ.get("RIVERBANK_EXPRESSION_CONFIG", APP_DIR / "expressions.json"))
+DEFAULT_UI_THEME_PATH = APP_DIR / "ui-theme.json"
+if not DEFAULT_UI_THEME_PATH.is_file() and (APP_DIR.parent / "ui-theme.json").is_file():
+    DEFAULT_UI_THEME_PATH = APP_DIR.parent / "ui-theme.json"
 UI_THEME_PATH = Path(
-    os.environ.get("RIVERBANK_UI_THEME", APP_DIR / "ui-theme.json")
+    os.environ.get("RIVERBANK_UI_THEME", DEFAULT_UI_THEME_PATH)
 )
 RUNTIME_DIR = Path(os.environ.get("RIVERBANK_EXPRESSION_RUNTIME", "/run/riverbank-expression"))
 SOCKET_PATH = RUNTIME_DIR / "control.sock"
@@ -54,6 +57,9 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 # /dev/shm survives service restarts but is cleared by an actual OS reboot.
 BOOT_ANIMATION_MARKER_PATH = Path(
     "/dev/shm/riverbank-expression-boot-animation-boot-id"
+)
+VERSION_PATH = Path(
+    os.environ.get("RIVERBANK_VERSION_FILE", APP_DIR / "VERSION")
 )
 DAILY_STATE_DB = Path(os.environ.get("RIVERBANK_DAILY_STATE_DB", DAILY_HOME / "state.db"))
 DAILY_ENV_PATH = Path(os.environ.get("RIVERBANK_DAILY_ENV", DAILY_HOME / ".env"))
@@ -119,7 +125,12 @@ DEFAULT_RADIAL_MENU = (
             "text": "请用口语简短告诉我今天的具身智讯日报里最值得关注的内容。",
         },
     },
-    {"id": "status", "label": "状态", "glyph": "态", "action": {"type": "show_status"}},
+    {
+        "id": "settings",
+        "label": "设置",
+        "glyph": "设",
+        "action": {"type": "open_settings"},
+    },
     {
         "id": "happy",
         "label": "开心",
@@ -276,6 +287,17 @@ class SystemStatus:
         self.camera_active_sources: tuple[str, ...] = ()
         self.bluetooth_connected = False
         self.volume_percent = 0
+        self.wifi_ssid = ""
+        self.wifi_ipv4 = ""
+        self.bluetooth_powered = False
+        self.bluetooth_devices: tuple[str, ...] = ()
+        self.hostname = socket.gethostname()
+        self.os_name = "Linux"
+        self.kernel_version = ""
+        self.uptime_seconds = 0
+        self.health_healthy_count = 0
+        self.health_total_count = 0
+        self.app_version = "0.0.0"
 
     @staticmethod
     def read_wifi_quality() -> int:
@@ -288,6 +310,48 @@ class SystemStatus:
         except (OSError, ValueError, IndexError):
             pass
         return 0
+
+    @staticmethod
+    def read_wifi_details() -> tuple[str, str]:
+        ssid = ""
+        for executable in ("/usr/sbin/iwgetid", "/usr/bin/iwgetid"):
+            if not Path(executable).is_file():
+                continue
+            try:
+                result = subprocess.run(
+                    [executable, "wlan0", "--raw"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=0.7,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    ssid = result.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            break
+
+        ipv4 = ""
+        for executable in ("/usr/sbin/ip", "/usr/bin/ip"):
+            if not Path(executable).is_file():
+                continue
+            try:
+                result = subprocess.run(
+                    [executable, "-4", "-o", "addr", "show", "dev", "wlan0"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=0.7,
+                    check=False,
+                )
+                match = re.search(r"\binet\s+([0-9.]+)(?:/\d+)?", result.stdout)
+                if result.returncode == 0 and match:
+                    ipv4 = match.group(1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            break
+        return ssid, ipv4
 
     @staticmethod
     def read_tokens_today() -> int:
@@ -354,9 +418,22 @@ class SystemStatus:
         return bool(unique_sources), unique_sources
 
     @staticmethod
-    def read_bluetooth_connected() -> bool:
+    def read_bluetooth_details() -> tuple[bool, tuple[str, ...]]:
+        powered = False
+        devices: tuple[str, ...] = ()
         try:
-            result = subprocess.run(
+            show = subprocess.run(
+                ["/usr/bin/bluetoothctl", "show"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=0.7,
+                check=False,
+            )
+            powered = show.returncode == 0 and bool(
+                re.search(r"^\s*Powered:\s+yes\s*$", show.stdout, re.MULTILINE)
+            )
+            connected = subprocess.run(
                 ["/usr/bin/bluetoothctl", "devices", "Connected"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -364,9 +441,77 @@ class SystemStatus:
                 timeout=0.7,
                 check=False,
             )
-            return result.returncode == 0 and bool(result.stdout.strip())
+            if connected.returncode == 0:
+                names = []
+                for line in connected.stdout.splitlines():
+                    parts = line.strip().split(maxsplit=2)
+                    if len(parts) >= 3 and parts[0] == "Device":
+                        names.append(parts[2])
+                devices = tuple(names)
         except (OSError, subprocess.TimeoutExpired):
-            return False
+            pass
+        return powered, devices
+
+    @classmethod
+    def read_bluetooth_connected(cls) -> bool:
+        _powered, devices = cls.read_bluetooth_details()
+        return bool(devices)
+
+    @staticmethod
+    def read_platform_details() -> tuple[str, str, str, int]:
+        hostname = socket.gethostname()
+        os_name = "Linux"
+        kernel_version = ""
+        uptime_seconds = 0
+        try:
+            for raw_line in Path("/etc/os-release").read_text(
+                encoding="utf-8"
+            ).splitlines():
+                if raw_line.startswith("PRETTY_NAME="):
+                    os_name = raw_line.split("=", 1)[1].strip().strip('"')
+                    break
+        except OSError:
+            pass
+        try:
+            kernel_version = Path("/proc/sys/kernel/osrelease").read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            pass
+        try:
+            uptime_seconds = int(
+                float(
+                    Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
+                )
+            )
+        except (OSError, ValueError, IndexError):
+            pass
+        return hostname, os_name, kernel_version, uptime_seconds
+
+    @staticmethod
+    def read_health_summary() -> tuple[int, int]:
+        try:
+            payload = json.loads(HEALTH_STATUS_PATH.read_text(encoding="utf-8"))
+            checks = payload.get("checks")
+            if not isinstance(checks, list):
+                return 0, 0
+            total = len(checks)
+            healthy = sum(
+                1
+                for record in checks
+                if isinstance(record, dict) and bool(record.get("healthy"))
+            )
+            return healthy, total
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return 0, 0
+
+    @staticmethod
+    def read_app_version() -> str:
+        try:
+            version = VERSION_PATH.read_text(encoding="utf-8").strip()
+            return version or "0.0.0"
+        except OSError:
+            return "0.0.0"
 
     @staticmethod
     def read_volume_percent() -> int:
@@ -392,52 +537,61 @@ class SystemStatus:
     def update(self, now_monotonic: float, force: bool = False) -> bool:
         if not force and now_monotonic - self.last_update < 2.0:
             return False
-        before = (
+        return self.apply_snapshot(self.collect_snapshot(), now_monotonic)
+
+    def snapshot_values(self) -> tuple:
+        return (
             self.wifi_quality,
             self.tokens_today,
             self.camera_active,
             self.camera_active_sources,
             self.bluetooth_connected,
             self.volume_percent,
-        )
-        self.wifi_quality = self.read_wifi_quality()
-        self.tokens_today = self.read_tokens_today()
-        self.camera_active, self.camera_active_sources = self.read_camera_activity(
-            time.time()
-        )
-        self.bluetooth_connected = self.read_bluetooth_connected()
-        self.volume_percent = self.read_volume_percent()
-        self.last_update = now_monotonic
-        return before != (
-            self.wifi_quality,
-            self.tokens_today,
-            self.camera_active,
-            self.camera_active_sources,
-            self.bluetooth_connected,
-            self.volume_percent,
+            self.wifi_ssid,
+            self.wifi_ipv4,
+            self.bluetooth_powered,
+            self.bluetooth_devices,
+            self.hostname,
+            self.os_name,
+            self.kernel_version,
+            self.uptime_seconds,
+            self.health_healthy_count,
+            self.health_total_count,
+            self.app_version,
         )
 
     @classmethod
     def collect_snapshot(cls) -> tuple:
         camera_active, camera_sources = cls.read_camera_activity(time.time())
+        wifi_quality = cls.read_wifi_quality()
+        wifi_ssid, wifi_ipv4 = cls.read_wifi_details()
+        bluetooth_powered, bluetooth_devices = cls.read_bluetooth_details()
+        hostname, os_name, kernel_version, uptime_seconds = (
+            cls.read_platform_details()
+        )
+        health_healthy_count, health_total_count = cls.read_health_summary()
         return (
-            cls.read_wifi_quality(),
+            wifi_quality,
             cls.read_tokens_today(),
             camera_active,
             camera_sources,
-            cls.read_bluetooth_connected(),
+            bool(bluetooth_devices),
             cls.read_volume_percent(),
+            wifi_ssid,
+            wifi_ipv4,
+            bluetooth_powered,
+            bluetooth_devices,
+            hostname,
+            os_name,
+            kernel_version,
+            uptime_seconds,
+            health_healthy_count,
+            health_total_count,
+            cls.read_app_version(),
         )
 
     def apply_snapshot(self, snapshot: tuple, now_monotonic: float) -> bool:
-        before = (
-            self.wifi_quality,
-            self.tokens_today,
-            self.camera_active,
-            self.camera_active_sources,
-            self.bluetooth_connected,
-            self.volume_percent,
-        )
+        before = self.snapshot_values()
         (
             self.wifi_quality,
             self.tokens_today,
@@ -445,6 +599,17 @@ class SystemStatus:
             self.camera_active_sources,
             self.bluetooth_connected,
             self.volume_percent,
+            self.wifi_ssid,
+            self.wifi_ipv4,
+            self.bluetooth_powered,
+            self.bluetooth_devices,
+            self.hostname,
+            self.os_name,
+            self.kernel_version,
+            self.uptime_seconds,
+            self.health_healthy_count,
+            self.health_total_count,
+            self.app_version,
         ) = snapshot
         self.last_update = now_monotonic
         return before != snapshot
@@ -457,6 +622,17 @@ class SystemStatus:
             "camera_active_sources": list(self.camera_active_sources),
             "bluetooth_connected": self.bluetooth_connected,
             "volume_percent": self.volume_percent,
+            "wifi_ssid": self.wifi_ssid,
+            "wifi_ipv4": self.wifi_ipv4,
+            "bluetooth_powered": self.bluetooth_powered,
+            "bluetooth_devices": list(self.bluetooth_devices),
+            "hostname": self.hostname,
+            "os_name": self.os_name,
+            "kernel_version": self.kernel_version,
+            "uptime_seconds": self.uptime_seconds,
+            "health_healthy_count": self.health_healthy_count,
+            "health_total_count": self.health_total_count,
+            "app_version": self.app_version,
         }
 
 
@@ -955,6 +1131,12 @@ class PersistentExpressionDisplay:
         self.transition_frame_peak_ms = 0.0
         self.last_menu_selection: dict | None = None
         self.status_visible_until = 0.0
+        self.settings_active = False
+        self.settings_section: str | None = None
+        self.settings_pointer_target: str | None = None
+        self.settings_last_interaction_at = 0.0
+        self.settings_card_cache: OrderedDict[tuple, object] = OrderedDict()
+        self.settings_card_cache_limit = 16
         self.last_overlay_redraw = 0.0
         self.camera_indicator_angle_degrees = max(
             -170.0,
@@ -1167,7 +1349,8 @@ class PersistentExpressionDisplay:
         # A renderer restart necessarily closes its camera view. Keep the voice
         # controller in sync so an old visual-mode flag cannot survive by itself.
         self.send_voice_command({"command": "visual_mode", "active": False})
-        self.system_status.update(time.monotonic(), force=True)
+        self.system_status.app_version = SystemStatus.read_app_version()
+        self.request_system_status_refresh(time.monotonic())
         self.request_token_balance(time.monotonic())
         self.prewarm_control_overlays()
         self.write_state()
@@ -1837,6 +2020,7 @@ class PersistentExpressionDisplay:
             or self.deadline is not None
             or self.pointer_down
             or self.menu_active
+            or self.settings_active
             or now < self.status_visible_until
             or self.token_popup_visible
             or self.camera_view_active
@@ -2744,6 +2928,8 @@ class PersistentExpressionDisplay:
             self.draw_boot_animation(now)
         elif self.screensaver_active:
             self.draw_screensaver()
+        elif self.settings_active:
+            self.draw_settings(now)
         else:
             animation = self.current_animation()
             frame = animation.frames[self.frame_index % len(animation.frames)]
@@ -2818,6 +3004,363 @@ class PersistentExpressionDisplay:
     ) -> None:
         surface = font.render(text, True, color)
         self.screen.blit(surface, surface.get_rect(center=center))
+
+    def request_system_status_refresh(self, now: float | None = None) -> bool:
+        requested_at = time.monotonic() if now is None else now
+        if self.status_future is not None:
+            return False
+        self.status_future = self.status_executor.submit(
+            SystemStatus.collect_snapshot
+        )
+        self.status_next_update_at = requested_at + 2.0
+        self.needs_redraw = True
+        return True
+
+    def open_settings(self) -> None:
+        now = time.monotonic()
+        self.settings_active = True
+        self.settings_section = None
+        self.settings_pointer_target = None
+        self.settings_last_interaction_at = now
+        self.status_visible_until = 0.0
+        self.token_popup_visible = False
+        self.note_screensaver_activity(now)
+        self.request_system_status_refresh(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("settings page opened")
+
+    def close_settings(self) -> None:
+        if not self.settings_active:
+            return
+        self.settings_active = False
+        self.settings_section = None
+        self.settings_pointer_target = None
+        self.settings_last_interaction_at = time.monotonic()
+        self.note_screensaver_activity(self.settings_last_interaction_at)
+        self.needs_redraw = True
+        self.write_state()
+        log("settings page closed")
+
+    def settings_card_rects(self) -> dict[str, object]:
+        left = round(self.width * 0.15)
+        width = round(self.width * 0.70)
+        height = round(self.height * 0.125)
+        gap = round(self.height * 0.022)
+        top = round(self.height * 0.215)
+        names = ("wifi", "bluetooth", "version", "system")
+        return {
+            name: self.pygame.Rect(left, top + index * (height + gap), width, height)
+            for index, name in enumerate(names)
+        }
+
+    def settings_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, (94, 96)) <= 54:
+            return "back"
+        if math.dist(position, (self.width - 94, 96)) <= 54:
+            return "refresh"
+        if self.settings_section is None:
+            for name, rect in self.settings_card_rects().items():
+                if rect.collidepoint(position):
+                    return name
+        return None
+
+    def handle_settings_target(self, target: str | None) -> None:
+        if target is None:
+            return
+        now = time.monotonic()
+        self.settings_last_interaction_at = now
+        self.note_screensaver_activity(now)
+        if target == "back":
+            if self.settings_section is None:
+                self.close_settings()
+                return
+            self.settings_section = None
+            log("settings detail returned to root")
+        elif target == "refresh":
+            self.request_system_status_refresh(now)
+            log("settings status refresh requested")
+        elif target in {"wifi", "bluetooth", "version", "system"}:
+            self.settings_section = target
+            log(f"settings detail opened section={target}")
+        self.settings_pointer_target = None
+        self.needs_redraw = True
+        self.write_state()
+
+    @staticmethod
+    def format_uptime(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes = remainder // 60
+        if days:
+            return f"{days} 天 {hours} 小时"
+        if hours:
+            return f"{hours} 小时 {minutes} 分钟"
+        return f"{minutes} 分钟"
+
+    @staticmethod
+    def ellipsize_text(text: str, font: object, max_width: int) -> str:
+        value = str(text or "—")
+        if font.size(value)[0] <= max_width:
+            return value
+        suffix = "…"
+        while value and font.size(value + suffix)[0] > max_width:
+            value = value[:-1]
+        return (value + suffix) if value else suffix
+
+    def settings_card_surface(
+        self,
+        size: tuple[int, int],
+        pressed: bool,
+        active: bool,
+    ) -> object:
+        key = (size, pressed, active)
+        cached = self.settings_card_cache.get(key)
+        if cached is not None:
+            self.settings_card_cache.move_to_end(key)
+            return cached
+        width, height = size
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (width * scale, height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        rect = self.pygame.Rect(
+            2 * scale,
+            2 * scale,
+            (width - 4) * scale,
+            (height - 4) * scale,
+        )
+        fill = (17, 48, 63, 248) if pressed else (8, 29, 40, 244)
+        border = (98, 215, 242, 160) if pressed else (75, 145, 167, 94)
+        self.pygame.draw.rect(
+            high,
+            (0, 0, 0, 110),
+            rect.move(0, 3 * scale),
+            border_radius=28 * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            fill,
+            rect,
+            border_radius=28 * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            border,
+            rect,
+            width=scale,
+            border_radius=28 * scale,
+        )
+        accent = (87, 224, 248, 230) if active else (93, 137, 151, 170)
+        accent_rect = self.pygame.Rect(
+            18 * scale,
+            20 * scale,
+            7 * scale,
+            (height - 40) * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            accent,
+            accent_rect,
+            border_radius=4 * scale,
+        )
+        surface = self.pygame.transform.smoothscale(high, size)
+        self.settings_card_cache[key] = surface
+        self.settings_card_cache.move_to_end(key)
+        while len(self.settings_card_cache) > self.settings_card_cache_limit:
+            self.settings_card_cache.popitem(last=False)
+        return surface
+
+    def draw_settings_navigation(self, title: str) -> None:
+        back_center = (94, 96)
+        refresh_center = (self.width - 94, 96)
+        for center, pressed in (
+            (back_center, self.settings_pointer_target == "back"),
+            (refresh_center, self.settings_pointer_target == "refresh"),
+        ):
+            self.draw_aa_circle(
+                self.screen,
+                (18, 54, 69) if pressed else (7, 28, 39),
+                center,
+                38,
+            )
+            self.draw_aa_ring(
+                self.screen,
+                (92, 194, 219, 120),
+                center,
+                38,
+                width=2,
+            )
+        self.draw_centered_text("<", self.font_large, (205, 235, 243), back_center)
+        self.draw_centered_text("刷", self.font_medium, (177, 222, 234), refresh_center)
+        self.draw_centered_text(
+            title,
+            self.font_large,
+            (225, 243, 248),
+            (self.width // 2, 98),
+        )
+
+    def settings_root_items(self) -> tuple[tuple[str, str, str, bool], ...]:
+        status = self.system_status
+        wifi_active = bool(status.wifi_ssid or status.wifi_ipv4)
+        if wifi_active:
+            wifi_summary = (
+                f"{status.wifi_ssid or '已连接'} · {status.wifi_quality}%"
+            )
+        else:
+            wifi_summary = "未连接"
+        if status.bluetooth_devices:
+            bluetooth_summary = f"已连接 · {status.bluetooth_devices[0]}"
+        elif status.bluetooth_powered:
+            bluetooth_summary = "已开启 · 未连接设备"
+        else:
+            bluetooth_summary = "已关闭"
+        if status.health_total_count:
+            health = (
+                f"自检 {status.health_healthy_count}/{status.health_total_count}"
+            )
+        else:
+            health = "自检读取中"
+        return (
+            ("wifi", "Wi-Fi", wifi_summary, wifi_active),
+            (
+                "bluetooth",
+                "蓝牙",
+                bluetooth_summary,
+                status.bluetooth_powered,
+            ),
+            (
+                "version",
+                "版本",
+                f"RiverBank Edge · v{status.app_version}",
+                True,
+            ),
+            ("system", "系统", f"{status.hostname} · {health}", True),
+        )
+
+    def settings_detail_rows(self, section: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        status = self.system_status
+        if section == "wifi":
+            connected = bool(status.wifi_ssid or status.wifi_ipv4)
+            return "Wi-Fi", (
+                ("状态", "已连接" if connected else "未连接"),
+                ("网络", status.wifi_ssid or "—"),
+                ("IPv4", status.wifi_ipv4 or "—"),
+                ("信号", f"{status.wifi_quality}%" if connected else "—"),
+            )
+        if section == "bluetooth":
+            device_text = "、".join(status.bluetooth_devices) or "—"
+            return "蓝牙", (
+                ("电源", "已开启" if status.bluetooth_powered else "已关闭"),
+                ("连接", f"{len(status.bluetooth_devices)} 台设备"),
+                ("设备", device_text),
+                ("模式", "只读状态"),
+            )
+        if section == "version":
+            return "版本", (
+                ("产品", "RiverBank Edge"),
+                ("版本", f"v{status.app_version}"),
+                ("系统", status.os_name),
+                ("内核", status.kernel_version or "—"),
+            )
+        health = (
+            f"{status.health_healthy_count}/{status.health_total_count} 正常"
+            if status.health_total_count
+            else "读取中"
+        )
+        return "系统", (
+            ("主机", status.hostname),
+            ("运行", self.format_uptime(status.uptime_seconds)),
+            ("自检", health),
+            ("界面", f"{self.render_fps:.1f} FPS" if self.render_fps else "启动中"),
+        )
+
+    def draw_settings(self, _now: float) -> None:
+        self.screen.fill((0, 0, 0))
+        center = (self.width // 2, self.height // 2)
+        self.draw_aa_ring(
+            self.screen,
+            (42, 120, 148, 32),
+            center,
+            min(self.width, self.height) // 2 - 5,
+            width=3,
+        )
+        if self.settings_section is None:
+            self.draw_settings_navigation("设置")
+            rects = self.settings_card_rects()
+            for name, label, summary, active in self.settings_root_items():
+                rect = rects[name]
+                pressed = (
+                    self.pointer_down and self.settings_pointer_target == name
+                )
+                self.screen.blit(
+                    self.settings_card_surface(rect.size, pressed, active),
+                    rect.topleft,
+                )
+                label_surface = self.font_medium.render(
+                    label,
+                    True,
+                    (218, 239, 245),
+                )
+                summary_surface = self.font_small.render(
+                    self.ellipsize_text(summary, self.font_small, rect.width - 150),
+                    True,
+                    (117, 180, 198) if active else (126, 143, 150),
+                )
+                self.screen.blit(label_surface, (rect.left + 48, rect.top + 17))
+                self.screen.blit(summary_surface, (rect.left + 48, rect.top + 58))
+                self.draw_centered_text(
+                    ">",
+                    self.font_medium,
+                    (103, 173, 191),
+                    (rect.right - 42, rect.centery),
+                )
+            self.draw_centered_text(
+                "只读状态 · 点击项目查看详情",
+                self.font_small,
+                (91, 139, 152),
+                (self.width // 2, round(self.height * 0.91)),
+            )
+            return
+
+        title, rows = self.settings_detail_rows(self.settings_section)
+        self.draw_settings_navigation(title)
+        left = round(self.width * 0.15)
+        width = round(self.width * 0.70)
+        row_height = round(self.height * 0.105)
+        gap = round(self.height * 0.018)
+        top = round(self.height * 0.235)
+        for index, (label, value) in enumerate(rows):
+            rect = self.pygame.Rect(
+                left,
+                top + index * (row_height + gap),
+                width,
+                row_height,
+            )
+            self.screen.blit(
+                self.settings_card_surface(rect.size, False, True),
+                rect.topleft,
+            )
+            label_surface = self.font_small.render(label, True, (111, 177, 195))
+            value_surface = self.font_medium.render(
+                self.ellipsize_text(value, self.font_medium, rect.width - 185),
+                True,
+                (218, 239, 245),
+            )
+            self.screen.blit(label_surface, (rect.left + 48, rect.centery - 12))
+            self.screen.blit(
+                value_surface,
+                value_surface.get_rect(midright=(rect.right - 38, rect.centery)),
+            )
+        self.draw_centered_text(
+            "点击左上角返回",
+            self.font_small,
+            (91, 139, 152),
+            (self.width // 2, round(self.height * 0.86)),
+        )
 
     def draw_aa_circle(
         self,
@@ -4922,6 +5465,11 @@ class PersistentExpressionDisplay:
         self.edge_exit_candidate = False
         self.edge_exit_ready = False
         self.edge_exit_progress = 0.0
+        if self.settings_active:
+            self.settings_pointer_target = self.settings_target_at(position)
+            self.settings_last_interaction_at = now
+            self.needs_redraw = True
+            return
         if self.menu_active:
             self.menu_last_interaction_at = now
             # While a control is visually returning to the status bar, keep that
@@ -5057,6 +5605,12 @@ class PersistentExpressionDisplay:
             self.menu_last_interaction_at = time.monotonic()
         if math.dist(position, self.pointer_start) > 24:
             self.pointer_moved = True
+        if self.settings_active:
+            self.settings_last_interaction_at = time.monotonic()
+            if self.pointer_moved:
+                self.settings_pointer_target = None
+            self.needs_redraw = True
+            return
         if self.camera_pointer_target is not None:
             self.needs_redraw = True
             return
@@ -5131,6 +5685,16 @@ class PersistentExpressionDisplay:
             return
         self.pointer_position = position
         self.touch_count += 1
+        if self.settings_active:
+            target = self.settings_pointer_target
+            if not self.pointer_moved and target == self.settings_target_at(position):
+                self.handle_settings_target(target)
+            self.settings_pointer_target = None
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
         if self.camera_pointer_target is not None:
             target = self.camera_pointer_target
             if target == "gallery_ui":
@@ -5292,6 +5856,7 @@ class PersistentExpressionDisplay:
         if (
             not self.pointer_down
             or self.menu_active
+            or self.settings_active
             or self.pointer_moved
             or self.camera_pointer_target is not None
         ):
@@ -5304,7 +5869,7 @@ class PersistentExpressionDisplay:
         self.menu_opened_at = now
         self.menu_last_interaction_at = now
         self.status_visible_until = 0.0
-        self.system_status.update(now, force=True)
+        self.request_system_status_refresh(now)
         self.needs_redraw = True
         log(f"radial menu opened at={self.pointer_start}")
         self.write_state()
@@ -5369,8 +5934,11 @@ class PersistentExpressionDisplay:
                 )
         elif action_type == "show_status":
             self.status_visible_until = time.monotonic() + 8.0
-            self.system_status.update(time.monotonic(), force=True)
+            self.request_system_status_refresh(time.monotonic())
             result = "shown"
+        elif action_type == "open_settings":
+            self.open_settings()
+            result = "opened"
         elif action_type == "expression":
             response = self.set_state(
                 str(action.get("state", self.default_state)),
@@ -5493,6 +6061,13 @@ class PersistentExpressionDisplay:
                 "dismiss_policy": "outside-tap-or-2s-idle",
             },
             "screensaver_settings_active": self.screensaver_panel_mode,
+            "settings": {
+                "active": self.settings_active,
+                "section": self.settings_section,
+                "pointer_target": self.settings_pointer_target,
+                "version": self.system_status.app_version,
+                "read_only": True,
+            },
             "photo_screensaver": {
                 "enabled": self.screensaver_idle_seconds > 0,
                 "active": self.screensaver_active,
@@ -5625,6 +6200,11 @@ class PersistentExpressionDisplay:
         if self.update_system_status_async(now):
             self.needs_redraw = True
             self.write_state()
+        if self.settings_active:
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
         self.update_long_press(now)
         if (
             self.volume_mode
@@ -5850,7 +6430,7 @@ def main() -> int:
                             if display.menu_active and isinstance(selected, int) and 0 <= selected < 6
                             else None
                         )
-                        display.system_status.update(time.monotonic(), force=True)
+                        display.request_system_status_refresh(time.monotonic())
                         preview_token_popup = bool(
                             preview_active
                             and request.get("token_popup", False)
@@ -5887,6 +6467,17 @@ def main() -> int:
                                 f"unsupported transition preview mode: {preview_mode}"
                             )
                         handlers[0 if preview_active else 1](preview_now)
+                        display.write_state()
+                    elif request.get("command") == "settings_preview":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.open_settings()
+                            section = str(request.get("section", "")).strip()
+                            if section in {"wifi", "bluetooth", "version", "system"}:
+                                display.settings_section = section
+                        else:
+                            display.close_settings()
+                        display.needs_redraw = True
                         display.write_state()
                     elif request.get("command") == "camera_view":
                         display.set_camera_view(bool(request.get("active", True)))

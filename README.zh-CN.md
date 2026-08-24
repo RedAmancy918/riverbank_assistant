@@ -6,7 +6,7 @@ RiverBank Edge 是一套在 Raspberry Pi 5 上运行的边缘智能助理工程�
 
 ## 当前能力
 
-- 800×800 圆形 DSI 屏常驻渲染：表情、触摸、环形菜单、状态胶囊、音量、重启确认、相机、相册和屏保。
+- 800×800 圆形 DSI 屏常驻渲染：表情、触摸、环形菜单、状态胶囊、设置页、音量、重启确认、相机、相册和屏保。
 - 连贯开机画面：Plymouth Logo → Wayland 接力层 → 3×3 方块自检动画 → 表情待机。
 - 单实例摄像头中枢：摄像头只由 `ustreamer` 持有，圆屏、Hermes 和 Hailo 从本地 HTTP 流共享画面。
 - Daily 语音链路：硬件唤醒、VAD 录音、Faster-Whisper 本地转写、Hermes Daily Profile、Edge TTS 播放与多轮补充。

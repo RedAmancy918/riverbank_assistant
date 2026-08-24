@@ -60,10 +60,10 @@
       }
     },
     {
-      "id": "status",
-      "label": "状态",
-      "glyph": "态",
-      "action": {"type": "show_status"}
+      "id": "settings",
+      "label": "设置",
+      "glyph": "设",
+      "action": {"type": "open_settings"}
     },
     {
       "id": "happy",
