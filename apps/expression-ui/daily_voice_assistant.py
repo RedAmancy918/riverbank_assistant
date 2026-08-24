@@ -76,6 +76,22 @@ DEBOUNCE_SECONDS = 8.0
 FOLLOW_UP_NO_SPEECH_SECONDS = 12.0
 MAX_VOICE_FOLLOW_UP_TURNS = 4
 LIVE_CAPTION_FINAL_HOLD_SECONDS = 1.0
+STREAM_TTS_ENABLED = os.environ.get(
+    "RIVERBANK_STREAM_TTS_ENABLED",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
+STREAM_TTS_MIN_CHARS = max(
+    6,
+    int(os.environ.get("RIVERBANK_STREAM_TTS_MIN_CHARS", "10")),
+)
+STREAM_TTS_HARD_CHARS = max(
+    STREAM_TTS_MIN_CHARS + 4,
+    int(os.environ.get("RIVERBANK_STREAM_TTS_HARD_CHARS", "24")),
+)
+STREAM_TTS_VOICE = os.environ.get(
+    "RIVERBANK_STREAM_TTS_VOICE",
+    "zh-CN-XiaoxiaoNeural",
+)
 STREAMING_ASR_MODEL_DIR = Path(
     os.environ.get(
         "RIVERBANK_STREAMING_ASR_MODEL_DIR",
@@ -630,6 +646,268 @@ class WakeAcknowledgementPlayer:
             self.stream = None
 
 
+class StreamingSpeechChunker:
+    """Cut append-only model deltas into natural, safely buffered clauses."""
+
+    STRONG_BOUNDARIES = frozenset("。！？!?\n")
+    SOFT_BOUNDARIES = frozenset("，；：,;:")
+
+    def __init__(self, min_chars: int, hard_chars: int) -> None:
+        self.min_chars = max(1, int(min_chars))
+        self.hard_chars = max(self.min_chars + 1, int(hard_chars))
+        self.buffer = ""
+
+    @staticmethod
+    def visible_length(value: str) -> int:
+        return sum(not character.isspace() for character in value)
+
+    def _strip_closed_think_blocks(self) -> None:
+        self.buffer = re.sub(
+            r"<think(?:\s[^>]*)?>.*?</think>",
+            "",
+            self.buffer,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+
+    def _speakable_prefix(self) -> str:
+        limit = len(self.buffer)
+        for marker in ("[[", "<think", "<THINK"):
+            marker_index = self.buffer.find(marker)
+            if marker_index >= 0:
+                limit = min(limit, marker_index)
+        return self.buffer[:limit]
+
+    def _next_cut(self) -> int | None:
+        prefix = self._speakable_prefix()
+        if not prefix:
+            return None
+        visible = 0
+        last_soft: int | None = None
+        last_soft_visible = 0
+        last_space: int | None = None
+        for index, character in enumerate(prefix):
+            if not character.isspace():
+                visible += 1
+            else:
+                last_space = index + 1
+            if character in self.SOFT_BOUNDARIES:
+                last_soft = index + 1
+                last_soft_visible = visible
+            if (
+                visible >= self.min_chars
+                and character in self.STRONG_BOUNDARIES | self.SOFT_BOUNDARIES
+            ):
+                return index + 1
+            if visible >= self.hard_chars:
+                if last_soft is not None and last_soft_visible >= self.min_chars:
+                    return last_soft
+                if last_space is not None:
+                    return last_space
+                return index + 1
+        return None
+
+    def feed(self, delta: str) -> list[str]:
+        if not delta:
+            return []
+        self.buffer += str(delta)
+        self._strip_closed_think_blocks()
+        chunks: list[str] = []
+        while (cut := self._next_cut()) is not None:
+            chunk = clean_for_speech(self.buffer[:cut])
+            self.buffer = self.buffer[cut:]
+            if chunk:
+                chunks.append(chunk)
+        return chunks
+
+    def segment_boundary(self) -> None:
+        """Drop an unspeakable tool-round fragment before the next segment."""
+        self._strip_closed_think_blocks()
+        if self.buffer.strip():
+            self.buffer = ""
+
+    def flush(self) -> list[str]:
+        self._strip_closed_think_blocks()
+        tail = self.buffer.replace(VOICE_FOLLOW_UP_MARKER, "")
+        if "[[" in tail:
+            tail = tail.split("[[", 1)[0]
+        self.buffer = ""
+        cleaned = clean_for_speech(tail)
+        return [cleaned] if cleaned else []
+
+
+class StreamingSpeechSession:
+    """Stream completed clauses through one continuous Edge-TTS player."""
+
+    _DONE = object()
+
+    def __init__(self, on_first_audio=None) -> None:
+        self.chunker = StreamingSpeechChunker(
+            STREAM_TTS_MIN_CHARS,
+            STREAM_TTS_HARD_CHARS,
+        )
+        self.on_first_audio = on_first_audio
+        self.text_queue: queue.Queue[object] = queue.Queue(maxsize=64)
+        self.started_at = time.monotonic()
+        self.first_delta_at: float | None = None
+        self.first_chunk_at: float | None = None
+        self.llm_complete_at: float | None = None
+        self.first_audio_at: float | None = None
+        self.playback_complete_at: float | None = None
+        self.delta_chars = 0
+        self.chunk_chars = 0
+        self.chunk_count = 0
+        self.boundary_count = 0
+        self.audible = False
+        self.error: str | None = None
+        self.player: subprocess.Popen | None = None
+        self.aborted = threading.Event()
+        self.worker = threading.Thread(
+            target=self._run,
+            name="riverbank-streaming-tts",
+            daemon=True,
+        )
+        self.worker.start()
+
+    @staticmethod
+    def elapsed(started_at: float, value: float | None) -> float | None:
+        return round(value - started_at, 3) if value is not None else None
+
+    def _enqueue(self, text: str) -> None:
+        value = clean_for_speech(text)
+        if not value or self.aborted.is_set():
+            return
+        if self.first_chunk_at is None:
+            self.first_chunk_at = time.monotonic()
+        try:
+            self.text_queue.put_nowait(value)
+            self.chunk_chars += len(value)
+            self.chunk_count += 1
+        except queue.Full:
+            self.error = "streaming TTS text queue full"
+            self.abort()
+
+    def feed(self, delta) -> None:
+        if self.aborted.is_set():
+            return
+        if delta is None:
+            self.boundary_count += 1
+            self.chunker.segment_boundary()
+            return
+        value = str(delta)
+        if not value:
+            return
+        if self.first_delta_at is None:
+            self.first_delta_at = time.monotonic()
+        self.delta_chars += len(value)
+        for chunk in self.chunker.feed(value):
+            self._enqueue(chunk)
+
+    async def _stream_chunk(self, text: str) -> None:
+        communicate = edge_tts.Communicate(text, STREAM_TTS_VOICE)
+        async for chunk in communicate.stream():
+            if self.aborted.is_set():
+                return
+            if chunk.get("type") != "audio":
+                continue
+            payload = chunk.get("data") or b""
+            if not payload or self.player is None or self.player.stdin is None:
+                continue
+            self.player.stdin.write(payload)
+            self.player.stdin.flush()
+            if not self.audible:
+                self.audible = True
+                self.first_audio_at = time.monotonic()
+                if callable(self.on_first_audio):
+                    try:
+                        self.on_first_audio()
+                    except Exception as exc:
+                        log(f"streaming TTS first-audio callback warning: {exc}")
+
+    def _start_player(self) -> None:
+        if self.player is not None:
+            return
+        self.player = subprocess.Popen(
+            [
+                "/usr/bin/ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "error",
+                "-f",
+                "mp3",
+                "-i",
+                "pipe:0",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _run(self) -> None:
+        try:
+            while not self.aborted.is_set():
+                item = self.text_queue.get()
+                if item is self._DONE:
+                    break
+                if not isinstance(item, str):
+                    continue
+                self._start_player()
+                asyncio.run(self._stream_chunk(item))
+            if self.player is not None and self.player.stdin is not None:
+                self.player.stdin.close()
+                self.player.stdin = None
+            if self.player is not None:
+                return_code = self.player.wait(timeout=300)
+                if return_code != 0 and not self.aborted.is_set():
+                    raise RuntimeError(f"ffplay exited with {return_code}")
+        except Exception as exc:
+            if not self.aborted.is_set():
+                self.error = str(exc)
+                log(f"streaming TTS warning: {exc}")
+        finally:
+            self.playback_complete_at = time.monotonic()
+
+    def mark_llm_complete(self) -> None:
+        self.llm_complete_at = time.monotonic()
+
+    def finish(self) -> bool:
+        for chunk in self.chunker.flush():
+            self._enqueue(chunk)
+        try:
+            self.text_queue.put(self._DONE, timeout=2.0)
+        except queue.Full:
+            self.error = "streaming TTS completion queue full"
+            self.abort()
+        self.worker.join(timeout=300)
+        if self.worker.is_alive():
+            self.error = "streaming TTS playback timed out"
+            self.abort()
+        log(
+            "Streaming TTS metrics "
+            f"first_delta={self.elapsed(self.started_at, self.first_delta_at)}s "
+            f"first_chunk={self.elapsed(self.started_at, self.first_chunk_at)}s "
+            f"llm_complete={self.elapsed(self.started_at, self.llm_complete_at)}s "
+            f"first_audio={self.elapsed(self.started_at, self.first_audio_at)}s "
+            f"playback_complete={self.elapsed(self.started_at, self.playback_complete_at)}s "
+            f"deltas={self.delta_chars} chunks={self.chunk_count} "
+            f"chunk_chars={self.chunk_chars} boundaries={self.boundary_count} "
+            f"audible={self.audible} error={self.error}"
+        )
+        return self.audible
+
+    def abort(self) -> None:
+        self.aborted.set()
+        try:
+            self.text_queue.put_nowait(self._DONE)
+        except queue.Full:
+            pass
+        if self.player is not None:
+            try:
+                self.player.terminate()
+            except Exception:
+                pass
+
+
 class PersistentHermesRuntime:
     """Reuse one Daily-profile AIAgent instead of spawning Hermes every turn."""
 
@@ -717,18 +995,23 @@ class PersistentHermesRuntime:
                     log(f"Persistent Daily Hermes warmup warning: {exc}")
                     self.close()
 
-    def ask(self, prompt: str) -> str:
+    def ask(self, prompt: str, stream_callback=None) -> str:
         with self.lock:
             if self.agent is None or self.turn_count >= 20:
                 self.close()
                 self._build()
             captured = io.StringIO()
+            previous_stream_callback = self.agent.stream_delta_callback
+            self.agent.stream_delta_callback = stream_callback
             try:
                 with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
                     result = self.agent.run_conversation(prompt)
             except Exception:
                 self.close()
                 raise
+            finally:
+                if self.agent is not None:
+                    self.agent.stream_delta_callback = previous_stream_callback
             self.turn_count += 1
             response = str(result.get("final_response") or "").strip()
             if not response:
@@ -911,6 +1194,13 @@ class DailyVoiceAssistant:
                 "draft_engine_error": self.streaming_caption.last_error,
                 "model_directory": str(self.streaming_caption.model_dir),
                 "final_engine": "faster-whisper-base",
+            },
+            "streaming_tts": {
+                "enabled": STREAM_TTS_ENABLED,
+                "voice": STREAM_TTS_VOICE,
+                "strategy": "punctuation-first-continuous-mp3",
+                "minimum_chunk_chars": STREAM_TTS_MIN_CHARS,
+                "hard_chunk_chars": STREAM_TTS_HARD_CHARS,
             },
             "last_trigger_at": self.last_trigger_at,
             "last_wake": self.last_wake,
@@ -1208,13 +1498,23 @@ class DailyVoiceAssistant:
                     pass
             self.write_state()
 
+    def handle_streaming_tts_first_audio(self) -> None:
+        self.last_result = "speaking"
+        self.write_state()
+        log("Streaming TTS first audio submitted")
+
     def ask_hermes(
         self,
         transcript: str,
         force_visual: bool = False,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, bool]:
         log(f"Transcript: {transcript}")
         prompt, visual_routed = route_user_request(transcript, force_visual=force_visual)
+        speech_session = (
+            StreamingSpeechSession(on_first_audio=self.handle_streaming_tts_first_audio)
+            if STREAM_TTS_ENABLED
+            else None
+        )
         if visual_routed:
             log("Visual intent detected -> fresh camera-hub frame + Qwen vision")
             self.visual_request_active = True
@@ -1222,11 +1522,32 @@ class DailyVoiceAssistant:
             self.write_state()
         try:
             routed_prompt = f"{VOICE_DIALOGUE_PROTOCOL}\n\n用户本轮输入：{prompt}"
-            raw_response = ANSI_RE.sub("", self.hermes.ask(routed_prompt)).strip()
+            try:
+                raw_response = ANSI_RE.sub(
+                    "",
+                    self.hermes.ask(
+                        routed_prompt,
+                        stream_callback=(
+                            speech_session.feed if speech_session is not None else None
+                        ),
+                    ),
+                ).strip()
+            except Exception:
+                if speech_session is not None:
+                    speech_session.abort()
+                raise
+            if speech_session is not None:
+                speech_session.mark_llm_complete()
+            if visual_routed:
+                self.visual_request_active = False
+                vision_activity(False)
+                self.write_state()
+                visual_routed = False
             response, needs_follow_up = parse_voice_response(raw_response)
             log(f"Hermes: {response}")
             log(f"Voice follow-up required={needs_follow_up}")
-            return response, needs_follow_up
+            streamed = speech_session.finish() if speech_session is not None else False
+            return response, needs_follow_up, streamed
         finally:
             if visual_routed:
                 self.visual_request_active = False
@@ -1456,6 +1777,7 @@ class DailyVoiceAssistant:
             self.conversation_turn = 1
             current_transcript = transcript
             while self.running:
+                response_streamed = False
                 response = self.run_local_device_command(current_transcript)
                 if response is None:
                     if camera_mode_at_start and is_visual_intent(current_transcript):
@@ -1465,7 +1787,7 @@ class DailyVoiceAssistant:
                     else:
                         self.last_result = "asking_hermes"
                         self.write_state()
-                        response, needs_follow_up = self.ask_hermes(
+                        response, needs_follow_up, response_streamed = self.ask_hermes(
                             current_transcript,
                             force_visual=bool(force_visual)
                             and is_visual_intent(current_transcript),
@@ -1475,9 +1797,12 @@ class DailyVoiceAssistant:
                     expression("happy", 2.5)
                 self.last_result = "speaking"
                 self.write_state()
-                log("TTS playback started")
-                self.speak(response)
-                log("TTS playback completed")
+                if response_streamed:
+                    log("Streaming TTS playback completed")
+                else:
+                    log("TTS playback started")
+                    self.speak(response)
+                    log("TTS playback completed")
                 if not needs_follow_up:
                     self.last_result = "completed"
                     break
@@ -1560,18 +1885,22 @@ class DailyVoiceAssistant:
         self.write_state()
         log(f"Text interaction requested source={source}: {transcript}")
         try:
+            response_streamed = False
             response = self.run_local_device_command(transcript)
             if response is None:
-                response, _ = self.ask_hermes(transcript)
+                response, _, response_streamed = self.ask_hermes(transcript)
             else:
                 expression("happy", 2.5)
             self.last_result = "speaking"
             self.write_state()
-            log("TTS playback started")
-            self.speak(response)
+            if response_streamed:
+                log("Streaming TTS playback completed")
+            else:
+                log("TTS playback started")
+                self.speak(response)
+                log("TTS playback completed")
             self.interaction_count += 1
             self.last_result = "completed"
-            log("TTS playback completed")
         except Exception as exc:
             self.last_error = str(exc)
             self.last_result = "error"

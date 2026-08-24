@@ -54,4 +54,18 @@
 - 唤醒后切换 `listening` 表情并立即显示气泡，但气泡内不显示“正在听”；
 - 气泡增量文字最多三行，最终转写停留约 0.8 秒后平滑淡出；
 - 流式草稿引擎为 sherpa-onnx 14M Zipformer，最终 Hermes 输入仍来自 Faster-Whisper Base；
+- Hermes 回复使用自然标点优先的流式 TTS，首段语音应在完整回答生成前开始，失败时应回退到完整回复朗读；
 - Paper Radar 候选/精选/焦点/产业数量上限保持不变。
+
+## 流式语音参数与延迟
+
+Daily Voice 默认使用实机验证过的“标点优先 + 连续 MP3 流”组合。可通过 systemd 环境变量调整：
+
+| 变量 | 默认值 | 作用 |
+|---|---:|---|
+| `RIVERBANK_STREAM_TTS_ENABLED` | `1` | 开启流式语音；设为 `0` 可快速回退到整段 TTS |
+| `RIVERBANK_STREAM_TTS_MIN_CHARS` | `10` | 只在缓冲达到该长度后才在自然标点处切分 |
+| `RIVERBANK_STREAM_TTS_HARD_CHARS` | `24` | 长时没有标点时的强制切分上限 |
+| `RIVERBANK_STREAM_TTS_VOICE` | `zh-CN-XiaoxiaoNeural` | Edge TTS 音色 |
+
+每轮会记录一行 `Streaming TTS metrics`，其中 `first_delta`、`first_audio`、`llm_complete` 和 `playback_complete` 分别表示模型首字、首个音频包、文字生成完成和播放完成相对于该轮开始的时间。验收时同时确认 `audible=True` 且 `error=None`。
