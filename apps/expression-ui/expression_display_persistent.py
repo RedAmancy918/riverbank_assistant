@@ -3045,25 +3045,41 @@ class PersistentExpressionDisplay:
     def settings_card_rects(self) -> dict[str, object]:
         left = round(self.width * 0.15)
         width = round(self.width * 0.70)
-        height = round(self.height * 0.125)
-        gap = round(self.height * 0.022)
-        top = round(self.height * 0.215)
+        height = round(self.height * 0.115)
+        gap = round(self.height * 0.020)
+        top = round(self.height * 0.2625)
         names = ("wifi", "bluetooth", "version", "system")
         return {
             name: self.pygame.Rect(left, top + index * (height + gap), width, height)
             for index, name in enumerate(names)
         }
 
+    def settings_navigation_centers(
+        self,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        inset = round(min(self.width, self.height) * 0.1875)
+        return (inset, inset), (self.width - inset, inset)
+
     def settings_target_at(self, position: tuple[int, int]) -> str | None:
-        if math.dist(position, (94, 96)) <= 54:
+        back_center, refresh_center = self.settings_navigation_centers()
+        if math.dist(position, back_center) <= 54:
             return "back"
-        if math.dist(position, (self.width - 94, 96)) <= 54:
+        if math.dist(position, refresh_center) <= 54:
             return "refresh"
         if self.settings_section is None:
             for name, rect in self.settings_card_rects().items():
                 if rect.collidepoint(position):
                     return name
         return None
+
+    def settings_back_swipe_detected(
+        self,
+        position: tuple[int, int],
+    ) -> bool:
+        dx = position[0] - self.pointer_start[0]
+        dy = position[1] - self.pointer_start[1]
+        minimum_distance = max(80, round(self.width * 0.12))
+        return dx >= minimum_distance and abs(dy) <= max(48, dx * 0.55)
 
     def handle_settings_target(self, target: str | None) -> None:
         if target is None:
@@ -3175,8 +3191,7 @@ class PersistentExpressionDisplay:
         return surface
 
     def draw_settings_navigation(self, title: str) -> None:
-        back_center = (94, 96)
-        refresh_center = (self.width - 94, 96)
+        back_center, refresh_center = self.settings_navigation_centers()
         for center, pressed in (
             (back_center, self.settings_pointer_target == "back"),
             (refresh_center, self.settings_pointer_target == "refresh"),
@@ -3285,7 +3300,7 @@ class PersistentExpressionDisplay:
             self.screen,
             (42, 120, 148, 32),
             center,
-            min(self.width, self.height) // 2 - 5,
+            min(self.width, self.height) // 2 - 10,
             width=3,
         )
         if self.settings_section is None:
@@ -3318,12 +3333,6 @@ class PersistentExpressionDisplay:
                     (103, 173, 191),
                     (rect.right - 42, rect.centery),
                 )
-            self.draw_centered_text(
-                "只读状态 · 点击项目查看详情",
-                self.font_small,
-                (91, 139, 152),
-                (self.width // 2, round(self.height * 0.91)),
-            )
             return
 
         title, rows = self.settings_detail_rows(self.settings_section)
@@ -3332,7 +3341,7 @@ class PersistentExpressionDisplay:
         width = round(self.width * 0.70)
         row_height = round(self.height * 0.105)
         gap = round(self.height * 0.018)
-        top = round(self.height * 0.235)
+        top = round(self.height * 0.2625)
         for index, (label, value) in enumerate(rows):
             rect = self.pygame.Rect(
                 left,
@@ -3356,7 +3365,7 @@ class PersistentExpressionDisplay:
                 value_surface.get_rect(midright=(rect.right - 38, rect.centery)),
             )
         self.draw_centered_text(
-            "点击左上角返回",
+            "右滑或点击左上角返回",
             self.font_small,
             (91, 139, 152),
             (self.width // 2, round(self.height * 0.86)),
@@ -5687,7 +5696,10 @@ class PersistentExpressionDisplay:
         self.touch_count += 1
         if self.settings_active:
             target = self.settings_pointer_target
-            if not self.pointer_moved and target == self.settings_target_at(position):
+            if self.pointer_moved and self.settings_back_swipe_detected(position):
+                self.handle_settings_target("back")
+                log("settings returned by left-to-right swipe")
+            elif not self.pointer_moved and target == self.settings_target_at(position):
                 self.handle_settings_target(target)
             self.settings_pointer_target = None
             self.pointer_down = False
