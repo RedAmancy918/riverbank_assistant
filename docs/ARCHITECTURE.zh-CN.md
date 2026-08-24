@@ -65,12 +65,15 @@ Plymouth 负责最早可见阶段；Wayland 接力层消除显示管理器接管
 ListenGo 控制口报告硬件唤醒事件和声源方向。Daily Voice 随后执行：
 
 1. 播放可选的本地唤醒回应；
-2. VAD 录音并保留短预卷；
-3. Faster-Whisper 本地转写；
-4. 先匹配音量、相机等本地设备命令；
-5. 其他问题交给常驻复用的 Hermes Daily Profile；
-6. Edge TTS 合成并从扬声器播放；
-7. 若回复要求补充信息，继续录制下一轮，最多由配置限制轮数。
+2. 唤醒后切换“聆听”表情，并仅在录音窗口显示左下角转写气泡；气泡本身代表正在收音，不再显示额外的“正在听”文字；
+3. VAD 录音并保留短预卷，同时由 sherpa-onnx 流式 Zipformer 生成不超过三行的本地增量草稿；
+4. 录音结束后再由 Faster-Whisper Base 以完整音频生成最终转写，短暂停留并淡出；
+5. 先匹配音量、相机等本地设备命令；
+6. 其他问题交给常驻复用的 Hermes Daily Profile；
+7. Edge TTS 合成并从扬声器播放；
+8. 若回复要求补充信息，继续录制下一轮，最多由配置限制轮数。
+
+气泡中的原始文字只保存在渲染器内存中；运行时状态只记录长度和阶段。14M 中文流式模型只承担低延迟视觉反馈，交给 Hermes 的仍是 Faster-Whisper 对完整音频生成的最终识别结果。流式模型默认位于 `/mnt/nvme64/ai/models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`，可用 `RIVERBANK_STREAMING_ASR_MODEL_DIR` 覆盖。
 
 模型名称、供应商、密钥和 Profile 数据均由外部 Hermes 配置提供，本仓库不保存。视觉意图会携带当前摄像头帧进入 Hermes；具体路由到 Qwen 或其他 VLM 应在 Daily Profile 中配置。
 

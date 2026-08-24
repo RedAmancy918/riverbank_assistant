@@ -26,6 +26,8 @@ apps/paper-radar/.venv/bin/pip install -r apps/paper-radar/requirements.txt
 
 圆屏 UI 的依赖可装入系统 Python 或专用虚拟环境；若 Daily Voice 需要直接导入 Hermes 模块，则应把 `apps/expression-ui/requirements.txt` 安装到 Hermes 使用的同一虚拟环境。
 
+实时转写气泡还需要 sherpa-onnx 的 `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23` 模型。将官方模型包解压到数据盘的 `ai/models/` 下，并用 `RIVERBANK_STREAMING_ASR_MODEL_DIR` 指向该目录。目录内至少应包含 `tokens.txt` 与 encoder、decoder、joiner 三个 `int8.onnx` 文件。模型缺失时语音问答仍可使用最终 Faster-Whisper 转写，但气泡只显示收音动效，不显示增量文字。
+
 将有权使用的 GIF 放入 `apps/expression-ui/assets/expressions/`；将可选唤醒回应放为 `apps/expression-ui/assets/audio/wake_ack.wav`。路径也可以通过环境变量或 `expressions.json` 改写。
 
 ## 3. 核对硬件参数

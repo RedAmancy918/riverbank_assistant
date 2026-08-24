@@ -6,8 +6,9 @@ third-party software, but does not redistribute those projects or their data.
 - Hermes Agent: install and license separately.
 - HailoRT, Hailo application examples, HEF files and post-processing libraries:
   obtain from Hailo under the applicable terms.
-- ustreamer, GStreamer, Pygame, Pillow, Faster-Whisper, Edge TTS, pyserial and
-  other packages: governed by their own licenses.
+- ustreamer, GStreamer, Pygame, Pillow, Faster-Whisper, sherpa-onnx, Edge TTS,
+  pyserial and other packages: governed by their own licenses. Streaming ASR
+  model weights are downloaded separately and retain their upstream terms.
 - ViewTurbo: optional proprietary integration example only; no binary, account
   data or configuration is included.
 - Microsoft YaHei is not included. The public example uses WenQuanYi Zen Hei.

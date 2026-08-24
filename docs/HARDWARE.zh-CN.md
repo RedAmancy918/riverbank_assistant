@@ -29,7 +29,7 @@
 
 典型依赖包括 `python3`、`python3-venv`、`python3-pip`、`python3-pygame`、`python3-pil`、`python3-gi`、GStreamer、`ustreamer`、`labwc`、`lightdm`、`plymouth`、`swaybg`、`zenity`、PipeWire/PulseAudio 兼容层和 `fonts-wqy-zenhei`。
 
-语音环境还需要 `faster-whisper`、`sounddevice`、`numpy` 与 `edge-tts`；麦克风控制服务需要 `pyserial`。Paper Radar 的 Python 依赖见各模块的 `requirements.txt`。
+语音环境还需要 `faster-whisper`、`sherpa-onnx`、`sounddevice`、`numpy` 与 `edge-tts`；其中 sherpa-onnx 流式模型用于气泡草稿，Faster-Whisper 用于最终文本。麦克风控制服务需要 `pyserial`。Paper Radar 的 Python 依赖见各模块的 `requirements.txt`。
 
 ## 模型和数据目录约定
 

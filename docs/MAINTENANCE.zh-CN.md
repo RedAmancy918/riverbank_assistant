@@ -14,6 +14,7 @@
 | 麦克风串口协议和唤醒事件 | `apps/listengo-mic/listengo_daemon.py` |
 | Hailo 人脸追踪 | `apps/face-tracker/face_tracker.py` |
 | 自检类型、失败阈值和弹窗 | `apps/health-monitor/health_monitor.py` 与 `config.example.json` |
+| 流式转写模型与语音气泡链路自检 | `apps/health-monitor/voice_caption_health.py` |
 | 日报检索范围和产业源 | `apps/paper-radar/config/topics.json` |
 | 日报编辑规则 | `apps/paper-radar/AGENTS.md` |
 | 日报网页样式与交互 | `apps/paper-radar/templates/`、`static/` |
@@ -50,4 +51,7 @@
 - 音量、屏保、Token、重启弹层互斥；
 - 重启滑块回拖可撤销，到端点抬手才执行；
 - 语音需要补充时可继续录制；
+- 唤醒后切换 `listening` 表情并立即显示气泡，但气泡内不显示“正在听”；
+- 气泡增量文字最多三行，最终转写停留约 0.8 秒后平滑淡出；
+- 流式草稿引擎为 sherpa-onnx 14M Zipformer，最终 Hermes 输入仍来自 Faster-Whisper Base；
 - Paper Radar 候选/精选/焦点/产业数量上限保持不变。

@@ -101,7 +101,11 @@ BOOT_CHECK_GROUPS = (
         False,
     ),
     ("audio", ("listengo-mic-service", "listengo-mic-hardware"), False),
-    ("hermes", ("hermes-gateway", "hermes-voice"), True),
+    (
+        "hermes",
+        ("hermes-gateway", "hermes-voice", "hermes-voice-caption"),
+        True,
+    ),
     (
         "research",
         ("paper-radar-service", "paper-radar-page", "paper-radar-daily-integrity"),
@@ -1170,6 +1174,18 @@ class PersistentExpressionDisplay:
         self.settings_transition_from_surface: object | None = None
         self.settings_transition_to_surface: object | None = None
         self.settings_transition_exits_settings = False
+        self.speech_bubble_active = False
+        self.speech_bubble_text = ""
+        self.speech_bubble_stable_chars = 0
+        self.speech_bubble_final = False
+        self.speech_bubble_expires_at = 0.0
+        self.speech_bubble_hide_started_at = 0.0
+        self.speech_bubble_hide_seconds = max(
+            0.16,
+            min(float(config.get("speech_bubble_fade_seconds", 0.24)), 0.5),
+        )
+        self.speech_bubble_cache: OrderedDict[tuple, object] = OrderedDict()
+        self.speech_bubble_cache_limit = 24
         self.last_overlay_redraw = 0.0
         self.camera_indicator_angle_degrees = max(
             -170.0,
@@ -1363,6 +1379,10 @@ class PersistentExpressionDisplay:
         self.font_medium = pygame.font.Font(font_path, 26)
         self.font_large = pygame.font.Font(font_path, 34)
         self.font_camera_label = pygame.font.Font(font_path, 21)
+        self.font_speech_bubble_high = pygame.font.Font(
+            font_path,
+            25 * UI_AA_SCALE,
+        )
         status_font_path = str(app_path(
             config.get(
                 "status_font_path",
@@ -2069,6 +2089,7 @@ class PersistentExpressionDisplay:
             or self.camera_indicator_active()
             or self.camera_capture_future is not None
             or self.restart_requested_at
+            or self.speech_bubble_opacity(now) > 0.0
         ):
             return
         self.start_screensaver(now)
@@ -2964,6 +2985,238 @@ class PersistentExpressionDisplay:
         log(f"runtime screenshot saved path={path}")
         return path
 
+    def set_speech_bubble(
+        self,
+        active: bool,
+        text: str = "",
+        stable_chars: int = 0,
+        final: bool = False,
+        ttl: float = 0.0,
+    ) -> None:
+        """Update the in-memory wake-session caption without persisting its text."""
+        now = time.monotonic()
+        value = re.sub(r"[\x00-\x1f\x7f]+", " ", str(text))
+        value = re.sub(r"\s+", " ", value).strip()[:180]
+        if active:
+            self.speech_bubble_active = True
+            self.speech_bubble_text = value
+            self.speech_bubble_stable_chars = max(
+                0,
+                min(int(stable_chars), len(value)),
+            )
+            self.speech_bubble_final = bool(final)
+            self.speech_bubble_expires_at = (
+                now + max(0.0, min(float(ttl), 5.0))
+                if final and ttl > 0
+                else 0.0
+            )
+            self.speech_bubble_hide_started_at = 0.0
+            self.note_screensaver_activity(now)
+        elif self.speech_bubble_active or self.speech_bubble_hide_started_at:
+            self.speech_bubble_active = False
+            self.speech_bubble_expires_at = 0.0
+            self.speech_bubble_hide_started_at = now
+        else:
+            self.speech_bubble_text = ""
+            self.speech_bubble_stable_chars = 0
+            self.speech_bubble_final = False
+        self.needs_redraw = True
+        log(
+            "speech bubble updated "
+            f"active={active} final={final} chars={len(value)}"
+        )
+
+    def update_speech_bubble(self, now: float) -> bool:
+        """Advance final-hold and fade state; return True when state changed."""
+        changed = False
+        if (
+            self.speech_bubble_active
+            and self.speech_bubble_expires_at
+            and now >= self.speech_bubble_expires_at
+        ):
+            self.speech_bubble_active = False
+            self.speech_bubble_expires_at = 0.0
+            self.speech_bubble_hide_started_at = now
+            changed = True
+        if (
+            self.speech_bubble_hide_started_at
+            and now - self.speech_bubble_hide_started_at
+            >= self.speech_bubble_hide_seconds
+        ):
+            self.speech_bubble_hide_started_at = 0.0
+            self.speech_bubble_text = ""
+            self.speech_bubble_stable_chars = 0
+            self.speech_bubble_final = False
+            changed = True
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def speech_bubble_opacity(self, now: float) -> float:
+        if self.speech_bubble_active:
+            return 1.0
+        if not self.speech_bubble_hide_started_at:
+            return 0.0
+        elapsed = max(0.0, now - self.speech_bubble_hide_started_at)
+        return max(0.0, 1.0 - elapsed / self.speech_bubble_hide_seconds)
+
+    def speech_bubble_lines(
+        self,
+        text: str,
+        max_width: int,
+    ) -> list[tuple[str, int]]:
+        if not text:
+            return []
+        scale = UI_AA_SCALE
+        limit = max_width * scale
+        lines: list[tuple[str, int]] = []
+        current = ""
+        current_start = 0
+        for index, character in enumerate(text):
+            candidate = current + character
+            if current and self.font_speech_bubble_high.size(candidate)[0] > limit:
+                lines.append((current, current_start))
+                current = character
+                current_start = index
+            else:
+                current = candidate
+        if current:
+            lines.append((current, current_start))
+        return lines[-3:]
+
+    def speech_bubble_surface(self) -> object:
+        lines = self.speech_bubble_lines(self.speech_bubble_text, 362)
+        key = (
+            tuple(lines),
+            self.speech_bubble_stable_chars,
+            self.speech_bubble_final,
+        )
+        cached = self.speech_bubble_cache.get(key)
+        if cached is not None:
+            self.speech_bubble_cache.move_to_end(key)
+            return cached
+
+        scale = UI_AA_SCALE
+        width = 410
+        line_height = 31
+        body_height = 58 if not lines else 28 + line_height * len(lines)
+        tail_height = 18
+        height = body_height + tail_height
+        high = self.pygame.Surface(
+            (width * scale, height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        body = self.pygame.Rect(
+            2 * scale,
+            2 * scale,
+            (width - 4) * scale,
+            (body_height - 4) * scale,
+        )
+        shadow = body.move(0, 3 * scale)
+        self.pygame.draw.rect(
+            high,
+            (0, 0, 0, 118),
+            shadow,
+            border_radius=24 * scale,
+        )
+        self.pygame.draw.polygon(
+            high,
+            (0, 0, 0, 118),
+            (
+                (41 * scale, (body_height - 3) * scale),
+                (80 * scale, (body_height - 3) * scale),
+                (31 * scale, height * scale),
+            ),
+        )
+        self.pygame.draw.rect(
+            high,
+            (5, 29, 42, 242),
+            body,
+            border_radius=24 * scale,
+        )
+        self.pygame.draw.polygon(
+            high,
+            (5, 29, 42, 242),
+            (
+                (43 * scale, (body_height - 5) * scale),
+                (79 * scale, (body_height - 5) * scale),
+                (32 * scale, (height - 2) * scale),
+            ),
+        )
+        self.pygame.draw.rect(
+            high,
+            (83, 200, 229, 112),
+            body,
+            width=scale,
+            border_radius=24 * scale,
+        )
+
+        if lines:
+            bright = (226, 245, 250)
+            muted = (123, 161, 174)
+            text_x = 24 * scale
+            text_y = 12 * scale
+            for line_index, (line, line_start) in enumerate(lines):
+                stable_in_line = max(
+                    0,
+                    min(
+                        len(line),
+                        self.speech_bubble_stable_chars - line_start,
+                    ),
+                )
+                if self.speech_bubble_final:
+                    stable_in_line = len(line)
+                stable_text = line[:stable_in_line]
+                draft_text = line[stable_in_line:]
+                cursor_x = text_x
+                line_y = text_y + line_index * line_height * scale
+                if stable_text:
+                    rendered = self.font_speech_bubble_high.render(
+                        stable_text,
+                        True,
+                        bright,
+                    )
+                    high.blit(rendered, (cursor_x, line_y))
+                    cursor_x += rendered.get_width()
+                if draft_text:
+                    rendered = self.font_speech_bubble_high.render(
+                        draft_text,
+                        True,
+                        muted,
+                    )
+                    high.blit(rendered, (cursor_x, line_y))
+
+        surface = self.pygame.transform.smoothscale(high, (width, height))
+        self.speech_bubble_cache[key] = surface
+        self.speech_bubble_cache.move_to_end(key)
+        while len(self.speech_bubble_cache) > self.speech_bubble_cache_limit:
+            self.speech_bubble_cache.popitem(last=False)
+        return surface
+
+    def draw_speech_bubble(self, now: float) -> None:
+        opacity = self.speech_bubble_opacity(now)
+        if opacity <= 0.0:
+            return
+        surface = self.speech_bubble_surface()
+        if not self.speech_bubble_text:
+            surface = surface.copy()
+            pulse = 0.5 + 0.5 * math.sin(now * math.tau * 1.15)
+            for index in range(3):
+                phase = 0.5 + 0.5 * math.sin(
+                    now * math.tau * 1.15 - index * 0.75
+                )
+                color = (72, 215, 244, round(105 + 140 * phase))
+                self.draw_aa_circle(
+                    surface,
+                    color,
+                    (36 + index * 17, 29),
+                    round(3 + 1.5 * (pulse if index == 1 else phase)),
+                )
+        surface.set_alpha(round(255 * opacity))
+        self.screen.blit(surface, (105, 660 - surface.get_height()))
+        surface.set_alpha(None)
+
     def draw(self) -> None:
         render_started = time.perf_counter()
         now = time.monotonic()
@@ -3010,6 +3263,12 @@ class PersistentExpressionDisplay:
                     self.expression_camera_indicator_position(),
                     compact=True,
                 )
+        if (
+            not self.boot_active
+            and not self.screensaver_active
+            and self.speech_bubble_opacity(now) > 0.0
+        ):
+            self.draw_speech_bubble(now)
         self.pygame.display.flip()
         render_elapsed_ms = (time.perf_counter() - render_started) * 1000.0
         self.frame_render_ms = (
@@ -6446,6 +6705,17 @@ class PersistentExpressionDisplay:
                 "balance_error": self.token_balance_error,
                 "dismiss_policy": "outside-tap-or-2s-idle",
             },
+            "speech_bubble": {
+                "active": self.speech_bubble_active,
+                "visible": self.speech_bubble_opacity(time.monotonic()) > 0.0,
+                "final": self.speech_bubble_final,
+                "text_length": len(self.speech_bubble_text),
+                "stable_chars": self.speech_bubble_stable_chars,
+                "max_lines": 3,
+                "position": "lower-left-round-safe-area",
+                "privacy": "text-kept-in-renderer-memory-only",
+                "listening_label": False,
+            },
             "screensaver_settings_active": self.screensaver_panel_mode,
             "settings": {
                 "active": self.settings_active,
@@ -6585,6 +6855,8 @@ class PersistentExpressionDisplay:
                 self.draw()
             self.refresh_always_on_top()
             return
+        if self.update_speech_bubble(now):
+            self.write_state()
         if self.screensaver_active:
             self.update_screensaver(now)
             if self.screensaver_active:
@@ -6697,6 +6969,7 @@ class PersistentExpressionDisplay:
             or now < self.camera_capture_notice_until
             or now < self.camera_capture_error_until
             or now < self.gallery_notice_until
+            or self.speech_bubble_opacity(now) > 0.0
         )
         if (
             refresh_driven_scene
@@ -6918,6 +7191,15 @@ def main() -> int:
                         display.save_runtime_screenshot(
                             str(request.get("name", "display-preview"))
                         )
+                    elif request.get("command") == "speech_bubble":
+                        display.set_speech_bubble(
+                            bool(request.get("active", True)),
+                            str(request.get("text", "")),
+                            int(request.get("stable_chars", 0)),
+                            bool(request.get("final", False)),
+                            float(request.get("ttl", 0.0)),
+                        )
+                        display.write_state()
                     elif request.get("command") == "vision_activity":
                         display.set_vision_activity(
                             str(request.get("source", "")),

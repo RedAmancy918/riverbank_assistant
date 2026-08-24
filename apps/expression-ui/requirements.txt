@@ -4,3 +4,4 @@ numpy>=2.0,<3
 Pillow>=11,<13
 pygame>=2.6,<3
 sounddevice>=0.5,<1
+sherpa-onnx>=1.13.5,<1.14

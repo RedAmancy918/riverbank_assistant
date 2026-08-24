@@ -28,6 +28,11 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
+try:
+    import sherpa_onnx
+except (ImportError, OSError):
+    sherpa_onnx = None
+
 
 APP_DIR = Path(__file__).resolve().parent
 RIVERBANK_HOME = Path(os.environ.get("RIVERBANK_HOME", Path.home()))
@@ -51,13 +56,18 @@ CAMERA_SNAPSHOT_URL = os.environ.get(
     "http://127.0.0.1:19733/snapshot",
 )
 CAMERA_QUICK_FRAME = WORKSPACE / "rgb_now.jpg"
+DEFAULT_WAKE_ACK_PATH = APP_DIR / "assets/audio/wake_ack.wav"
+if not DEFAULT_WAKE_ACK_PATH.is_file():
+    installed_wake_ack = APP_DIR / "assets/wake_ack_geo.wav"
+    if installed_wake_ack.is_file():
+        DEFAULT_WAKE_ACK_PATH = installed_wake_ack
 WAKE_ACK_PATH = Path(
     os.environ.get(
         "RIVERBANK_WAKE_ACK_PATH",
-        APP_DIR / "assets/audio/wake_ack.wav",
+        DEFAULT_WAKE_ACK_PATH,
     )
 )
-WAKE_ACK_TEXT = os.environ.get("RIVERBANK_WAKE_ACK_TEXT", "你好。")
+WAKE_ACK_TEXT = os.environ.get("RIVERBANK_WAKE_ACK_TEXT", "嗨，Geo。")
 WAKE_ACK_TAIL_SECONDS = 0.10
 SAMPLE_RATE = 16000
 BLOCK_SECONDS = 0.05
@@ -65,6 +75,14 @@ PRE_ROLL_SECONDS = 0.45
 DEBOUNCE_SECONDS = 8.0
 FOLLOW_UP_NO_SPEECH_SECONDS = 12.0
 MAX_VOICE_FOLLOW_UP_TURNS = 4
+LIVE_CAPTION_FINAL_HOLD_SECONDS = 0.8
+STREAMING_ASR_MODEL_DIR = Path(
+    os.environ.get(
+        "RIVERBANK_STREAMING_ASR_MODEL_DIR",
+        "/mnt/nvme64/ai/models/"
+        "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
+    )
+)
 VOICE_FOLLOW_UP_MARKER = "[[AWAITING_VOICE_REPLY]]"
 VOICE_DIALOGUE_PROTOCOL = f"""
 [语音连续对话协议]
@@ -219,6 +237,33 @@ def send_expression_command(command: str, **payload: object) -> bool:
     except OSError as exc:
         log(f"expression command failed command={command}: {exc}")
         return False
+
+
+def speech_bubble(
+    active: bool,
+    text: str = "",
+    stable_chars: int = 0,
+    final: bool = False,
+    ttl: float = 0.0,
+) -> bool:
+    """Publish private, wake-session-only caption state to the local display."""
+    value = str(text).strip()
+    return send_expression_command(
+        "speech_bubble",
+        active=bool(active),
+        text=value,
+        stable_chars=max(0, min(int(stable_chars), len(value))),
+        final=bool(final),
+        ttl=max(0.0, float(ttl)),
+    )
+
+
+def common_prefix_length(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
 
 
 def clean_for_speech(text: str) -> str:
@@ -709,6 +754,77 @@ class PersistentHermesRuntime:
             self.session_db = None
 
 
+class StreamingCaptionRecognizer:
+    """Low-latency first-pass captions; final text still comes from Whisper."""
+
+    def __init__(self, model_dir: Path = STREAMING_ASR_MODEL_DIR) -> None:
+        self.model_dir = model_dir
+        self.recognizer: object | None = None
+        self.last_error: str | None = None
+        if sherpa_onnx is None:
+            self.last_error = "sherpa-onnx is not installed"
+            log(f"Streaming caption unavailable: {self.last_error}")
+            return
+        files = {
+            "tokens": model_dir / "tokens.txt",
+            "encoder": model_dir / "encoder-epoch-99-avg-1.int8.onnx",
+            "decoder": model_dir / "decoder-epoch-99-avg-1.int8.onnx",
+            "joiner": model_dir / "joiner-epoch-99-avg-1.int8.onnx",
+        }
+        missing = [path.name for path in files.values() if not path.is_file()]
+        if missing:
+            self.last_error = f"missing model files: {', '.join(missing)}"
+            log(f"Streaming caption unavailable: {self.last_error}")
+            return
+        try:
+            started = time.monotonic()
+            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                tokens=str(files["tokens"]),
+                encoder=str(files["encoder"]),
+                decoder=str(files["decoder"]),
+                joiner=str(files["joiner"]),
+                num_threads=2,
+                sample_rate=SAMPLE_RATE,
+                feature_dim=80,
+                decoding_method="greedy_search",
+                model_type="zipformer",
+            )
+            log(
+                "Streaming sherpa-onnx caption model ready "
+                f"in {time.monotonic() - started:.2f}s"
+            )
+        except Exception as exc:
+            self.recognizer = None
+            self.last_error = str(exc)
+            log(f"Streaming caption unavailable: {exc}")
+
+    @property
+    def ready(self) -> bool:
+        return self.recognizer is not None
+
+    def create_stream(self) -> object | None:
+        if self.recognizer is None:
+            return None
+        return self.recognizer.create_stream()
+
+    def accept(self, stream: object, samples: np.ndarray) -> str:
+        if self.recognizer is None:
+            return ""
+        audio = samples.reshape(-1).astype(np.float32) / 32768.0
+        stream.accept_waveform(SAMPLE_RATE, audio)
+        while self.recognizer.is_ready(stream):
+            self.recognizer.decode_stream(stream)
+        return str(self.recognizer.get_result(stream) or "").strip()
+
+    def finish(self, stream: object) -> str:
+        if self.recognizer is None:
+            return ""
+        stream.input_finished()
+        while self.recognizer.is_ready(stream):
+            self.recognizer.decode_stream(stream)
+        return str(self.recognizer.get_result(stream) or "").strip()
+
+
 class DailyVoiceAssistant:
     def __init__(self) -> None:
         self.running = True
@@ -726,6 +842,13 @@ class DailyVoiceAssistant:
         vision_activity(False)
         self.whisper: WhisperModel | None = None
         self.whisper_lock = threading.Lock()
+        self.whisper_inference_lock = threading.Lock()
+        self.streaming_caption = StreamingCaptionRecognizer()
+        self.live_caption_active = False
+        self.live_caption_final = False
+        self.live_caption_text_length = 0
+        self.live_caption_stable_chars = 0
+        self.live_caption_expires_at = 0.0
         self.microphone = PersistentMicrophone()
         self.wake_ack = WakeAcknowledgementPlayer(WAKE_ACK_PATH)
         self.last_wake_ack_at: float | None = None
@@ -738,6 +861,13 @@ class DailyVoiceAssistant:
         self.last_local_command: dict | None = None
 
     def write_state(self) -> None:
+        live_caption_visible = bool(
+            self.live_caption_active
+            and (
+                not self.live_caption_expires_at
+                or time.monotonic() < self.live_caption_expires_at
+            )
+        )
         payload = {
             "ok": self.last_error is None,
             "service": "running" if self.running else "stopping",
@@ -765,6 +895,23 @@ class DailyVoiceAssistant:
             "follow_up_timeout_seconds": FOLLOW_UP_NO_SPEECH_SECONDS,
             "last_follow_up_at": self.last_follow_up_at,
             "last_local_command": self.last_local_command,
+            "live_caption": {
+                "active": live_caption_visible,
+                "final": bool(live_caption_visible and self.live_caption_final),
+                "text_length": (
+                    self.live_caption_text_length if live_caption_visible else 0
+                ),
+                "stable_chars": (
+                    self.live_caption_stable_chars if live_caption_visible else 0
+                ),
+                "privacy": "text-kept-in-display-memory-only",
+                "scope": "wake-session-only",
+                "draft_engine": "sherpa-onnx-streaming-zipformer-zh-14M",
+                "draft_engine_ready": self.streaming_caption.ready,
+                "draft_engine_error": self.streaming_caption.last_error,
+                "model_directory": str(self.streaming_caption.model_dir),
+                "final_engine": "faster-whisper-base",
+            },
             "last_trigger_at": self.last_trigger_at,
             "last_wake": self.last_wake,
             "started_at": self.started_at,
@@ -776,6 +923,27 @@ class DailyVoiceAssistant:
             encoding="utf-8",
         )
         os.replace(temporary, STATE_PATH)
+
+    def publish_speech_bubble(
+        self,
+        active: bool,
+        text: str = "",
+        stable_chars: int = 0,
+        final: bool = False,
+        ttl: float = 0.0,
+    ) -> None:
+        value = str(text).strip()
+        stable_chars = max(0, min(int(stable_chars), len(value)))
+        self.live_caption_active = bool(active)
+        self.live_caption_final = bool(final and active)
+        self.live_caption_text_length = len(value) if active else 0
+        self.live_caption_stable_chars = stable_chars if active else 0
+        self.live_caption_expires_at = (
+            time.monotonic() + max(0.0, float(ttl))
+            if active and final and ttl > 0
+            else 0.0
+        )
+        speech_bubble(active, value, stable_chars, final, ttl)
 
     @staticmethod
     def beep(frequency: int, count: int = 1) -> None:
@@ -812,6 +980,7 @@ class DailyVoiceAssistant:
         if not follow_up:
             self.beep(880)
         expression("listening")
+        self.publish_speech_bubble(True)
         source = "follow-up" if follow_up else "hardware wake"
         log(f"● Recording... ({source}, auto-stops on silence)")
         if follow_up:
@@ -831,6 +1000,8 @@ class DailyVoiceAssistant:
         last_voice_at = 0.0
         started = time.monotonic()
         consecutive_voice = 0
+        caption_stream: object | None = None
+        partial_previous = ""
         log(f"Adaptive VAD threshold={threshold:.0f}")
         while self.running:
             now = time.monotonic()
@@ -850,18 +1021,77 @@ class DailyVoiceAssistant:
                     last_voice_at = now
                     frames_out.extend(pre_roll)
                     pre_roll.clear()
+                    caption_stream = self.streaming_caption.create_stream()
+                    if caption_stream is not None:
+                        try:
+                            partial_text = self.streaming_caption.accept(
+                                caption_stream,
+                                np.concatenate(frames_out).astype(
+                                    np.int16,
+                                    copy=False,
+                                ),
+                            )
+                            if partial_text:
+                                self.publish_speech_bubble(
+                                    True,
+                                    partial_text,
+                                    stable_chars=0,
+                                )
+                                partial_previous = partial_text
+                        except Exception as exc:
+                            caption_stream = None
+                            log(f"streaming caption warning: {exc}")
                 elif now - started >= no_speech_timeout:
                     log(f"No speech detected during {source} window")
+                    self.publish_speech_bubble(False)
                     return None
                 continue
 
             frames_out.append(chunk)
+            if caption_stream is not None:
+                try:
+                    partial_text = self.streaming_caption.accept(
+                        caption_stream,
+                        chunk,
+                    )
+                except Exception as exc:
+                    caption_stream = None
+                    log(f"streaming caption warning: {exc}")
+                    partial_text = ""
+                if partial_text and partial_text != partial_previous:
+                    stable_chars = common_prefix_length(
+                        partial_previous,
+                        partial_text,
+                    )
+                    self.publish_speech_bubble(
+                        True,
+                        partial_text,
+                        stable_chars=stable_chars,
+                    )
+                    partial_previous = partial_text
             if level >= threshold:
                 last_voice_at = now
             elif now - last_voice_at >= 1.1 and now - speech_started_at >= 0.5:
                 break
 
+        if caption_stream is not None:
+            try:
+                partial_text = self.streaming_caption.finish(caption_stream)
+                if partial_text and partial_text != partial_previous:
+                    stable_chars = common_prefix_length(
+                        partial_previous,
+                        partial_text,
+                    )
+                    self.publish_speech_bubble(
+                        True,
+                        partial_text,
+                        stable_chars=stable_chars,
+                    )
+            except Exception as exc:
+                log(f"streaming caption finalization warning: {exc}")
+
         if not frames_out:
+            self.publish_speech_bubble(False)
             return None
         if not follow_up:
             self.beep(660, count=2)
@@ -878,6 +1108,7 @@ class DailyVoiceAssistant:
         """Acknowledge a hardware wake before opening the utterance gate."""
         self.last_result = "wake_acknowledgement"
         expression("listening")
+        self.publish_speech_bubble(True)
         self.write_state()
         started = time.monotonic()
         played = self.wake_ack.play()
@@ -905,13 +1136,25 @@ class DailyVoiceAssistant:
     def transcribe(self, wav_path: Path) -> str:
         expression("thinking")
         log("Transcribing with resident local faster-whisper base...")
-        segments, _ = self.ensure_whisper().transcribe(
-            str(wav_path),
-            language="zh",
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400},
-        )
-        return "".join(segment.text for segment in segments).strip()
+        with self.whisper_inference_lock:
+            segments, _ = self.ensure_whisper().transcribe(
+                str(wav_path),
+                language="zh",
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 400},
+            )
+            transcript = "".join(segment.text for segment in segments).strip()
+        if transcript:
+            self.publish_speech_bubble(
+                True,
+                transcript,
+                stable_chars=len(transcript),
+                final=True,
+                ttl=LIVE_CAPTION_FINAL_HOLD_SECONDS,
+            )
+        else:
+            self.publish_speech_bubble(False)
+        return transcript
 
     def handle_agent_clarification(
         self,
@@ -1282,6 +1525,7 @@ class DailyVoiceAssistant:
         except Exception as exc:
             self.last_error = str(exc)
             self.last_result = "error"
+            self.publish_speech_bubble(False)
             expression("error", 8)
             log(f"voice interaction error: {exc}")
         finally:
@@ -1394,6 +1638,7 @@ def main() -> int:
                             finally:
                                 assistant.last_result = "waiting"
                                 assistant.microphone.set_learning(True)
+                                assistant.publish_speech_bubble(False)
                                 expression("idle")
                                 assistant.write_state()
                     elif request.get("command") == "visual_mode":
@@ -1417,6 +1662,7 @@ def main() -> int:
         assistant.wake_ack.stop()
         assistant.microphone.stop()
         assistant.hermes.close()
+        assistant.publish_speech_bubble(False)
         control.close()
         try:
             SOCKET_PATH.unlink()

@@ -42,6 +42,15 @@
       "target": "hermes-voice.service"
     },
     {
+      "id": "hermes-voice-caption",
+      "name": "语音实时转写气泡",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/health-monitor/voice_caption_health.py"
+      ]
+    },
+    {
       "id": "expression-display",
       "name": "小屏表情播放服务",
       "type": "systemd_service",
