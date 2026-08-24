@@ -3975,14 +3975,7 @@ class PersistentExpressionDisplay:
                     value_surface,
                     value_surface.get_rect(midright=(rect.right - 38, rect.centery)),
                 )
-        if self.settings_section == "wifi" and self.wifi_toggle_future is not None:
-            self.draw_centered_text(
-                "正在切换…",
-                self.font_small,
-                (112, 183, 200),
-                (self.width // 2, round(self.height * 0.80)),
-            )
-        elif (
+        if (
             self.settings_section == "wifi"
             and self.wifi_toggle_error
             and time.monotonic() < self.wifi_toggle_notice_until
