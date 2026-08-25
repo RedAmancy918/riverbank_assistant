@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -39,15 +40,39 @@ def main() -> int:
     if missing:
         print(f"streaming caption model incomplete: {', '.join(missing)}")
         return 1
-    if caption.get("final_engine") != "faster-whisper-base":
-        print("final speech recognizer is not ready")
+    final_asr = payload.get("final_asr")
+    if not isinstance(final_asr, dict):
+        print("voice state has no final_asr object")
         return 1
-    if caption.get("final_decoder") != "deterministic-beam5-bounded-fallback":
-        print("final speech recognizer still permits unbounded decode fallback")
+    if final_asr.get("engine") != "sensevoice-int8+zipformer-ctc-int8":
+        print("final ASR ensemble is not selected")
         return 1
-    if int(caption.get("resident_model_pool") or 0) < 2:
-        print("resident speech recognizer pool is not ready for barge-in")
+    if final_asr.get("decoder") != "parallel-context-router-signal-disagreement-gate":
+        print("final ASR safety router is not selected")
         return 1
+    if not final_asr.get("ready") or int(final_asr.get("models_loaded") or 0) < 2:
+        service_age = max(0.0, time.time() - float(payload.get("started_at") or 0.0))
+        if service_age < 35.0 and not final_asr.get("last_error"):
+            print(
+                "voice interaction chain warming up "
+                f"final_asr={final_asr.get('engine')} age={service_age:.1f}s"
+            )
+            return 0
+        print(
+            "final ASR ensemble is not resident: "
+            f"{final_asr.get('last_error') or 'models still loading'}"
+        )
+        return 1
+    model_requirements = {
+        "sensevoice_model_directory": ("model.int8.onnx", "tokens.txt"),
+        "zipformer_model_directory": ("model.int8.onnx", "tokens.txt"),
+    }
+    for key, names in model_requirements.items():
+        directory = Path(str(final_asr.get(key, "")))
+        missing = [name for name in names if not (directory / name).is_file()]
+        if missing:
+            print(f"final ASR model incomplete at {directory}: {', '.join(missing)}")
+            return 1
     streaming_tts = payload.get("streaming_tts")
     if not isinstance(streaming_tts, dict) or not streaming_tts.get("enabled"):
         print("streaming TTS is not enabled")
@@ -63,6 +88,7 @@ def main() -> int:
     print(
         "voice interaction chain ready "
         f"caption={caption.get('draft_engine')} "
+        f"final_asr={final_asr.get('engine')} "
         f"stream_tts={streaming_tts.get('strategy')} barge_in=enabled "
         f"model={model_directory}"
     )

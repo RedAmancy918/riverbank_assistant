@@ -57,6 +57,18 @@
       "target": "expression-display.service"
     },
     {
+      "id": "expression-display-architecture",
+      "name": "小屏模块与静态资源完整性",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/expression-ui/expression_display_persistent.py",
+        "--self-test"
+      ],
+      "interval_seconds": 300,
+      "timeout_seconds": 15
+    },
+    {
       "id": "reboot-request-path",
       "name": "小屏确认重启执行器",
       "type": "systemd_service",
@@ -73,6 +85,15 @@
       "name": "Hermes 表情联动服务",
       "type": "systemd_service",
       "target": "hermes-expression-bridge.service"
+    },
+    {
+      "id": "hermes-expression-events",
+      "name": "语音表情结构化事件链路",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/health-monitor/expression_event_health.py"
+      ]
     },
     {
       "id": "listengo-mic-service",
@@ -164,10 +185,25 @@
     },
     {
       "id": "face-tracker-state",
-      "name": "人脸追踪实时结果",
-      "type": "fresh_path",
-      "target": "/run/riverbank-face-tracker/state.json",
-      "max_age_seconds": 15
+      "name": "按需人脸追踪与视觉租约",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/health-monitor/face_tracker_health.py"
+      ]
+    },
+    {
+      "id": "system-release-integrity",
+      "name": "整机版本与发布完整性",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/release-manager/release_manager.py",
+        "verify",
+        "--json"
+      ],
+      "interval_seconds": 300,
+      "timeout_seconds": 15
     }
   ]
 }

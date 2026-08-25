@@ -26,7 +26,7 @@ apps/paper-radar/.venv/bin/pip install -r apps/paper-radar/requirements.txt
 
 圆屏 UI 的依赖可装入系统 Python 或专用虚拟环境；若 Daily Voice 需要直接导入 Hermes 模块，则应把 `apps/expression-ui/requirements.txt` 安装到 Hermes 使用的同一虚拟环境。
 
-实时转写气泡还需要 sherpa-onnx 的 `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23` 模型。将官方模型包解压到数据盘的 `ai/models/` 下，并用 `RIVERBANK_STREAMING_ASR_MODEL_DIR` 指向该目录。目录内至少应包含 `tokens.txt` 与 encoder、decoder、joiner 三个 `int8.onnx` 文件。模型缺失时语音问答仍可使用最终 Faster-Whisper 转写，但气泡只显示收音动效，不显示增量文字。
+实时转写气泡需要 sherpa-onnx 的 `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`。最终转写还需要 SenseVoice INT8 与 Zipformer CTC INT8，默认分别放在数据盘 `ai/models/asr-final/sensevoice-int8/` 和 `ai/models/asr-final/zipformer-ctc-int8/`，也可用 `RIVERBANK_FINAL_ASR_*` 环境变量改写。模型缺失时服务会明确报告最终 ASR 不可用，不会把低质量草稿直接提交给 Hermes。
 
 将有权使用的 GIF 放入 `apps/expression-ui/assets/expressions/`；将可选唤醒回应放为 `apps/expression-ui/assets/audio/wake_ack.wav`。路径也可以通过环境变量或 `expressions.json` 改写。
 
@@ -78,6 +78,22 @@ sudo systemctl enable --now paper-radar-web.service
 
 只有在 Hermes 与 Hailo 依赖已经独立验证后，再启用相应服务。
 
+Hailo 人脸追踪采用租约控制；服务启动不等于持续推理。可用下面的命令验证空闲、激活和自动到期三个状态：
+
+```bash
+python3 apps/face-tracker/face_trackerctl.py status
+python3 apps/face-tracker/face_trackerctl.py acquire --source deploy-test --ttl 15
+python3 apps/face-tracker/face_trackerctl.py status
+```
+
+正式基线可在所有测试通过后封存。版本必须使用 `vMAJOR.MINOR.PATCH beta|stable`：
+
+```bash
+sudo python3 apps/release-manager/release_manager.py seal \
+  --version v0.7.1 --channel beta --notes "initial verified deployment"
+python3 apps/release-manager/release_manager.py verify --json
+```
+
 ## 5. Hermes Daily Profile
 
 本仓库不生成 Hermes 私人配置。部署者需要自行建立独立的 Daily Profile，并配置：
@@ -100,6 +116,7 @@ Camera Hub 默认只监听 `127.0.0.1:19733`，不应直接暴露到局域网或
 
 ```bash
 scripts/validate-release.sh
+python3 apps/expression-ui/expression_display_persistent.py --self-test
 systemctl --failed
 curl -fsS http://127.0.0.1:19732/healthz
 curl -fsS http://127.0.0.1:19733/state

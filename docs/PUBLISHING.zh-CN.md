@@ -14,6 +14,8 @@ git status --short
 git diff --check
 ```
 
+若该提交同时作为设备正式基线，还应先用 `apps/release-manager/release_manager.py` 封存并验证整机清单。Git 提交记录用于源码追踪，设备侧 SHA-256 清单用于发现已部署文件漂移，两者不能互相替代。
+
 确认下列内容不存在：
 
 - `.env`、API Key、access token、密码或 Cookie；

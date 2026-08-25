@@ -9,9 +9,10 @@ RiverBank Edge 是一套在 Raspberry Pi 5 上运行的边缘智能助理工程�
 - 800×800 圆形 DSI 屏常驻渲染：表情、触摸、环形菜单、状态胶囊、设置页、音量、重启确认、相机、相册和屏保。
 - 连贯开机画面：Plymouth Logo → Wayland 接力层 → 3×3 方块自检动画 → 表情待机。
 - 单实例摄像头中枢：摄像头只由 `ustreamer` 持有，圆屏、Hermes 和 Hailo 从本地 HTTP 流共享画面。
-- Daily 语音链路：硬件唤醒、VAD 录音、Faster-Whisper 本地转写、Hermes Daily Profile、Edge TTS 播放与多轮补充。
+- Daily 语音链路：硬件唤醒、VAD 录音、流式字幕、SenseVoice 与 Zipformer CTC 本地最终转写、Hermes Daily Profile、流式 TTS 与多轮补充。
 - 视觉路由：普通对话使用 Hermes 默认模型；明确的看图请求获取当前帧，并由 Hermes Profile 中配置的视觉模型处理。
-- Hailo-8 人脸追踪：SCRFD 推理结果写入本地运行时状态，后续可接双轴云台闭环。
+- Hailo-8 人脸追踪：SCRFD 模型常驻、推理按 TTL 租约启停，结果写入本地运行时状态，后续可接双轴云台闭环。
+- 正式运行架构：语音表情使用带顺序校验的结构化事件；整机版本采用 `vMAJOR.MINOR.PATCH beta|stable`，并可用 SHA-256 清单检测发布漂移。
 - 具身智讯日报：多检索流、半年去重回填、中文候选摘要、全文精读、潜在方法、产业动态与一次性“明日焦点”。
 - 可扩展健康守护：systemd、HTTP、JSON、端口、挂载点、文件新鲜度和自定义命令检查。
 
@@ -47,6 +48,7 @@ apps/
   health-monitor/    可扩展自检与桌面告警
   listengo-mic/      麦克风阵列控制口、唤醒与声源方向服务
   paper-radar/       论文采集、Hermes 编辑规则、渲染和网页
+  release-manager/   整机版本封存与发布完整性验证
 config/
   systemd/           可参数化的服务单元；optional/ 为代理和专有 VPN 示例
   plymouth/          开机主题

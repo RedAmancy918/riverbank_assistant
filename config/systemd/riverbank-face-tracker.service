@@ -1,5 +1,5 @@
 [Unit]
-Description=RiverBank Hailo SCRFD persistent face tracker
+Description=RiverBank Hailo SCRFD lease-controlled face tracker
 After=camera-hub.service hailort.service
 Requires=camera-hub.service hailort.service
 RequiresMountsFor=@RIVERBANK_DATA@

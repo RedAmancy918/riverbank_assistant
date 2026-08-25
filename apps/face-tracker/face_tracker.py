@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import gi
 
@@ -33,27 +34,29 @@ from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines impor
     TRACKER_PIPELINE,
     USER_CALLBACK_PIPELINE,
 )
+from vision_leases import VisionLeaseManager
 
 
 RUNTIME_DIR = Path(os.environ.get("RIVERBANK_FACE_RUNTIME", "/run/riverbank-face-tracker"))
 STATE_PATH = RUNTIME_DIR / "state.json"
 SOCKET_PATH = RUNTIME_DIR / "control.sock"
-RIVERBANK_DATA = Path(
-    os.environ.get("RIVERBANK_DATA", Path.home() / ".local/share/riverbank")
-)
+EXPRESSION_SOCKET_PATH = Path("/run/riverbank-expression/control.sock")
 MODEL_PATH = os.environ.get(
     "RIVERBANK_FACE_MODEL",
-    str(RIVERBANK_DATA / "ai/models/face/scrfd_2.5g_hailo8_v2.14.hef"),
+    "/mnt/nvme64/ai/models/face/scrfd_2.5g_hailo8_v2.14.hef",
 )
 POSTPROCESS_SO = os.environ.get(
     "RIVERBANK_FACE_POSTPROCESS",
-    str(RIVERBANK_DATA / "ai/resources/so/libscrfd_v2_14.so"),
+    "/mnt/nvme64/ai/resources/so/libscrfd_v2_14.so",
 )
 POSTPROCESS_CONFIG = os.environ.get(
     "RIVERBANK_FACE_CONFIG",
-    str(RIVERBANK_DATA / "ai/models/face/scrfd_640.json"),
+    "/mnt/nvme64/ai/models/face/scrfd_640.json",
 )
 POSTPROCESS_FUNCTION = "scrfd_2_5g"
+VISION_SOURCE = "hailo_face_tracker"
+VISION_HEARTBEAT_SECONDS = 1.0
+VISION_INDICATOR_TTL_SECONDS = 2.5
 
 
 def atomic_json(path: Path, payload: dict) -> None:
@@ -65,6 +68,26 @@ def atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
+def publish_vision_activity(active: bool) -> None:
+    payload = {
+        "command": "vision_activity",
+        "active": bool(active),
+        "source": VISION_SOURCE,
+        "ttl_seconds": VISION_INDICATOR_TTL_SECONDS,
+    }
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            client.sendto(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                str(EXPRESSION_SOCKET_PATH),
+            )
+        finally:
+            client.close()
+    except OSError:
+        pass
+
+
 def track_id(detection: object) -> int | None:
     objects = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
     return int(objects[0].get_id()) if len(objects) == 1 else None
@@ -74,6 +97,8 @@ class FaceState(app_callback_class):
     def __init__(self) -> None:
         super().__init__()
         self.lock = threading.Lock()
+        self.state_write_lock = threading.Lock()
+        self.leases = VisionLeaseManager()
         self.started_monotonic = time.monotonic()
         self.last_frame_monotonic = 0.0
         self.last_target_monotonic = 0.0
@@ -90,6 +115,102 @@ class FaceState(app_callback_class):
         }
         self.running = True
         self.server_thread: threading.Thread | None = None
+        self.maintenance_thread: threading.Thread | None = None
+        self.pipeline_controller: Callable[[bool], None] | None = None
+        self.pipeline_requested = False
+        self.pipeline_active = False
+        self.pipeline_request_changed_at = time.time()
+        self.pipeline_transition_at: float | None = None
+        self.last_indicator_heartbeat = 0.0
+        self.last_runtime_write_monotonic = 0.0
+
+    def attach_pipeline_controller(self, controller: Callable[[bool], None]) -> None:
+        self.pipeline_controller = controller
+        self.reconcile_inference(force=True)
+
+    def pipeline_state_changed(self, active: bool, success: bool) -> None:
+        with self.lock:
+            if success:
+                self.pipeline_active = bool(active)
+            self.pipeline_transition_at = time.time()
+        self.write_runtime_state()
+
+    def inference_state(self) -> dict:
+        lease_state = self.leases.snapshot()
+        with self.lock:
+            requested = self.pipeline_requested
+            pipeline_active = self.pipeline_active
+            request_changed_at = self.pipeline_request_changed_at
+            transition_at = self.pipeline_transition_at
+        return {
+            "mode": "lease-controlled",
+            "requested": requested,
+            "active": pipeline_active,
+            "pipeline_state": "playing" if pipeline_active else "paused",
+            "lease_count": lease_state["lease_count"],
+            "leases": lease_state["leases"],
+            "next_expiry_seconds": lease_state["next_expiry_seconds"],
+            "request_changed_at": request_changed_at,
+            "last_transition_at": transition_at,
+        }
+
+    def clear_tracking(self) -> None:
+        with self.lock:
+            self.target_center = None
+            self.target_velocity = (0.0, 0.0)
+            self.target_track_id = None
+            self.latest.update(
+                {
+                    "visible": False,
+                    "face_count": 0,
+                    "target": None,
+                    "faces": [],
+                }
+            )
+
+    def reconcile_inference(self, *, force: bool = False) -> None:
+        desired = self.leases.active()
+        with self.lock:
+            changed = force or desired != self.pipeline_requested
+            if desired != self.pipeline_requested:
+                self.pipeline_request_changed_at = time.time()
+            self.pipeline_requested = desired
+            controller = self.pipeline_controller
+        if changed:
+            if not desired:
+                self.clear_tracking()
+            if controller is not None:
+                controller(desired)
+            publish_vision_activity(desired)
+            self.last_indicator_heartbeat = time.monotonic()
+        self.write_runtime_state()
+
+    def write_runtime_state(self) -> None:
+        payload = self.snapshot()
+        with self.state_write_lock:
+            atomic_json(STATE_PATH, payload)
+        self.last_runtime_write_monotonic = time.monotonic()
+
+    def maintain(self) -> None:
+        while self.running:
+            expired = self.leases.expire()
+            if expired:
+                self.reconcile_inference()
+            else:
+                desired = self.leases.active()
+                with self.lock:
+                    requested = self.pipeline_requested
+                if desired != requested:
+                    self.reconcile_inference()
+                elif time.monotonic() - self.last_runtime_write_monotonic >= 1.0:
+                    self.write_runtime_state()
+            now = time.monotonic()
+            if self.leases.active() and (
+                now - self.last_indicator_heartbeat >= VISION_HEARTBEAT_SECONDS
+            ):
+                publish_vision_activity(True)
+                self.last_indicator_heartbeat = now
+            time.sleep(0.25)
 
     def choose_target(self, faces: list[dict], now: float) -> dict | None:
         if not faces:
@@ -176,6 +297,7 @@ class FaceState(app_callback_class):
             "ok": True,
             "service": "running",
             "timestamp": time.time(),
+            "last_frame_at": time.time(),
             "model": Path(MODEL_PATH).name,
             "postprocess": POSTPROCESS_FUNCTION,
             "resolution": [width, height],
@@ -185,15 +307,91 @@ class FaceState(app_callback_class):
             "face_count": len(faces),
             "target": target,
             "faces": faces,
+            "inference": self.inference_state(),
         }
         with self.lock:
             self.latest = payload
             self.last_frame_monotonic = now
+        with self.state_write_lock:
             atomic_json(STATE_PATH, payload)
+        self.last_runtime_write_monotonic = time.monotonic()
 
     def snapshot(self) -> dict:
+        inference = self.inference_state()
         with self.lock:
-            return json.loads(json.dumps(self.latest))
+            payload = json.loads(json.dumps(self.latest))
+        payload.update(
+            {
+                "ok": True,
+                "service": "running",
+                "timestamp": time.time(),
+                "inference": inference,
+            }
+        )
+        if not inference["active"]:
+            payload.update(
+                {
+                    "visible": False,
+                    "face_count": 0,
+                    "target": None,
+                    "faces": [],
+                }
+            )
+        return payload
+
+    def handle_request(self, raw_request: str) -> dict:
+        request: dict = {}
+        command = raw_request.strip()
+        if command.startswith("{"):
+            try:
+                parsed = json.loads(command)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": "invalid JSON request"}
+            if not isinstance(parsed, dict):
+                return {"ok": False, "error": "request must be a JSON object"}
+            request = parsed
+            command = str(request.get("command", "status"))
+        command = command or "status"
+        try:
+            if command == "status":
+                return self.snapshot()
+            if command == "acquire":
+                lease = self.leases.acquire(
+                    str(request.get("source", "unknown")),
+                    request.get("ttl_seconds", 30.0),
+                )
+                self.reconcile_inference()
+                return {"ok": True, "lease": lease, "state": self.snapshot()}
+            if command == "renew":
+                lease_id = str(request.get("lease_id", "")).strip()
+                if not lease_id:
+                    raise ValueError("lease_id is required")
+                lease = self.leases.renew(
+                    lease_id,
+                    request.get("ttl_seconds", 30.0),
+                )
+                if lease is None:
+                    return {"ok": False, "error": "lease not found or expired"}
+                self.reconcile_inference()
+                return {"ok": True, "lease": lease, "state": self.snapshot()}
+            if command == "release":
+                lease_id = str(request.get("lease_id", "")).strip()
+                if not lease_id:
+                    raise ValueError("lease_id is required")
+                released = self.leases.release(lease_id)
+                self.reconcile_inference()
+                return {
+                    "ok": released,
+                    "released": released,
+                    "error": None if released else "lease not found or expired",
+                    "state": self.snapshot(),
+                }
+            return {
+                "ok": False,
+                "error": "supported commands: status, acquire, renew, release",
+            }
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
 
     def serve(self) -> None:
         try:
@@ -214,16 +412,7 @@ class FaceState(app_callback_class):
                 with connection:
                     try:
                         raw_request = connection.recv(4096).decode("utf-8", "replace").strip()
-                        command = raw_request
-                        if raw_request.startswith("{"):
-                            try:
-                                command = str(json.loads(raw_request).get("command", ""))
-                            except (json.JSONDecodeError, AttributeError):
-                                command = "invalid"
-                        if command not in {"", "status"}:
-                            response = {"ok": False, "error": "supported command: status"}
-                        else:
-                            response = self.snapshot()
+                        response = self.handle_request(raw_request)
                         connection.sendall(
                             (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
                         )
@@ -237,20 +426,32 @@ class FaceState(app_callback_class):
                 pass
 
     def start_server(self) -> None:
+        self.write_runtime_state()
         self.server_thread = threading.Thread(
             target=self.serve,
             name="face-tracker-control",
             daemon=True,
         )
         self.server_thread.start()
+        self.maintenance_thread = threading.Thread(
+            target=self.maintain,
+            name="face-tracker-lease-maintenance",
+            daemon=True,
+        )
+        self.maintenance_thread.start()
 
     def stop(self) -> None:
         self.running = False
+        publish_vision_activity(False)
         if self.server_thread is not None:
             self.server_thread.join(timeout=2)
+        if self.maintenance_thread is not None:
+            self.maintenance_thread.join(timeout=2)
 
 
 def callback(pad: Gst.Pad, info: Gst.PadProbeInfo, state: FaceState):
+    if not state.leases.active():
+        return Gst.PadProbeReturn.OK
     buffer = info.get_buffer()
     if buffer is None:
         return Gst.PadProbeReturn.OK
@@ -295,6 +496,23 @@ class FaceTrackerApp(GStreamerApp):
         self.batch_size = 1
         self.app_callback = callback
         self.create_pipeline()
+        state.attach_pipeline_controller(self.request_inference_state)
+
+    def request_inference_state(self, active: bool) -> None:
+        GLib.idle_add(self.apply_inference_state, bool(active))
+
+    def apply_inference_state(self, active: bool) -> bool:
+        target = Gst.State.PLAYING if active else Gst.State.PAUSED
+        result = self.pipeline.set_state(target)
+        success = result != Gst.StateChangeReturn.FAILURE
+        self.user_data.pipeline_state_changed(active, success)
+        print(
+            "Hailo inference transition "
+            f"target={'playing' if active else 'paused'} "
+            f"result={getattr(result, 'value_nick', str(result))}",
+            flush=True,
+        )
+        return False
 
     def get_pipeline_string(self) -> str:
         if not self.video_source.startswith(("http://", "https://")):
@@ -334,7 +552,7 @@ def main() -> int:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault(
         "HAILO_ENV_FILE",
-        str(RIVERBANK_DATA / "ai/apps/hailo-rpi5-examples/.env"),
+        "/mnt/nvme64/ai/apps/hailo-rpi5-examples/.env",
     )
     gst_app.GST_VIDEO_SINK = "fakesink"
     state = FaceState()

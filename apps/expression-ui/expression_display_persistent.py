@@ -11,19 +11,27 @@ import re
 import select
 import signal
 import socket
-import sqlite3
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from bisect import bisect_right
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageFilter, ImageSequence
+from PIL import Image, ImageFilter
+
+from animation_assets import (
+    Animation,
+    RawAnimation,
+    apply_background_mode,
+    decode_animation,
+    dominant_edge_color,
+    fitted_size,
+    render_viewport,
+)
+from system_status import ACTIVE_VISION_LEASE_DIR, HEALTH_STATUS_PATH, SystemStatus
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -49,19 +57,12 @@ SOCKET_PATH = RUNTIME_DIR / "control.sock"
 STATE_PATH = RUNTIME_DIR / "state.json"
 REBOOT_REQUEST_PATH = RUNTIME_DIR / "reboot.request"
 MENU_EVENT_PATH = RUNTIME_DIR / "menu-selection.json"
-VOICE_STATE_PATH = Path("/run/hermes-voice-control/state.json")
-ACTIVE_VISION_LEASE_DIR = Path("/dev/shm/riverbank-active-vision")
-HEALTH_STATUS_PATH = Path("/var/lib/riverbank-health-monitor/status.json")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 # The service RuntimeDirectory is removed whenever this one service restarts.
 # /dev/shm survives service restarts but is cleared by an actual OS reboot.
 BOOT_ANIMATION_MARKER_PATH = Path(
     "/dev/shm/riverbank-expression-boot-animation-boot-id"
 )
-VERSION_PATH = Path(
-    os.environ.get("RIVERBANK_VERSION_FILE", APP_DIR / "VERSION")
-)
-DAILY_STATE_DB = Path(os.environ.get("RIVERBANK_DAILY_STATE_DB", DAILY_HOME / "state.db"))
 DAILY_ENV_PATH = Path(os.environ.get("RIVERBANK_DAILY_ENV", DAILY_HOME / ".env"))
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 VOICE_SOCKET_PATH = Path("/run/hermes-voice-control/control.sock")
@@ -280,384 +281,6 @@ def request_system_reboot() -> tuple[bool, str]:
         return False, str(exc)
 
 
-class SystemStatus:
-    """Low-cost, read-only status snapshot for the DSI overlay."""
-
-    def __init__(self) -> None:
-        self.last_update = 0.0
-        self.wifi_quality = 0
-        self.wifi_enabled = False
-        self.tokens_today = 0
-        self.camera_active = False
-        self.camera_active_sources: tuple[str, ...] = ()
-        self.bluetooth_connected = False
-        self.volume_percent = 0
-        self.wifi_ssid = ""
-        self.wifi_ipv4 = ""
-        self.bluetooth_powered = False
-        self.bluetooth_devices: tuple[str, ...] = ()
-        self.hostname = socket.gethostname()
-        self.os_name = "Linux"
-        self.kernel_version = ""
-        self.uptime_seconds = 0
-        self.health_healthy_count = 0
-        self.health_total_count = 0
-        self.app_version = "0.0.0"
-
-    @staticmethod
-    def read_wifi_quality() -> int:
-        try:
-            for line in Path("/proc/net/wireless").read_text(encoding="utf-8").splitlines():
-                if "wlan0:" not in line:
-                    continue
-                quality = float(line.split()[2].rstrip("."))
-                return max(0, min(round(quality / 70.0 * 100), 100))
-        except (OSError, ValueError, IndexError):
-            pass
-        return 0
-
-    @staticmethod
-    def read_wifi_enabled() -> bool:
-        try:
-            result = subprocess.run(
-                ["/usr/bin/nmcli", "radio", "wifi"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=0.7,
-                check=False,
-            )
-            return result.returncode == 0 and result.stdout.strip() == "enabled"
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-
-    @staticmethod
-    def read_wifi_details() -> tuple[str, str]:
-        ssid = ""
-        for executable in ("/usr/sbin/iwgetid", "/usr/bin/iwgetid"):
-            if not Path(executable).is_file():
-                continue
-            try:
-                result = subprocess.run(
-                    [executable, "wlan0", "--raw"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    timeout=0.7,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    ssid = result.stdout.strip()
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            break
-
-        ipv4 = ""
-        for executable in ("/usr/sbin/ip", "/usr/bin/ip"):
-            if not Path(executable).is_file():
-                continue
-            try:
-                result = subprocess.run(
-                    [executable, "-4", "-o", "addr", "show", "dev", "wlan0"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    timeout=0.7,
-                    check=False,
-                )
-                match = re.search(r"\binet\s+([0-9.]+)(?:/\d+)?", result.stdout)
-                if result.returncode == 0 and match:
-                    ipv4 = match.group(1)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            break
-        return ssid, ipv4
-
-    @staticmethod
-    def read_tokens_today() -> int:
-        if not DAILY_STATE_DB.is_file():
-            return 0
-        local = time.localtime()
-        midnight = time.mktime(
-            (local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, local.tm_wday, local.tm_yday, local.tm_isdst)
-        )
-        try:
-            connection = sqlite3.connect(
-                f"file:{DAILY_STATE_DB}?mode=ro",
-                uri=True,
-                timeout=0.15,
-            )
-            try:
-                row = connection.execute(
-                    """
-                    SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-                    FROM sessions
-                    WHERE COALESCE(last_activity_at, started_at) >= ?
-                    """,
-                    (midnight,),
-                ).fetchone()
-            finally:
-                connection.close()
-            return int(row[0] or 0) + int(row[1] or 0)
-        except (OSError, sqlite3.Error, TypeError, ValueError):
-            return 0
-
-    @staticmethod
-    def read_camera_activity(now_wall: float) -> tuple[bool, tuple[str, ...]]:
-        sources: list[str] = []
-        try:
-            payload = json.loads(VOICE_STATE_PATH.read_text(encoding="utf-8"))
-            if bool(payload.get("visual_request_active")):
-                sources.append("qwen_visual_request")
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            pass
-
-        # Future active consumers (for example pan/tilt face alignment) can
-        # publish an expiring JSON lease here. Merely keeping camera-hub or the
-        # Hailo face tracker alive does not create a lease and does not light the
-        # privacy indicator.
-        try:
-            leases = tuple(ACTIVE_VISION_LEASE_DIR.glob("*.json"))
-        except OSError:
-            leases = ()
-        for path in leases:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if not bool(payload.get("active", True)):
-                    continue
-                expires_at = float(payload.get("expires_at", 0.0))
-                updated_at = float(payload.get("updated_at", 0.0))
-                ttl_seconds = max(0.2, min(float(payload.get("ttl_seconds", 3.0)), 300.0))
-                if expires_at > now_wall or (
-                    not expires_at and updated_at and now_wall - updated_at <= ttl_seconds
-                ):
-                    sources.append(str(payload.get("source") or path.stem))
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                continue
-        unique_sources = tuple(dict.fromkeys(sources))
-        return bool(unique_sources), unique_sources
-
-    @staticmethod
-    def read_bluetooth_details() -> tuple[bool, tuple[str, ...]]:
-        powered = False
-        devices: tuple[str, ...] = ()
-        try:
-            show = subprocess.run(
-                ["/usr/bin/bluetoothctl", "show"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=0.7,
-                check=False,
-            )
-            powered = show.returncode == 0 and bool(
-                re.search(r"^\s*Powered:\s+yes\s*$", show.stdout, re.MULTILINE)
-            )
-            connected = subprocess.run(
-                ["/usr/bin/bluetoothctl", "devices", "Connected"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=0.7,
-                check=False,
-            )
-            if connected.returncode == 0:
-                names = []
-                for line in connected.stdout.splitlines():
-                    parts = line.strip().split(maxsplit=2)
-                    if len(parts) >= 3 and parts[0] == "Device":
-                        names.append(parts[2])
-                devices = tuple(names)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        return powered, devices
-
-    @classmethod
-    def read_bluetooth_connected(cls) -> bool:
-        _powered, devices = cls.read_bluetooth_details()
-        return bool(devices)
-
-    @staticmethod
-    def read_platform_details() -> tuple[str, str, str, int]:
-        hostname = socket.gethostname()
-        os_name = "Linux"
-        kernel_version = ""
-        uptime_seconds = 0
-        try:
-            for raw_line in Path("/etc/os-release").read_text(
-                encoding="utf-8"
-            ).splitlines():
-                if raw_line.startswith("PRETTY_NAME="):
-                    os_name = raw_line.split("=", 1)[1].strip().strip('"')
-                    break
-        except OSError:
-            pass
-        try:
-            kernel_version = Path("/proc/sys/kernel/osrelease").read_text(
-                encoding="utf-8"
-            ).strip()
-        except OSError:
-            pass
-        try:
-            uptime_seconds = int(
-                float(
-                    Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
-                )
-            )
-        except (OSError, ValueError, IndexError):
-            pass
-        return hostname, os_name, kernel_version, uptime_seconds
-
-    @staticmethod
-    def read_health_summary() -> tuple[int, int]:
-        try:
-            payload = json.loads(HEALTH_STATUS_PATH.read_text(encoding="utf-8"))
-            checks = payload.get("checks")
-            if not isinstance(checks, list):
-                return 0, 0
-            total = len(checks)
-            healthy = sum(
-                1
-                for record in checks
-                if isinstance(record, dict) and bool(record.get("healthy"))
-            )
-            return healthy, total
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return 0, 0
-
-    @staticmethod
-    def read_app_version() -> str:
-        try:
-            version = VERSION_PATH.read_text(encoding="utf-8").strip()
-            return version or "0.0.0"
-        except OSError:
-            return "0.0.0"
-
-    @staticmethod
-    def read_volume_percent() -> int:
-        environment = os.environ.copy()
-        environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        try:
-            result = subprocess.run(
-                ["/usr/bin/wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=0.7,
-                check=False,
-                env=environment,
-            )
-            match = re.search(r"Volume:\s*([0-9.]+)", result.stdout)
-            if result.returncode == 0 and match:
-                return max(0, min(round(float(match.group(1)) * 100), 100))
-        except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
-            pass
-        return 0
-
-    def update(self, now_monotonic: float, force: bool = False) -> bool:
-        if not force and now_monotonic - self.last_update < 2.0:
-            return False
-        return self.apply_snapshot(self.collect_snapshot(), now_monotonic)
-
-    def snapshot_values(self) -> tuple:
-        return (
-            self.wifi_quality,
-            self.wifi_enabled,
-            self.tokens_today,
-            self.camera_active,
-            self.camera_active_sources,
-            self.bluetooth_connected,
-            self.volume_percent,
-            self.wifi_ssid,
-            self.wifi_ipv4,
-            self.bluetooth_powered,
-            self.bluetooth_devices,
-            self.hostname,
-            self.os_name,
-            self.kernel_version,
-            self.uptime_seconds,
-            self.health_healthy_count,
-            self.health_total_count,
-            self.app_version,
-        )
-
-    @classmethod
-    def collect_snapshot(cls) -> tuple:
-        camera_active, camera_sources = cls.read_camera_activity(time.time())
-        wifi_quality = cls.read_wifi_quality()
-        wifi_ssid, wifi_ipv4 = cls.read_wifi_details()
-        bluetooth_powered, bluetooth_devices = cls.read_bluetooth_details()
-        hostname, os_name, kernel_version, uptime_seconds = (
-            cls.read_platform_details()
-        )
-        health_healthy_count, health_total_count = cls.read_health_summary()
-        return (
-            wifi_quality,
-            cls.read_wifi_enabled(),
-            cls.read_tokens_today(),
-            camera_active,
-            camera_sources,
-            bool(bluetooth_devices),
-            cls.read_volume_percent(),
-            wifi_ssid,
-            wifi_ipv4,
-            bluetooth_powered,
-            bluetooth_devices,
-            hostname,
-            os_name,
-            kernel_version,
-            uptime_seconds,
-            health_healthy_count,
-            health_total_count,
-            cls.read_app_version(),
-        )
-
-    def apply_snapshot(self, snapshot: tuple, now_monotonic: float) -> bool:
-        before = self.snapshot_values()
-        (
-            self.wifi_quality,
-            self.wifi_enabled,
-            self.tokens_today,
-            self.camera_active,
-            self.camera_active_sources,
-            self.bluetooth_connected,
-            self.volume_percent,
-            self.wifi_ssid,
-            self.wifi_ipv4,
-            self.bluetooth_powered,
-            self.bluetooth_devices,
-            self.hostname,
-            self.os_name,
-            self.kernel_version,
-            self.uptime_seconds,
-            self.health_healthy_count,
-            self.health_total_count,
-            self.app_version,
-        ) = snapshot
-        self.last_update = now_monotonic
-        return before != snapshot
-
-    def as_dict(self) -> dict:
-        return {
-            "wifi_quality": self.wifi_quality,
-            "wifi_enabled": self.wifi_enabled,
-            "tokens_today": self.tokens_today,
-            "camera_active": self.camera_active,
-            "camera_active_sources": list(self.camera_active_sources),
-            "bluetooth_connected": self.bluetooth_connected,
-            "volume_percent": self.volume_percent,
-            "wifi_ssid": self.wifi_ssid,
-            "wifi_ipv4": self.wifi_ipv4,
-            "bluetooth_powered": self.bluetooth_powered,
-            "bluetooth_devices": list(self.bluetooth_devices),
-            "hostname": self.hostname,
-            "os_name": self.os_name,
-            "kernel_version": self.kernel_version,
-            "uptime_seconds": self.uptime_seconds,
-            "health_healthy_count": self.health_healthy_count,
-            "health_total_count": self.health_total_count,
-            "app_version": self.app_version,
-        }
 
 
 def read_profile_env_value(name: str) -> str:
@@ -766,168 +389,20 @@ def app_path(value: object) -> Path:
     return path if path.is_absolute() else APP_DIR / path
 
 
-def dominant_edge_color(frame: Image.Image) -> tuple[int, int, int]:
-    rgba = frame.convert("RGBA")
-    width, height = rgba.size
-    band = max(4, min(width, height) // 40)
-    boxes = (
-        (0, 0, width, band),
-        (0, height - band, width, height),
-        (0, band, band, height - band),
-        (width - band, band, width, height - band),
-    )
-    colors: Counter[tuple[int, int, int]] = Counter()
-    for box in boxes:
-        for red, green, blue, alpha in rgba.crop(box).getdata():
-            if alpha >= 128:
-                colors[(red, green, blue)] += 1
-    return colors.most_common(1)[0][0] if colors else (0, 0, 0)
 
 
-def black_chroma_matte(
-    image: Image.Image,
-    background: tuple[int, int, int],
-    soft_distance: int,
-) -> Image.Image:
-    """Replace a uniform matte with black and decontaminate antialiased edges."""
-    rgb = image.convert("RGB")
-    matte = Image.new("RGB", rgb.size, background)
-    red_delta, green_delta, blue_delta = ImageChops.difference(rgb, matte).split()
-    distance = ImageChops.lighter(ImageChops.lighter(red_delta, green_delta), blue_delta)
-    threshold = max(4, min(int(soft_distance), 96))
-    alpha_lut = [
-        0 if value <= 2 else 255 if value >= threshold else round(255 * value / threshold)
-        for value in range(256)
-    ]
-    alpha = distance.point(alpha_lut)
-    channels = []
-    for channel, matte_value in zip(rgb.split(), background):
-        residual_lut = [round((255 - value) * matte_value / 255) for value in range(256)]
-        channels.append(ImageChops.subtract(channel, alpha.point(residual_lut)))
-    return Image.merge("RGB", channels)
 
 
-def apply_background_mode(
-    image: Image.Image,
-    background: tuple[int, int, int],
-    mode: str,
-    soft_distance: int,
-) -> tuple[Image.Image, tuple[int, int, int]]:
-    if mode == "original":
-        return image.convert("RGB"), background
-    if mode == "black_chroma":
-        return black_chroma_matte(image, background, soft_distance), (0, 0, 0)
-    raise ValueError(f"unsupported background_mode: {mode}")
 
 
-def fitted_size(source: tuple[int, int], target: tuple[int, int]) -> tuple[int, int]:
-    source_width, source_height = source
-    target_width, target_height = target
-    scale = min(target_width / source_width, target_height / source_height)
-    return max(1, round(source_width * scale)), max(1, round(source_height * scale))
 
 
-def render_viewport(
-    image: Image.Image,
-    target_size: tuple[int, int],
-    background: tuple[int, int, int],
-    display_scale: float,
-) -> Image.Image:
-    """Pre-render the exact centered/cropped viewport shown on the DSI panel."""
-    rendered_size = (
-        max(1, round(image.size[0] * display_scale)),
-        max(1, round(image.size[1] * display_scale)),
-    )
-    if image.size != rendered_size:
-        image = image.resize(rendered_size, Image.Resampling.LANCZOS)
-    viewport = Image.new("RGB", target_size, background)
-    left = (target_size[0] - rendered_size[0]) // 2
-    top = (target_size[1] - rendered_size[1]) // 2
-    viewport.paste(image, (left, top))
-    return viewport
 
 
-@dataclass
-class RawAnimation:
-    state: str
-    size: tuple[int, int]
-    frames: list[bytes]
-    durations: list[float]
-    background: tuple[int, int, int]
 
 
-@dataclass
-class Animation:
-    state: str
-    frames: list[object]
-    durations: list[float]
-    background: tuple[int, int, int]
-    memory_bytes: int
 
 
-def decode_animation(
-    state: str,
-    path: Path,
-    target_size: tuple[int, int],
-    background_mode: str,
-    chroma_soft_distance: int,
-    display_scale: float,
-    animation_fps: float,
-) -> RawAnimation:
-    source_frames: list[Image.Image] = []
-    source_times: list[float] = []
-    source_durations: list[float] = []
-    source_time = 0.0
-    sample_interval = 1.0 / animation_fps
-    with Image.open(path) as source:
-        default_duration = max(0.001, float(source.info.get("duration", 100)) / 1000.0)
-        background = dominant_edge_color(source.copy())
-        fitted = fitted_size(source.size, target_size)
-        for frame in ImageSequence.Iterator(source):
-            duration = max(0.001, float(frame.info.get("duration", default_duration * 1000)) / 1000.0)
-            image = frame.convert("RGB")
-            if image.size != fitted:
-                image = image.resize(fitted, Image.Resampling.LANCZOS)
-            image, output_background = apply_background_mode(
-                image,
-                background,
-                background_mode,
-                chroma_soft_distance,
-            )
-            image = render_viewport(
-                image,
-                target_size,
-                output_background,
-                display_scale,
-            )
-            source_frames.append(image)
-            source_times.append(source_time)
-            source_durations.append(duration)
-            source_time += duration
-    if not source_frames:
-        raise ValueError(f"no frames decoded from {path}")
-    target_frame_count = max(1, round(source_time * animation_fps))
-    frames: list[bytes] = []
-    for target_index in range(target_frame_count):
-        target_time = min(target_index * sample_interval, source_time - 1e-9)
-        source_index = max(0, bisect_right(source_times, target_time) - 1)
-        next_index = (source_index + 1) % len(source_frames)
-        frame_duration = max(source_durations[source_index], 0.001)
-        blend = max(
-            0.0,
-            min((target_time - source_times[source_index]) / frame_duration, 1.0),
-        )
-        if blend <= 0.001:
-            rendered = source_frames[source_index]
-        else:
-            rendered = Image.blend(
-                source_frames[source_index],
-                source_frames[next_index],
-                blend,
-            )
-        frames.append(rendered.tobytes())
-    durations = [sample_interval] * target_frame_count
-    return RawAnimation(state, target_size, frames, durations, output_background)
 
 
 class PersistentExpressionDisplay:
@@ -3766,7 +3241,7 @@ class PersistentExpressionDisplay:
             (
                 "version",
                 "版本",
-                f"RiverBank Edge · v{status.app_version}",
+                f"RiverBank Edge · {status.app_version}",
                 True,
             ),
             ("system", "系统", f"{status.hostname} · {health}", True),
@@ -3798,7 +3273,7 @@ class PersistentExpressionDisplay:
         if section == "version":
             return "版本", (
                 ("产品", "RiverBank Edge"),
-                ("版本", f"v{status.app_version}"),
+                ("版本", status.app_version),
                 ("系统", status.os_name),
                 ("内核", status.kernel_version or "—"),
             )
@@ -6991,7 +6466,37 @@ class PersistentExpressionDisplay:
             pass
 
 
+def run_self_test() -> dict:
+    """Validate modular imports and static assets without opening the display."""
+    config = load_config()
+    missing_assets = [
+        str(app_path(value))
+        for value in config["expressions"].values()
+        if not app_path(value).is_file()
+    ]
+    if missing_assets:
+        raise FileNotFoundError(
+            "missing expression assets: " + ", ".join(missing_assets[:3])
+        )
+    width, height = (int(value) for value in config.get("target_size", [800, 800]))
+    if width <= 0 or height <= 0:
+        raise ValueError("target_size must contain positive dimensions")
+    status = SystemStatus()
+    return {
+        "ok": True,
+        "renderer": "modular-v1",
+        "target_size": [width, height],
+        "expression_count": len(config["expressions"]),
+        "animation_module": Animation.__module__,
+        "status_module": SystemStatus.__module__,
+        "version": status.read_app_version(),
+    }
+
+
 def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        print(json.dumps(run_self_test(), ensure_ascii=False, separators=(",", ":")))
+        return 0
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     ACTIVE_VISION_LEASE_DIR.mkdir(parents=True, exist_ok=True)
     try:

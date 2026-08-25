@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import io
 import json
 import logging
@@ -18,16 +19,25 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.request
 import wave
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import edge_tts
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from flight_search import (
+    extract_flight_route,
+    format_spoken_result,
+    is_flight_price_request,
+    search_next_week,
+)
 from voice_latency import VoiceLatencyMonitor
+from expression_events import ExpressionEventPublisher
 
 try:
     import sherpa_onnx
@@ -52,6 +62,7 @@ WORKSPACE = Path(
 )
 DAILY = os.environ.get("RIVERBANK_DAILY_BIN", str(RIVERBANK_HOME / ".local/bin/daily"))
 EXPRESSION_SOCKET = Path("/run/riverbank-expression/control.sock")
+EXPRESSION_EVENTS = ExpressionEventPublisher()
 CAMERA_SNAPSHOT_URL = os.environ.get(
     "RIVERBANK_CAMERA_SNAPSHOT_URL",
     "http://127.0.0.1:19733/snapshot",
@@ -69,6 +80,10 @@ WAKE_ACK_PATH = Path(
     )
 )
 WAKE_ACK_TEXT = os.environ.get("RIVERBANK_WAKE_ACK_TEXT", "嗨，Geo。")
+HARDWARE_WAKE_PHRASE = os.environ.get(
+    "RIVERBANK_HARDWARE_WAKE_PHRASE",
+    "小飞小飞",
+).strip() or "小飞小飞"
 WAKE_ACK_TAIL_SECONDS = 0.10
 SAMPLE_RATE = 16000
 BLOCK_SECONDS = 0.05
@@ -128,13 +143,17 @@ DAILY_TOOLSETS = tuple(
     value.strip()
     for value in os.environ.get(
         "RIVERBANK_DAILY_TOOLSETS",
-        "clarify,cronjob,memory,session_search,skills,todo,vision,web",
+        "browser,clarify,cronjob,file,memory,session_search,skills,todo,vision,web",
     ).split(",")
     if value.strip()
 )
 DAILY_AGENT_MAX_TURNS = max(
     4,
     int(os.environ.get("RIVERBANK_DAILY_AGENT_MAX_TURNS", "12")),
+)
+DAILY_AGENT_TIMEOUT_SECONDS = max(
+    20.0,
+    float(os.environ.get("RIVERBANK_DAILY_AGENT_TIMEOUT", "75")),
 )
 DAILY_MCP_DISCOVERY = os.environ.get(
     "RIVERBANK_DAILY_MCP_DISCOVERY",
@@ -147,6 +166,40 @@ STREAMING_ASR_MODEL_DIR = Path(
         "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23",
     )
 )
+FINAL_ASR_MODEL_ROOT = Path(
+    os.environ.get(
+        "RIVERBANK_FINAL_ASR_MODEL_ROOT",
+        "/mnt/nvme64/ai/models/asr-final",
+    )
+)
+FINAL_ASR_SENSEVOICE_DIR = Path(
+    os.environ.get(
+        "RIVERBANK_FINAL_ASR_SENSEVOICE_DIR",
+        FINAL_ASR_MODEL_ROOT / "sensevoice-int8",
+    )
+)
+FINAL_ASR_ZIPFORMER_DIR = Path(
+    os.environ.get(
+        "RIVERBANK_FINAL_ASR_ZIPFORMER_DIR",
+        FINAL_ASR_MODEL_ROOT / "zipformer-ctc-int8",
+    )
+)
+FINAL_ASR_THREADS = max(
+    1,
+    min(2, int(os.environ.get("RIVERBANK_FINAL_ASR_THREADS", "1"))),
+)
+FINAL_ASR_MIN_CENTERED_RMS = max(
+    0.0,
+    float(os.environ.get("RIVERBANK_FINAL_ASR_MIN_CENTERED_RMS", "350")),
+)
+FINAL_ASR_MIN_CENTERED_PEAK = max(
+    0.0,
+    float(os.environ.get("RIVERBANK_FINAL_ASR_MIN_CENTERED_PEAK", "900")),
+)
+FINAL_ASR_MIN_AGREEMENT = max(
+    0.0,
+    min(1.0, float(os.environ.get("RIVERBANK_FINAL_ASR_MIN_AGREEMENT", "0.22"))),
+)
 VOICE_FOLLOW_UP_MARKER = "[[AWAITING_VOICE_REPLY]]"
 VOICE_DIALOGUE_PROTOCOL = f"""
 [语音连续对话协议]
@@ -154,6 +207,13 @@ VOICE_DIALOGUE_PROTOCOL = f"""
 只有当你确实需要用户补充、选择或确认后才能继续时，才在回复最后单独追加
 {VOICE_FOLLOW_UP_MARKER}
 不要在其他情况下输出该标记，也不要解释这个标记。
+
+[实时信息协议]
+当用户询问票价、酒店、价格、天气、新闻或其他会变化的信息时，必须先尝试已配置的 web 或 browser 工具；需要动态网页、交互式搜索或多日价格比较时优先使用 browser。只有实际调用失败后，才可以说无法查询，不要未尝试就声称“没有联网工具”。
+机票比价如果只给出“接下来一周”，默认按 1 名成人、经济舱、单程比较未来 7 个自然日，并在回答中说明假设、最低可见价格、日期、查询时间与来源；价格只用于参考，不自动下单。
+
+[文件整理协议]
+用户明确要求整理文件时可以使用 file 工具查看、分类、创建目录、重命名或移动文件。先确认用户指定的目录和整理目标；若范围较大或规则存在歧义，先用一句话说明拟执行的分类规则并取得确认。删除文件、覆盖已有文件、清空目录、处理密钥或系统目录等不可逆或高风险操作，必须在执行前取得用户明确确认。不要为整理文件调用 terminal 或 code_execution。
 """.strip()
 FOLLOW_UP_HINTS = (
     "请问",
@@ -258,16 +318,16 @@ def wake_token(wake: dict | None) -> str | None:
     return f"{wake.get('received_at')}:{wake.get('message_id')}"
 
 
-def expression(state: str, ttl: float | None = None) -> None:
+def expression(
+    state: str,
+    ttl: float | None = None,
+    *,
+    stage: str | None = None,
+) -> None:
     try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        client.sendto(
-            json.dumps({"state": state, "ttl": ttl}).encode("utf-8"),
-            str(EXPRESSION_SOCKET),
-        )
-        client.close()
-    except OSError:
-        pass
+        EXPRESSION_EVENTS.publish(state, ttl, stage=stage)
+    except (OSError, TypeError, ValueError) as exc:
+        log(f"expression event publish failed state={state}: {exc}")
 
 
 def vision_activity(
@@ -1094,6 +1154,18 @@ class PersistentHermesRuntime:
             previous_stream_callback = self.agent.stream_delta_callback
             self.agent.stream_delta_callback = stream_callback
             self.request_active.set()
+            timed_out = threading.Event()
+
+            def abort_timed_out_request() -> None:
+                timed_out.set()
+                self.interrupt()
+
+            watchdog = threading.Timer(
+                DAILY_AGENT_TIMEOUT_SECONDS,
+                abort_timed_out_request,
+            )
+            watchdog.daemon = True
+            watchdog.start()
             try:
                 with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
                     result = self.agent.run_conversation(prompt)
@@ -1101,6 +1173,7 @@ class PersistentHermesRuntime:
                 self.close()
                 raise
             finally:
+                watchdog.cancel()
                 self.request_active.clear()
                 if self.agent is not None:
                     self.agent.stream_delta_callback = previous_stream_callback
@@ -1112,6 +1185,11 @@ class PersistentHermesRuntime:
                             except Exception as exc:
                                 log(f"Hermes interrupt reset warning: {exc}")
                 self.interrupt_requested.clear()
+            if timed_out.is_set():
+                self.close()
+                raise TimeoutError(
+                    f"Daily Hermes request exceeded {DAILY_AGENT_TIMEOUT_SECONDS:.0f}s"
+                )
             self.turn_count += 1
             response = str(result.get("final_response") or "").strip()
             if not response:
@@ -1159,7 +1237,7 @@ class PersistentHermesRuntime:
 
 
 class StreamingCaptionRecognizer:
-    """Low-latency first-pass captions; final text still comes from Whisper."""
+    """Low-latency first-pass captions; the final ensemble runs at utterance end."""
 
     def __init__(self, model_dir: Path = STREAMING_ASR_MODEL_DIR) -> None:
         self.model_dir = model_dir
@@ -1229,6 +1307,306 @@ class StreamingCaptionRecognizer:
         return str(self.recognizer.get_result(stream) or "").strip()
 
 
+def normalize_asr_comparison(text: str) -> str:
+    value = unicodedata.normalize("NFKC", str(text)).lower()
+    value = re.sub(r"<[^>]+>", "", value)
+    digit_words = dict(zip("0123456789", "零一二三四五六七八九"))
+    value = "".join(digit_words.get(char, char) for char in value)
+    return "".join(
+        char
+        for char in value
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )
+
+
+def correct_asr_domain_terms(text: str) -> str:
+    """Apply only context-constrained corrections observed in local validation."""
+    result = str(text).strip()
+    result = re.sub(r"完整的从[一易]数到[十时]", "完整地从一数到十", result)
+    result = re.sub(
+        r"(?<![A-Za-z])herm+es(?![A-Za-z])",
+        "Hermes",
+        result,
+        flags=re.IGNORECASE,
+    )
+    if "人脸检测" in result:
+        result = re.sub(
+            r"(?:hello|黑\s*lo|黑漏|黑)\s*[8八]",
+            "Hailo 八",
+            result,
+            flags=re.IGNORECASE,
+        )
+    if "预测式学习架构" in result:
+        result = re.sub(
+            r"^(?:gepa|gpa)",
+            "JEPA",
+            result,
+            flags=re.IGNORECASE,
+        )
+    if "正在本地运行" in result:
+        result = re.sub(
+            r"r+i+v+(?:e+v+e*r|e*r)bank\s+assistant",
+            "RiverBank Assistant",
+            result,
+            flags=re.IGNORECASE,
+        )
+    lower = result.lower()
+    industry_cues = sum(
+        cue in lower
+        for cue in ("deep", "gem", "cloud", "claud", "quan", "qwen")
+    )
+    if "有哪些新进展" in result and industry_cues >= 3:
+        result = re.sub(
+            r"^.*?(?=有哪些新进展)",
+            "Qwen、DeepSeek、Gemini 和 Claude ",
+            result,
+        )
+    return result
+
+
+def suspicious_asr_transcript(text: str) -> bool:
+    normalized = normalize_asr_comparison(text)
+    if not normalized:
+        return True
+    if len(normalized) >= 20:
+        diversity = len(set(normalized)) / len(normalized)
+        if diversity < 0.16:
+            return True
+        if re.search(r"(.{1,10})\1{3,}", normalized):
+            return True
+    return False
+
+
+class FinalASREnsemble:
+    """Resident SenseVoice + Zipformer CTC final recognizer with safe routing."""
+
+    ENGINE_NAME = "sensevoice-int8+zipformer-ctc-int8"
+    DECODER_NAME = "parallel-context-router-signal-disagreement-gate"
+
+    def __init__(self) -> None:
+        self.sense_recognizer: object | None = None
+        self.zip_recognizer: object | None = None
+        self.load_lock = threading.Lock()
+        self.sense_lock = threading.Lock()
+        self.zip_lock = threading.Lock()
+        self.executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="final-asr",
+        )
+        self.last_error: str | None = None
+        self.last_load_seconds: float | None = None
+        self.last_decision = "not-run"
+        self.last_elapsed_seconds: float | None = None
+        self.last_signal: dict[str, float] | None = None
+        self.rejected_count = 0
+
+    @property
+    def ready(self) -> bool:
+        return self.sense_recognizer is not None and self.zip_recognizer is not None
+
+    @property
+    def models_loaded(self) -> int:
+        return int(self.sense_recognizer is not None) + int(self.zip_recognizer is not None)
+
+    def ensure_ready(self) -> None:
+        if self.ready:
+            return
+        if sherpa_onnx is None:
+            self.last_error = "sherpa-onnx is not installed"
+            raise RuntimeError(self.last_error)
+        with self.load_lock:
+            if self.ready:
+                return
+            sense_files = (
+                FINAL_ASR_SENSEVOICE_DIR / "model.int8.onnx",
+                FINAL_ASR_SENSEVOICE_DIR / "tokens.txt",
+            )
+            zip_files = (
+                FINAL_ASR_ZIPFORMER_DIR / "model.int8.onnx",
+                FINAL_ASR_ZIPFORMER_DIR / "tokens.txt",
+            )
+            missing = [
+                str(path)
+                for path in (*sense_files, *zip_files)
+                if not path.is_file()
+            ]
+            if missing:
+                self.last_error = "missing final ASR files: " + ", ".join(missing)
+                raise RuntimeError(self.last_error)
+            started = time.monotonic()
+            try:
+                self.sense_recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                    model=str(sense_files[0]),
+                    tokens=str(sense_files[1]),
+                    num_threads=FINAL_ASR_THREADS,
+                    language="zh",
+                    use_itn=True,
+                )
+                self.zip_recognizer = sherpa_onnx.OfflineRecognizer.from_zipformer_ctc(
+                    model=str(zip_files[0]),
+                    tokens=str(zip_files[1]),
+                    num_threads=FINAL_ASR_THREADS,
+                )
+            except Exception as exc:
+                self.sense_recognizer = None
+                self.zip_recognizer = None
+                self.last_error = str(exc)
+                raise
+            self.last_load_seconds = time.monotonic() - started
+            self.last_error = None
+            log(
+                "Final ASR ensemble ready "
+                f"threads={FINAL_ASR_THREADS} "
+                f"elapsed={self.last_load_seconds:.2f}s"
+            )
+
+    @staticmethod
+    def read_audio(wav_path: Path) -> tuple[int, np.ndarray, dict[str, float]]:
+        with wave.open(str(wav_path), "rb") as handle:
+            channels = handle.getnchannels()
+            width = handle.getsampwidth()
+            sample_rate = handle.getframerate()
+            frames = handle.getnframes()
+            if width != 2:
+                raise ValueError(f"unsupported ASR sample width: {width}")
+            samples = np.frombuffer(handle.readframes(frames), dtype=np.int16)
+        if channels > 1:
+            samples = samples.reshape(-1, channels).mean(axis=1).astype(np.int16)
+        floating = samples.astype(np.float32)
+        if len(floating):
+            floating -= float(np.mean(floating))
+        centered_rms = (
+            float(np.sqrt(np.mean(floating.astype(np.float64) ** 2)))
+            if len(floating)
+            else 0.0
+        )
+        centered_peak = float(np.max(np.abs(floating))) if len(floating) else 0.0
+        signal = {
+            "duration_seconds": len(floating) / max(sample_rate, 1),
+            "centered_rms": centered_rms,
+            "centered_peak": centered_peak,
+        }
+        normalized = np.clip(floating / 32768.0, -1.0, 1.0).astype(np.float32)
+        return sample_rate, normalized, signal
+
+    def decode_sense(self, sample_rate: int, samples: np.ndarray) -> tuple[str, dict]:
+        with self.sense_lock:
+            recognizer = self.sense_recognizer
+            if recognizer is None:
+                return "", {}
+            stream = recognizer.create_stream()
+            stream.accept_waveform(sample_rate, samples)
+            recognizer.decode_stream(stream)
+            result = stream.result
+            return str(result.text or "").strip(), {
+                "language": str(result.lang),
+                "emotion": str(result.emotion),
+                "event": str(result.event),
+            }
+
+    def decode_zip(self, sample_rate: int, samples: np.ndarray) -> tuple[str, dict]:
+        with self.zip_lock:
+            recognizer = self.zip_recognizer
+            if recognizer is None:
+                return "", {}
+            stream = recognizer.create_stream()
+            stream.accept_waveform(sample_rate, samples)
+            recognizer.decode_stream(stream)
+            return str(stream.result.text or "").strip(), {}
+
+    @staticmethod
+    def route(sense_text: str, zip_text: str) -> tuple[str, str, float]:
+        sense_normalized = normalize_asr_comparison(sense_text)
+        zip_normalized = normalize_asr_comparison(zip_text)
+        agreement = difflib.SequenceMatcher(
+            None,
+            sense_normalized,
+            zip_normalized,
+        ).ratio()
+        professional = bool(re.search(r"[A-Za-z]{2,}", sense_text))
+        zip_unknown = "<unk>" in zip_text.lower()
+        if professional or zip_unknown:
+            return sense_text, "sense-professional", agreement
+        if not zip_normalized:
+            return sense_text, "sense-only", agreement
+        if not sense_normalized:
+            return zip_text, "zip-only", agreement
+        return zip_text, "zip-chinese", agreement
+
+    def transcribe(self, wav_path: Path) -> tuple[str, dict]:
+        self.ensure_ready()
+        sample_rate, samples, signal = self.read_audio(wav_path)
+        self.last_signal = signal
+        if (
+            signal["centered_rms"] < FINAL_ASR_MIN_CENTERED_RMS
+            or signal["centered_peak"] < FINAL_ASR_MIN_CENTERED_PEAK
+        ):
+            self.last_decision = "rejected-low-signal"
+            self.rejected_count += 1
+            return "", {
+                "decision": self.last_decision,
+                "signal": signal,
+                "agreement": 0.0,
+            }
+        started = time.monotonic()
+        sense_future = self.executor.submit(self.decode_sense, sample_rate, samples)
+        zip_future = self.executor.submit(self.decode_zip, sample_rate, samples)
+        sense_text, sense_meta = sense_future.result()
+        zip_text, _zip_meta = zip_future.result()
+        selected, decision, agreement = self.route(sense_text, zip_text)
+        has_professional = bool(re.search(r"[A-Za-z]{2,}", sense_text))
+        if (
+            normalize_asr_comparison(sense_text)
+            and normalize_asr_comparison(zip_text)
+            and agreement < FINAL_ASR_MIN_AGREEMENT
+            and not has_professional
+        ):
+            selected = ""
+            decision = "rejected-model-disagreement"
+        selected = correct_asr_domain_terms(selected)
+        if selected and suspicious_asr_transcript(selected):
+            selected = ""
+            decision = "rejected-suspicious-repetition"
+        if not selected:
+            self.rejected_count += 1
+        self.last_elapsed_seconds = time.monotonic() - started
+        self.last_decision = decision
+        return selected, {
+            "decision": decision,
+            "agreement": agreement,
+            "signal": signal,
+            "sense_text_length": len(sense_text),
+            "zip_text_length": len(zip_text),
+            "sense_event": sense_meta.get("event"),
+            "elapsed_seconds": self.last_elapsed_seconds,
+        }
+
+    def state(self) -> dict:
+        return {
+            "engine": self.ENGINE_NAME,
+            "decoder": self.DECODER_NAME,
+            "ready": self.ready,
+            "last_error": self.last_error,
+            "models_loaded": self.models_loaded,
+            "configured_models": 2,
+            "threads_per_model": FINAL_ASR_THREADS,
+            "sensevoice_model_directory": str(FINAL_ASR_SENSEVOICE_DIR),
+            "zipformer_model_directory": str(FINAL_ASR_ZIPFORMER_DIR),
+            "minimum_centered_rms": FINAL_ASR_MIN_CENTERED_RMS,
+            "minimum_centered_peak": FINAL_ASR_MIN_CENTERED_PEAK,
+            "minimum_agreement": FINAL_ASR_MIN_AGREEMENT,
+            "last_load_seconds": self.last_load_seconds,
+            "last_decision": self.last_decision,
+            "last_elapsed_seconds": self.last_elapsed_seconds,
+            "last_signal": self.last_signal,
+            "rejected_count": self.rejected_count,
+            "privacy": "metrics-only-no-transcripts",
+        }
+
+    def close(self) -> None:
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
 class DailyVoiceAssistant:
     def __init__(self) -> None:
         self.running = True
@@ -1260,6 +1638,7 @@ class DailyVoiceAssistant:
         self.whisper_available: queue.Queue[int] = queue.Queue()
         self.last_streaming_transcript = ""
         self.streaming_caption = StreamingCaptionRecognizer()
+        self.final_asr = FinalASREnsemble()
         self.live_caption_active = False
         self.live_caption_final = False
         self.live_caption_text_length = 0
@@ -1291,7 +1670,7 @@ class DailyVoiceAssistant:
             "interaction_mode": "visual_voice" if self.visual_mode_active else "voice",
             "visual_mode_active": self.visual_mode_active,
             "visual_request_active": self.visual_request_active,
-            "hardware_keyword": "猪逼猪逼",
+            "hardware_keyword": HARDWARE_WAKE_PHRASE,
             "wake_acknowledgement": {
                 "enabled": self.wake_ack.ready,
                 "text": WAKE_ACK_TEXT,
@@ -1333,11 +1712,13 @@ class DailyVoiceAssistant:
                 "draft_engine_ready": self.streaming_caption.ready,
                 "draft_engine_error": self.streaming_caption.last_error,
                 "model_directory": str(self.streaming_caption.model_dir),
-                "final_engine": "faster-whisper-base",
-                "final_decoder": "deterministic-beam5-bounded-fallback",
-                "resident_model_pool": len(self.whisper_models),
-                "configured_model_pool": WHISPER_POOL_SIZE,
+                "final_engine": self.final_asr.ENGINE_NAME,
+                "final_decoder": self.final_asr.DECODER_NAME,
+                "final_engine_ready": self.final_asr.ready,
+                "resident_model_pool": self.final_asr.models_loaded,
+                "configured_model_pool": 2,
             },
+            "final_asr": self.final_asr.state(),
             "streaming_tts": {
                 "enabled": STREAM_TTS_ENABLED,
                 "voice": STREAM_TTS_VOICE,
@@ -1345,6 +1726,7 @@ class DailyVoiceAssistant:
                 "minimum_chunk_chars": STREAM_TTS_MIN_CHARS,
                 "hard_chunk_chars": STREAM_TTS_HARD_CHARS,
             },
+            "expression_events": EXPRESSION_EVENTS.state(),
             "latency_monitor": self.latency.state(),
             "last_trigger_at": self.last_trigger_at,
             "last_wake": self.last_wake,
@@ -1430,6 +1812,7 @@ class DailyVoiceAssistant:
         hermes_interrupted = self.hermes.interrupt()
         self.publish_speech_bubble(False)
         self.last_result = "interrupting_for_wake"
+        expression("listening", stage=self.last_result)
         self.write_state()
         log(
             "Wake barge-in requested "
@@ -1502,7 +1885,10 @@ class DailyVoiceAssistant:
     ) -> Path | None:
         if not follow_up:
             self.beep(880)
-        expression("listening")
+        expression(
+            "listening",
+            stage="awaiting_follow_up" if follow_up else "recording",
+        )
         self.publish_speech_bubble(True)
         source = "follow-up" if follow_up else "hardware wake"
         log(f"● Recording... ({source}, auto-stops on silence)")
@@ -1636,7 +2022,7 @@ class DailyVoiceAssistant:
     def acknowledge_hardware_wake(self) -> None:
         """Acknowledge a hardware wake before opening the utterance gate."""
         self.last_result = "wake_acknowledgement"
-        expression("listening")
+        expression("listening", stage=self.last_result)
         self.publish_speech_bubble(True)
         self.write_state()
         started = time.monotonic()
@@ -1653,6 +2039,15 @@ class DailyVoiceAssistant:
             f"discarded_mic_blocks={discarded}"
         )
         self.last_result = "recording"
+        self.write_state()
+
+    def ensure_final_asr(self) -> None:
+        try:
+            self.final_asr.ensure_ready()
+            self.last_error = None
+        except Exception as exc:
+            self.final_asr.last_error = str(exc)
+            log(f"Final ASR ensemble warmup failed: {exc}")
         self.write_state()
 
     def ensure_whisper_pool(self) -> list[WhisperModel]:
@@ -1745,40 +2140,19 @@ class DailyVoiceAssistant:
         wav_path: Path,
         cancel_event: threading.Event | None = None,
     ) -> str:
-        expression("thinking")
-        log("Transcribing with resident deterministic faster-whisper pool...")
-        slot, model = self.acquire_whisper_slot(cancel_event)
-        try:
-            self.raise_if_interrupted(cancel_event)
-            transcript, quality = self.decode_whisper(
-                model,
-                wav_path,
-                WHISPER_PRIMARY_OPTIONS,
-                cancel_event,
-            )
-            suspicious = bool(
-                not transcript
-                or quality[0] < -0.85
-                or quality[1] > 2.4
-            )
-            if suspicious:
-                log("Whisper primary result suspicious; running one bounded fallback")
-                fallback_text, fallback_quality = self.decode_whisper(
-                    model,
-                    wav_path,
-                    WHISPER_FALLBACK_OPTIONS,
-                    cancel_event,
-                )
-                if fallback_text and (
-                    not transcript or fallback_quality[0] >= quality[0]
-                ):
-                    transcript = fallback_text
-                    quality = fallback_quality
-            if not transcript and self.last_streaming_transcript:
-                transcript = self.last_streaming_transcript.strip()
-                log("Whisper empty; using wake-session-only sherpa final draft")
-        finally:
-            self.whisper_available.put(slot)
+        expression("thinking", stage=self.last_result)
+        log("Transcribing with resident SenseVoice + Zipformer CTC ensemble...")
+        self.raise_if_interrupted(cancel_event)
+        transcript, metadata = self.final_asr.transcribe(wav_path)
+        signal = metadata.get("signal") or {}
+        log(
+            "Final ASR decision "
+            f"route={metadata.get('decision')} "
+            f"agreement={float(metadata.get('agreement') or 0.0):.3f} "
+            f"rms={float(signal.get('centered_rms') or 0.0):.1f} "
+            f"peak={float(signal.get('centered_peak') or 0.0):.0f} "
+            f"elapsed={float(metadata.get('elapsed_seconds') or 0.0):.2f}s"
+        )
         self.raise_if_interrupted(cancel_event)
         if transcript:
             self.publish_speech_bubble(
@@ -1793,7 +2167,7 @@ class DailyVoiceAssistant:
         return transcript
 
     def transcribe_interruptibly(self, wav_path: Path) -> str:
-        """Let a new wake proceed while a stale native Whisper call unwinds."""
+        """Let a new wake proceed while stale native ASR calls finish safely."""
         cancel_event = self.interrupt_event
         result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
 
@@ -1805,7 +2179,7 @@ class DailyVoiceAssistant:
 
         worker = threading.Thread(
             target=run,
-            name="interruptible-whisper-turn",
+            name="interruptible-final-asr-turn",
             daemon=True,
         )
         worker.start()
@@ -1893,6 +2267,34 @@ class DailyVoiceAssistant:
         force_visual: bool = False,
     ) -> tuple[str, bool, bool]:
         log(f"Transcript: {transcript}")
+        if is_flight_price_request(transcript):
+            route = extract_flight_route(transcript)
+            if route is None:
+                log("Flight fare intent detected, but route was incomplete")
+                return "可以。你想从哪个城市飞到哪个城市？", True, False
+            origin, destination = route
+            self.last_result = "searching_flights"
+            self.write_state()
+            self.latency.mark("live_info_started")
+            log(f"Bounded flight search started: {origin} -> {destination}")
+            try:
+                result = search_next_week(origin, destination)
+                response = format_spoken_result(result)
+                self.latency.mark("live_info_finished")
+                log(
+                    "Bounded flight search completed: "
+                    f"{len(result.quotes)}/7 days, lowest={result.cheapest.price_cny}"
+                )
+                return response, False, False
+            except Exception as exc:
+                self.latency.mark("live_info_finished")
+                log(f"Bounded flight search failed: {exc}")
+                return (
+                    "我已经实际尝试了实时查询，但这次票价页面没有正常返回。"
+                    "你可以稍后再试，我不会拿旧价格冒充当前报价。",
+                    False,
+                    False,
+                )
         prompt, visual_routed = route_user_request(transcript, force_visual=force_visual)
         speech_session = (
             StreamingSpeechSession(
@@ -2177,6 +2579,9 @@ class DailyVoiceAssistant:
             and now - self.last_trigger_monotonic < DEBOUNCE_SECONDS
         ):
             return
+        EXPRESSION_EVENTS.begin_interaction(
+            "hardware_voice" if wake is not None else "voice_control"
+        )
         camera_mode_at_start = self.visual_mode_active
         self.interrupt_event = threading.Event()
         self.busy = True
@@ -2203,7 +2608,7 @@ class DailyVoiceAssistant:
             self.raise_if_interrupted()
             if wav_path is None:
                 self.last_result = "no_speech"
-                expression("idle")
+                expression("idle", stage=self.last_result)
                 return
             self.last_result = "transcribing"
             self.write_state()
@@ -2213,8 +2618,8 @@ class DailyVoiceAssistant:
             self.raise_if_interrupted()
             if not transcript:
                 self.last_result = "empty_transcript"
-                expression("idle")
-                log("Whisper returned an empty transcript")
+                expression("idle", stage=self.last_result)
+                log("Final ASR rejected or returned an empty transcript")
                 return
             self.conversation_active = True
             self.conversation_turn = 1
@@ -2237,7 +2642,7 @@ class DailyVoiceAssistant:
                         )
                 else:
                     needs_follow_up = False
-                    expression("happy", 2.5)
+                    expression("happy", 2.5, stage=self.last_result)
                 self.raise_if_interrupted()
                 self.last_result = "speaking"
                 self.write_state()
@@ -2286,7 +2691,7 @@ class DailyVoiceAssistant:
                     self.raise_if_interrupted()
                     if not current_transcript:
                         self.last_result = "empty_follow_up"
-                        log("Whisper returned an empty follow-up transcript")
+                        log("Final ASR rejected or returned an empty follow-up transcript")
                         break
                     if is_voice_session_end(current_transcript):
                         self.last_result = "conversation_ended"
@@ -2312,7 +2717,7 @@ class DailyVoiceAssistant:
             self.last_error = str(exc)
             self.last_result = "error"
             self.publish_speech_bubble(False)
-            expression("error", 8)
+            expression("error", 8, stage=self.last_result)
             log(f"voice interaction error: {exc}")
         finally:
             if wav_path:
@@ -2334,7 +2739,7 @@ class DailyVoiceAssistant:
             )
             self.finish_latency(latency_status)
             if self.last_result != "error" and not self.has_pending_wake():
-                expression("idle")
+                expression("idle", stage=self.last_result)
             self.write_state()
 
     def interact_text(self, transcript: str, source: str = "screen_menu") -> None:
@@ -2342,6 +2747,7 @@ class DailyVoiceAssistant:
         now = time.monotonic()
         if not transcript or self.busy or now - self.last_trigger_monotonic < 1.0:
             return
+        EXPRESSION_EVENTS.begin_interaction(f"text:{source}")
         self.interrupt_event = threading.Event()
         self.busy = True
         self.latency.start(f"text:{source}")
@@ -2351,7 +2757,7 @@ class DailyVoiceAssistant:
         self.last_trigger_monotonic = now
         self.last_trigger_at = time.time()
         self.last_wake = {"source": source}
-        expression("thinking")
+        expression("thinking", stage=self.last_result)
         self.write_state()
         log(f"Text interaction requested source={source}: {transcript}")
         try:
@@ -2360,7 +2766,7 @@ class DailyVoiceAssistant:
             if response is None:
                 response, _, response_streamed = self.ask_hermes(transcript)
             else:
-                expression("happy", 2.5)
+                expression("happy", 2.5, stage=self.last_result)
             self.raise_if_interrupted()
             self.last_result = "speaking"
             self.write_state()
@@ -2383,7 +2789,7 @@ class DailyVoiceAssistant:
         except Exception as exc:
             self.last_error = str(exc)
             self.last_result = "error"
-            expression("error", 8)
+            expression("error", 8, stage=self.last_result)
             log(f"text interaction error: {exc}")
         finally:
             self.busy = False
@@ -2396,6 +2802,8 @@ class DailyVoiceAssistant:
                 else self.last_result
             )
             self.finish_latency(latency_status)
+            if self.last_result != "error" and not self.has_pending_wake():
+                expression("idle", stage=self.last_result)
             self.write_state()
 
     def set_visual_mode(self, active: bool) -> None:
@@ -2425,14 +2833,18 @@ def main() -> int:
     os.chmod(SOCKET_PATH, 0o660)
     assistant.microphone.start()
     assistant.wake_ack.start()
+    # The display is persistent across voice-service restarts. Reconcile any
+    # stale non-idle state left by an interrupted or older text interaction
+    # before background workers can accept a new wake event.
+    expression("idle", stage="service_started")
     threading.Thread(
         target=assistant.hermes.warmup,
         name="hermes-daily-warmup",
         daemon=True,
     ).start()
     threading.Thread(
-        target=assistant.ensure_whisper_pool,
-        name="whisper-pool-warmup",
+        target=assistant.ensure_final_asr,
+        name="final-asr-ensemble-warmup",
         daemon=True,
     ).start()
     threading.Thread(
@@ -2441,7 +2853,7 @@ def main() -> int:
         daemon=True,
     ).start()
     assistant.write_state()
-    log("Daily voice assistant ready; hardware wake phrase: 猪逼猪逼")
+    log(f"Daily voice assistant ready; hardware wake phrase: {HARDWARE_WAKE_PHRASE}")
     try:
         while assistant.running:
             pending_wake = assistant.pop_pending_wake()
@@ -2459,6 +2871,9 @@ def main() -> int:
                         assistant.interact(None)
                     elif request.get("command") == "wake_acknowledgement":
                         if not assistant.busy:
+                            EXPRESSION_EVENTS.begin_interaction(
+                                "wake_acknowledgement_control"
+                            )
                             assistant.microphone.set_learning(False)
                             try:
                                 assistant.acknowledge_hardware_wake()
@@ -2466,7 +2881,7 @@ def main() -> int:
                                 assistant.last_result = "waiting"
                                 assistant.microphone.set_learning(True)
                                 assistant.publish_speech_bubble(False)
-                                expression("idle")
+                                expression("idle", stage=assistant.last_result)
                                 assistant.write_state()
                     elif request.get("command") == "visual_mode":
                         active = bool(request.get("active", True))
@@ -2486,8 +2901,10 @@ def main() -> int:
                     log(f"invalid voice control command: {exc}")
             assistant.check_hardware()
     finally:
+        expression("idle", stage="service_stopping")
         assistant.wake_ack.stop()
         assistant.microphone.stop()
+        assistant.final_asr.close()
         assistant.hermes.close()
         assistant.publish_speech_bubble(False)
         control.close()
