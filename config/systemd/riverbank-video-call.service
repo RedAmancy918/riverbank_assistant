@@ -1,0 +1,31 @@
+[Unit]
+Description=RiverBank LAN and Tailscale WebRTC video call endpoint
+After=network-online.target camera-hub.service
+Wants=network-online.target camera-hub.service
+
+[Service]
+Type=simple
+User=geo
+Group=geo
+SupplementaryGroups=audio video
+WorkingDirectory=/home/geo/video-call
+Environment="HOME=/home/geo"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_SERVER=unix:/run/user/1000/pulse/native"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/geo/video-call/.venv/bin/python /home/geo/video-call/video_call_server.py --host 0.0.0.0 --port 19734
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=riverbank-video-call
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/riverbank-video-call
+ReadWritePaths=/var/lib/riverbank-tasks
+StateDirectory=riverbank-tasks
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

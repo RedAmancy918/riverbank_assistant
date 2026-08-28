@@ -1,0 +1,63 @@
+{
+  "name": "riverbank-call",
+  "version": "0.19.0-beta.1",
+  "description": "RiverBank WebRTC call and task report client",
+  "author": "RiverBank CO., LTD",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis portable --x64",
+    "icon:mac": "node build-mac-icon.mjs",
+    "dist:mac": "npm run icon:mac && electron-builder --mac dmg zip --arm64"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.riverbank.call",
+    "productName": "RiverBank Call",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "styles.css",
+      "assets/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "assets/riverbank-call.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "RiverBank-Call-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "RiverBank-Call-Portable-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "icon": "assets/riverbank-call.icns",
+      "category": "public.app-category.social-networking",
+      "artifactName": "RiverBank-Call-${version}-${arch}.${ext}",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSCameraUsageDescription": "RiverBank Call 使用摄像头向通话中的 RiverBank 设备发送画面。",
+        "NSMicrophoneUsageDescription": "RiverBank Call 使用麦克风向通话中的 RiverBank 设备发送语音。",
+        "NSLocalNetworkUsageDescription": "RiverBank Call 需要访问局域网或 Tailscale 中的 RiverBank 设备。"
+      }
+    }
+  }
+}

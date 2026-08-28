@@ -28,7 +28,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/run/riverbank-expression @RIVERBANK_DATA@/camera/gallery
+ReadWritePaths=/run/riverbank-expression @RIVERBANK_DATA@/camera/gallery @RIVERBANK_DATA@/pomodoro @RIVERBANK_DATA@/ui
 StandardOutput=journal
 StandardError=journal
 

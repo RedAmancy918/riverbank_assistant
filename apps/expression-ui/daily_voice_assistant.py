@@ -38,6 +38,17 @@ from flight_search import (
 )
 from voice_latency import VoiceLatencyMonitor
 from expression_events import ExpressionEventPublisher
+from response_emotions import (
+    ResponseEmotionStreamRouter,
+    SEMANTIC_EXPRESSION_STATES,
+    parse_response_expression,
+    strip_response_emotion_tags,
+)
+from pomodoro_voice import (
+    parse_application_voice_command,
+    parse_pomodoro_voice_command,
+)
+from video_call_client import activate_call, hangup_call
 
 try:
     import sherpa_onnx
@@ -60,6 +71,9 @@ DAILY_HOME = Path(
 WORKSPACE = Path(
     os.environ.get("RIVERBANK_DAILY_WORKSPACE", DAILY_HOME / "workspace")
 )
+REPORTS_DIR = Path(
+    os.environ.get("RIVERBANK_REPORTS_DIR", WORKSPACE / "reports")
+)
 DAILY = os.environ.get("RIVERBANK_DAILY_BIN", str(RIVERBANK_HOME / ".local/bin/daily"))
 EXPRESSION_SOCKET = Path("/run/riverbank-expression/control.sock")
 EXPRESSION_EVENTS = ExpressionEventPublisher()
@@ -68,6 +82,16 @@ CAMERA_SNAPSHOT_URL = os.environ.get(
     "http://127.0.0.1:19733/snapshot",
 )
 CAMERA_QUICK_FRAME = WORKSPACE / "rgb_now.jpg"
+BACKGROUND_TASK_API_URL = os.environ.get(
+    "RIVERBANK_BACKGROUND_TASK_API_URL",
+    "http://127.0.0.1:19734/api/v1/tasks",
+)
+BACKGROUND_TASK_TOKEN_FILE = Path(
+    os.environ.get(
+        "RIVERBANK_BACKGROUND_TASK_TOKEN_FILE",
+        RIVERBANK_HOME / ".config/riverbank-video-call/token",
+    )
+)
 DEFAULT_WAKE_ACK_PATH = APP_DIR / "assets/audio/wake_ack.wav"
 if not DEFAULT_WAKE_ACK_PATH.is_file():
     installed_wake_ack = APP_DIR / "assets/wake_ack_geo.wav"
@@ -208,12 +232,31 @@ VOICE_DIALOGUE_PROTOCOL = f"""
 {VOICE_FOLLOW_UP_MARKER}
 不要在其他情况下输出该标记，也不要解释这个标记。
 
+[表情控制协议]
+每次面向用户的最终回复必须把下面九个标签之一放在第一个字符位置，然后紧接正常回复：
+[[emotion:thinking]]、[[emotion:happy]]、[[emotion:love]]、[[emotion:proud]]、
+[[emotion:cool]]、[[emotion:sad]]、[[emotion:cry]]、[[emotion:afraid]]、[[emotion:angry]]。
+标签是本地表情控制信息，不是对用户说的话；不要解释、翻译或重复标签。
+按你这次回复对用户表达的主要态度选择，而不是看到某个情绪词就选择：中性事实和解释用 thinking；
+友好积极用 happy；关爱与温暖用 love；祝贺成就用 proud；自信或轻松俏皮用 cool；
+同理坏消息用 sad；强烈悲伤才用 cry；紧急危险警告用 afraid；强烈原则性不满才用 angry。
+不确定时必须使用 thinking。工具调用过程不要输出标签，只在最终回复开头输出一次。
+
 [实时信息协议]
 当用户询问票价、酒店、价格、天气、新闻或其他会变化的信息时，必须先尝试已配置的 web 或 browser 工具；需要动态网页、交互式搜索或多日价格比较时优先使用 browser。只有实际调用失败后，才可以说无法查询，不要未尝试就声称“没有联网工具”。
 机票比价如果只给出“接下来一周”，默认按 1 名成人、经济舱、单程比较未来 7 个自然日，并在回答中说明假设、最低可见价格、日期、查询时间与来源；价格只用于参考，不自动下单。
 
 [文件整理协议]
 用户明确要求整理文件时可以使用 file 工具查看、分类、创建目录、重命名或移动文件。先确认用户指定的目录和整理目标；若范围较大或规则存在歧义，先用一句话说明拟执行的分类规则并取得确认。删除文件、覆盖已有文件、清空目录、处理密钥或系统目录等不可逆或高风险操作，必须在执行前取得用户明确确认。不要为整理文件调用 terminal 或 code_execution。
+
+[任务报告归档协议]
+当用户明确要求调研、搜集或整理资料，并要求形成报告、文档、Markdown 或保存结果时：
+1. 先使用 web 或 browser 核实会变化的信息，不要只凭记忆撰写；
+2. 使用 file 工具把完整报告保存到 {REPORTS_DIR}，不要保存到工作区根目录；
+3. 文件名使用“YYYY-MM-DD_HHMM_简短主题.md”，不得覆盖已有文件；
+4. 第一行必须是清晰的一级标题，正文应包含生成时间、摘要、结构化内容和来源链接；分析、推断与来源事实要明确区分；
+5. 最终口语回复只简短说明报告已经生成及其标题，不要通过扬声器朗读整篇报告。
+普通问答、无需保存的临时查询不要自动生成报告。
 """.strip()
 FOLLOW_UP_HINTS = (
     "请问",
@@ -396,6 +439,7 @@ def common_prefix_length(left: str, right: str) -> int:
 
 def clean_for_speech(text: str) -> str:
     text = ANSI_RE.sub("", text)
+    text = strip_response_emotion_tags(text)
     text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"!\[[^]]*\]\([^)]*\)", "", text)
@@ -460,6 +504,14 @@ def parse_chinese_number(text: str) -> int | None:
 def parse_local_device_command(text: str) -> dict | None:
     """Recognize a deliberately small, safe set of local voice commands."""
     compact = re.sub(r"[\s，。！？、,.!?;；:：]", "", text)
+
+    pomodoro_command = parse_pomodoro_voice_command(text)
+    if pomodoro_command is not None:
+        return pomodoro_command
+
+    application_command = parse_application_voice_command(text)
+    if application_command is not None:
+        return application_command
 
     volume_target = re.search(
         r"(?:系统音量|系統音量|音量|營量|营量|声音|聲音)"
@@ -533,6 +585,60 @@ def route_user_request(transcript: str, force_visual: bool = False) -> tuple[str
 请立即使用 camera-vision 技能，从 camera-hub 获取一张全新的当前帧，再调用已配置的 Qwen 辅助视觉模型分析并用中文回答。
 不要询问用户是否需要拍照，不要复用旧截图，也不要声称文本主模型直接看到了像素；若抓帧或视觉分析失败，请如实说明。{voice_contract}"""
     return routed, True
+
+
+def is_background_task_request(text: str) -> bool:
+    """Only divert explicit long-form work; ordinary questions stay conversational."""
+    compact = re.sub(r"\s+", "", text).lower()
+    explicit_background = any(
+        phrase in compact
+        for phrase in ("后台任务", "异步任务", "后台执行", "慢慢处理")
+    )
+    action = any(
+        phrase in compact
+        for phrase in ("帮我", "请你", "给我", "整理", "调研", "搜集", "收集", "查找", "生成")
+    )
+    artifact = any(
+        phrase in compact
+        for phrase in ("markdown", "md文件", "md文档", "报告", "调研文档", "保存下来", "归档")
+    )
+    return explicit_background or (action and artifact)
+
+
+def enqueue_background_task(transcript: str, source: str = "voice") -> dict | None:
+    payload = json.dumps(
+        {
+            "prompt": transcript,
+            "kind": "research",
+            "source": source,
+            "device_name": "riverbank-tech",
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        pairing_token = BACKGROUND_TASK_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        log(f"Background task token warning: {exc}")
+        return None
+    request = urllib.request.Request(
+        BACKGROUND_TASK_API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Idempotency-Key": f"voice-{time.time_ns()}",
+            "Authorization": f"Bearer {pairing_token}",
+        },
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=4.0) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        log(f"Background task enqueue warning: {exc}")
+        return None
+    task = result.get("task") if isinstance(result, dict) else None
+    return task if isinstance(task, dict) else None
 
 
 class PersistentMicrophone:
@@ -1609,6 +1715,7 @@ class FinalASREnsemble:
 
 class DailyVoiceAssistant:
     def __init__(self) -> None:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         self.running = True
         self.busy = False
         self.interrupt_event = threading.Event()
@@ -1654,6 +1761,9 @@ class DailyVoiceAssistant:
         self.conversation_turn = 0
         self.last_follow_up_at: float | None = None
         self.last_local_command: dict | None = None
+        self.last_response_expression: str | None = None
+        self.last_response_expression_source: str | None = None
+        self.last_response_expression_at: float | None = None
 
     def write_state(self) -> None:
         live_caption_visible = bool(
@@ -1670,6 +1780,7 @@ class DailyVoiceAssistant:
             "interaction_mode": "visual_voice" if self.visual_mode_active else "voice",
             "visual_mode_active": self.visual_mode_active,
             "visual_request_active": self.visual_request_active,
+            "reports_dir": str(REPORTS_DIR),
             "hardware_keyword": HARDWARE_WAKE_PHRASE,
             "wake_acknowledgement": {
                 "enabled": self.wake_ack.ready,
@@ -1679,6 +1790,11 @@ class DailyVoiceAssistant:
                 "tail_guard_ms": round(WAKE_ACK_TAIL_SECONDS * 1000),
                 "last_played_at": self.last_wake_ack_at,
                 "last_error": self.wake_ack.last_error,
+            },
+            "response_expression": {
+                "state": self.last_response_expression,
+                "source": self.last_response_expression_source,
+                "selected_at": self.last_response_expression_at,
             },
             "busy": self.busy,
             "wake_barge_in": {
@@ -2261,6 +2377,19 @@ class DailyVoiceAssistant:
         self.write_state()
         log("Streaming TTS first audio submitted")
 
+    def apply_response_expression(self, state: str, source: str) -> None:
+        if self.interrupt_event.is_set():
+            return
+        if state not in SEMANTIC_EXPRESSION_STATES:
+            state = "thinking"
+            source = "invalid_state_fallback"
+        self.last_response_expression = state
+        self.last_response_expression_source = source
+        self.last_response_expression_at = time.time()
+        expression(state, stage=f"response_emotion:{source}")
+        self.write_state()
+        log(f"Response expression selected state={state} source={source}")
+
     def ask_hermes(
         self,
         transcript: str,
@@ -2306,6 +2435,10 @@ class DailyVoiceAssistant:
             else None
         )
         self.set_active_speech_session(speech_session)
+        emotion_router = ResponseEmotionStreamRouter(
+            speech_session.feed if speech_session is not None else None,
+            self.apply_response_expression,
+        )
         if visual_routed:
             log("Visual intent detected -> fresh camera-hub frame + Qwen vision")
             self.visual_request_active = True
@@ -2320,7 +2453,7 @@ class DailyVoiceAssistant:
                     self.hermes.ask(
                         routed_prompt,
                         stream_callback=(
-                            speech_session.feed if speech_session is not None else None
+                            emotion_router.feed if speech_session is not None else None
                         ),
                     ),
                 ).strip()
@@ -2338,7 +2471,8 @@ class DailyVoiceAssistant:
                 vision_activity(False)
                 self.write_state()
                 visual_routed = False
-            response, needs_follow_up = parse_voice_response(raw_response)
+            response_without_emotion = emotion_router.finalize(raw_response)
+            response, needs_follow_up = parse_voice_response(response_without_emotion)
             log(f"Hermes: {response}")
             log(f"Voice follow-up required={needs_follow_up}")
             streamed = speech_session.finish() if speech_session is not None else False
@@ -2446,6 +2580,22 @@ class DailyVoiceAssistant:
             self.write_state()
 
     def run_local_device_command(self, transcript: str) -> str | None:
+        if is_background_task_request(transcript):
+            task = enqueue_background_task(transcript)
+            if task is not None:
+                self.last_local_command = {
+                    "action": "enqueue_background_task",
+                    "task_id": task.get("id"),
+                    "transcript": transcript,
+                    "executed_at": time.time(),
+                }
+                self.last_result = "local_command:enqueue_background_task"
+                self.write_state()
+                log(f"Background task queued id={task.get('id')}")
+                return (
+                    "好的，已经放到后台执行了。你可以在手机或电脑上查看进度，"
+                    "完成后的报告会自动出现在报告库里。"
+                )
         command = parse_local_device_command(transcript)
         if command is None:
             return None
@@ -2482,6 +2632,70 @@ class DailyVoiceAssistant:
                 raise RuntimeError("相机界面关闭失败")
             self.set_visual_mode(False)
             response = "好的，已经退出相机。"
+        elif action == "open_performance":
+            if not send_expression_command("performance_view", active=True):
+                raise RuntimeError("性能界面启动失败")
+            response = "好的，性能页面已经打开。"
+        elif action == "close_performance":
+            if not send_expression_command("performance_view", active=False):
+                raise RuntimeError("性能界面关闭失败")
+            response = "好的，性能页面已经收起来了。"
+        elif action == "open_video_call":
+            result = activate_call()
+            if not bool(result.get("ok")):
+                raise RuntimeError("视频通话服务启动失败")
+            response = "好的，视频通话已经打开，正在等待对方连接。"
+        elif action == "hangup_video_call":
+            result = hangup_call()
+            if not bool(result.get("ok")):
+                raise RuntimeError("视频通话挂断失败")
+            response = "好的，通话已经结束。"
+        elif action == "open_music":
+            if not send_expression_command("music_view", active=True):
+                raise RuntimeError("音乐界面启动失败")
+            response = "好的，音乐播放器已经打开。"
+        elif action == "close_music":
+            if not send_expression_command("music_view", active=False):
+                raise RuntimeError("音乐界面关闭失败")
+            response = "好的，音乐页面已经收起来了，播放不会中断。"
+        elif action == "play_music":
+            if not send_expression_command("music_view", active=True):
+                raise RuntimeError("音乐界面启动失败")
+            if not send_expression_command("music_control", action="play"):
+                raise RuntimeError("音乐播放失败")
+            response = "好的，开始播放。"
+        elif action == "pause_music":
+            if not send_expression_command("music_control", action="pause"):
+                raise RuntimeError("音乐暂停失败")
+            response = "好的，音乐已经暂停。"
+        elif action in {"next_music", "previous_music"}:
+            music_action = "next" if action == "next_music" else "previous"
+            if not send_expression_command("music_control", action=music_action):
+                raise RuntimeError("音乐切换失败")
+            response = "好的，下一首。" if action == "next_music" else "好的，上一首。"
+        elif action == "set_music_mode":
+            mode = str(command["mode"])
+            if not send_expression_command(
+                "music_control",
+                action="set_mode",
+                mode=mode,
+            ):
+                raise RuntimeError("播放模式设置失败")
+            mode_label = {
+                "single_repeat": "单曲循环",
+                "list_loop": "列表循环",
+                "shuffle": "乱序播放",
+            }[mode]
+            response = f"好的，已经切换到{mode_label}。"
+        elif action == "set_music_lyrics":
+            enabled = bool(command["enabled"])
+            if not send_expression_command(
+                "music_control",
+                action="set_lyrics",
+                enabled=enabled,
+            ):
+                raise RuntimeError("歌词显示设置失败")
+            response = "好的，主页歌词已经打开。" if enabled else "好的，主页歌词已经关闭。"
         elif action == "open_gallery":
             if not send_expression_command("camera_view", active=True):
                 raise RuntimeError("相机界面启动失败")
@@ -2496,6 +2710,46 @@ class DailyVoiceAssistant:
                 raise RuntimeError("拍照失败")
             self.set_visual_mode(True)
             response = "拍好了，照片已经保存到相册。"
+        elif action == "open_pomodoro":
+            if not send_expression_command("pomodoro_view", active=True):
+                raise RuntimeError("番茄钟界面启动失败")
+            response = "好的，番茄钟已经打开。"
+        elif action == "close_pomodoro":
+            if not send_expression_command("pomodoro_view", active=False):
+                raise RuntimeError("番茄钟界面关闭失败")
+            response = "好的，番茄钟会继续计时，我先把界面收起来。"
+        elif action == "start_pomodoro":
+            if command.get("invalid_duration"):
+                response = "番茄钟可以设置一到一百八十分钟，你换个时长告诉我。"
+            else:
+                minutes = int(command.get("minutes", 25))
+                if not send_expression_command("pomodoro_view", active=True):
+                    raise RuntimeError("番茄钟界面启动失败")
+                if not send_expression_command(
+                    "pomodoro_action",
+                    action="start_custom",
+                    seconds=minutes * 60,
+                ):
+                    raise RuntimeError("番茄钟启动失败")
+                response = f"好的，{minutes}分钟的番茄钟已经开始。"
+        elif action in {
+            "pause_pomodoro",
+            "resume_pomodoro",
+            "reset_pomodoro",
+            "skip_pomodoro",
+        }:
+            action_map = {
+                "pause_pomodoro": ("pause", "好的，番茄钟已经暂停。"),
+                "resume_pomodoro": ("start", "好的，番茄钟继续。"),
+                "reset_pomodoro": ("reset", "好的，这一轮番茄钟已经重置。"),
+                "skip_pomodoro": ("skip", "好的，已经跳到下一阶段。"),
+            }
+            pomodoro_action, response = action_map[action]
+            if not send_expression_command(
+                "pomodoro_action",
+                action=pomodoro_action,
+            ):
+                raise RuntimeError("番茄钟控制失败")
         else:
             return None
 
@@ -2588,6 +2842,9 @@ class DailyVoiceAssistant:
         self.latency.start("hardware_voice" if wake is not None else "voice_control")
         self.microphone.set_learning(False)
         self.last_error = None
+        self.last_response_expression = None
+        self.last_response_expression_source = None
+        self.last_response_expression_at = None
         self.last_result = "recording"
         self.last_trigger_monotonic = now
         self.last_trigger_at = time.time()
@@ -2625,6 +2882,9 @@ class DailyVoiceAssistant:
             self.conversation_turn = 1
             current_transcript = transcript
             while self.running:
+                self.last_response_expression = None
+                self.last_response_expression_source = None
+                self.last_response_expression_at = None
                 response_streamed = False
                 response = self.run_local_device_command(current_transcript)
                 if response is None:
@@ -2642,7 +2902,10 @@ class DailyVoiceAssistant:
                         )
                 else:
                     needs_follow_up = False
-                    expression("happy", 2.5, stage=self.last_result)
+                    self.apply_response_expression("happy", "local_command")
+                if self.last_response_expression is None:
+                    _, fallback_state, fallback_source = parse_response_expression(response)
+                    self.apply_response_expression(fallback_state, fallback_source)
                 self.raise_if_interrupted()
                 self.last_result = "speaking"
                 self.write_state()
@@ -2753,6 +3016,9 @@ class DailyVoiceAssistant:
         self.latency.start(f"text:{source}")
         self.microphone.set_learning(False)
         self.last_error = None
+        self.last_response_expression = None
+        self.last_response_expression_source = None
+        self.last_response_expression_at = None
         self.last_result = "asking_hermes"
         self.last_trigger_monotonic = now
         self.last_trigger_at = time.time()
@@ -2766,7 +3032,10 @@ class DailyVoiceAssistant:
             if response is None:
                 response, _, response_streamed = self.ask_hermes(transcript)
             else:
-                expression("happy", 2.5, stage=self.last_result)
+                self.apply_response_expression("happy", "local_command")
+            if self.last_response_expression is None:
+                _, fallback_state, fallback_source = parse_response_expression(response)
+                self.apply_response_expression(fallback_state, fallback_source)
             self.raise_if_interrupted()
             self.last_result = "speaking"
             self.write_state()

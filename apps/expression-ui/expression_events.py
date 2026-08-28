@@ -16,7 +16,20 @@ SCHEMA = "riverbank.expression.event/v1"
 SOURCE = "hermes-voice"
 DEFAULT_SOCKET_PATH = Path("/run/riverbank-expression/voice-events.sock")
 DEFAULT_SNAPSHOT_PATH = Path("/run/hermes-voice-control/expression-event.json")
-ALLOWED_STATES = {"idle", "listening", "thinking", "happy", "error"}
+ALLOWED_STATES = {
+    "idle",
+    "listening",
+    "thinking",
+    "happy",
+    "love",
+    "proud",
+    "cool",
+    "sad",
+    "cry",
+    "afraid",
+    "angry",
+    "error",
+}
 MAX_EVENT_AGE_SECONDS = 30.0
 MAX_FUTURE_SKEW_SECONDS = 5.0
 

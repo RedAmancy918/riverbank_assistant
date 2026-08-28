@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file:; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src http: https:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RiverBank Call</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <img src="assets/riverbank-mark.svg" alt="RiverBank" />
+          <div>
+            <h1>RiverBank Call</h1>
+            <p>实时通话与任务报告</p>
+          </div>
+        </div>
+        <div class="connection-pill" id="connectionPill" data-state="idle">
+          <span class="status-dot"></span>
+          <span id="connectionLabel">未连接</span>
+        </div>
+      </header>
+
+      <nav class="workspace-tabs" aria-label="应用功能">
+        <button class="workspace-tab active" id="callTab" type="button" data-view="call">
+          视频通话
+        </button>
+        <button class="workspace-tab" id="reportsTab" type="button" data-view="reports">
+          任务报告 <span class="tab-badge" id="reportCount">0</span>
+        </button>
+      </nav>
+
+      <section class="app-view" id="callView">
+        <section class="stage">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div class="empty-state" id="emptyState">
+            <div class="empty-orbit"><span></span></div>
+            <h2>等待连接 RiverBank</h2>
+            <p>输入树莓派地址与配对令牌后开始通话</p>
+          </div>
+          <div class="remote-label" id="remoteLabel">RIVERBANK</div>
+          <div class="local-preview">
+            <video id="localVideo" autoplay muted playsinline></video>
+            <span>本机</span>
+          </div>
+          <div class="network-stats" id="networkStats">—</div>
+        </section>
+
+        <section class="controls">
+          <button class="round-control" id="muteButton" type="button" disabled>
+            <span class="icon">麦</span><span>静音</span>
+          </button>
+          <button class="primary-control" id="connectButton" type="button">
+            开始通话
+          </button>
+          <button class="round-control" id="cameraButton" type="button" disabled>
+            <span class="icon">像</span><span>关闭画面</span>
+          </button>
+        </section>
+      </section>
+
+      <section class="app-view hidden" id="reportsView">
+        <div class="reports-toolbar">
+          <div>
+            <h2>任务报告</h2>
+            <p>来自树莓派 Daily Assistant 的只读归档</p>
+          </div>
+          <button id="refreshReports" type="button">刷新报告</button>
+        </div>
+        <div class="reports-layout">
+          <aside class="report-list-panel">
+            <div class="report-list-status" id="reportListStatus">等待连接树莓派</div>
+            <div class="report-list" id="reportList"></div>
+          </aside>
+          <article class="report-preview-panel">
+            <div class="report-preview-empty" id="reportPreviewEmpty">
+              <div class="document-mark">MD</div>
+              <h3>选择一份报告</h3>
+              <p>可直接阅读 Markdown，也可以下载到这台电脑。</p>
+            </div>
+            <div class="report-preview hidden" id="reportPreview">
+              <header class="report-preview-header">
+                <div>
+                  <h2 id="reportTitle"></h2>
+                  <p id="reportMeta"></p>
+                </div>
+                <button id="downloadReport" type="button">下载到本地</button>
+              </header>
+              <div class="markdown-body" id="reportContent"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="settings-grid">
+        <label class="connection-setting">
+          <span>树莓派地址</span>
+          <input id="serverUrl" value="http://riverbank-tech:19734" spellcheck="false" />
+        </label>
+        <label class="connection-setting">
+          <span>配对令牌</span>
+          <input id="pairingToken" type="password" autocomplete="off" />
+        </label>
+        <label class="media-setting">
+          <span>摄像头</span>
+          <select id="cameraSelect"></select>
+        </label>
+        <label class="media-setting">
+          <span>麦克风</span>
+          <select id="microphoneSelect"></select>
+        </label>
+      </section>
+
+      <footer>
+        <span id="message">准备就绪</span>
+        <button id="refreshDevices" type="button">刷新设备</button>
+      </footer>
+    </main>
+    <script src="renderer.js"></script>
+  </body>
+</html>

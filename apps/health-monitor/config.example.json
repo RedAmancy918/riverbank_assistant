@@ -30,6 +30,42 @@
       "equals": true
     },
     {
+      "id": "video-call-service",
+      "name": "局域网与 Tailscale 视频通话服务",
+      "type": "systemd_service",
+      "target": "riverbank-video-call.service"
+    },
+    {
+      "id": "video-call-endpoint",
+      "name": "视频通话 WebRTC 信令端点",
+      "type": "http_json",
+      "target": "http://127.0.0.1:19734/healthz",
+      "json_path": "ok",
+      "equals": true
+    },
+    {
+      "id": "task-report-library",
+      "name": "Daily 任务报告库",
+      "type": "http_json",
+      "target": "http://127.0.0.1:19734/healthz",
+      "json_path": "reports_available",
+      "equals": true
+    },
+    {
+      "id": "background-task-worker",
+      "name": "Hermes 后台任务 Worker",
+      "type": "systemd_service",
+      "target": "riverbank-task-worker.service"
+    },
+    {
+      "id": "background-task-api",
+      "name": "移动端与终端任务队列 API",
+      "type": "http_json",
+      "target": "http://127.0.0.1:19734/healthz",
+      "json_path": "tasks",
+      "equals": true
+    },
+    {
       "id": "hermes-gateway",
       "name": "Hermes 网关",
       "type": "systemd_service",

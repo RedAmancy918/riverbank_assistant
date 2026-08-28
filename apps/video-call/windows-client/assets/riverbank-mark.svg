@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="RiverBank">
+  <rect width="120" height="120" rx="30" fill="#07131a"/>
+  <g fill="#eaf9fd">
+    <rect x="17" y="17" width="25" height="25" rx="7" opacity=".98"/>
+    <rect x="48" y="17" width="25" height="25" rx="7" opacity=".78"/>
+    <rect x="79" y="17" width="25" height="25" rx="7" opacity=".58"/>
+    <rect x="17" y="48" width="25" height="25" rx="7" opacity=".78"/>
+    <rect x="48" y="48" width="25" height="25" rx="7" opacity=".58"/>
+    <rect x="79" y="48" width="25" height="25" rx="7" opacity=".38"/>
+    <rect x="17" y="79" width="25" height="25" rx="7" opacity=".58"/>
+    <rect x="48" y="79" width="25" height="25" rx="7" opacity=".38"/>
+    <rect x="79" y="79" width="25" height="25" rx="7" fill="#56d8ff"/>
+  </g>
+</svg>

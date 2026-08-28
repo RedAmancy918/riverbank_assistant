@@ -9,6 +9,14 @@ __pycache__/
 venv/
 build/
 dist/
+node_modules/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive/
+*.mobileprovision
+*.dSYM/
 *.log
 *.pid
 *.sock

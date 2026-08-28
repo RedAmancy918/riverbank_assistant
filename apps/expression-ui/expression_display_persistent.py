@@ -20,7 +20,7 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from animation_assets import (
     Animation,
@@ -31,7 +31,35 @@ from animation_assets import (
     fitted_size,
     render_viewport,
 )
+from app_menu import (
+    ApplicationMenuModel,
+    pin_gesture_progress,
+    pin_gesture_ready,
+    pin_target_hit,
+)
 from system_status import ACTIVE_VISION_LEASE_DIR, HEALTH_STATUS_PATH, SystemStatus
+from pomodoro import PomodoroTimer, completion_flash_frame
+from performance_monitor import PerformanceMonitor, PerformanceSnapshot, format_bytes
+from music_player import (
+    LyricLine,
+    LyricsFetchResult,
+    MusicPlayer,
+    MusicTrack,
+    PLAYBACK_MODE_LIST_LOOP,
+    PLAYBACK_MODE_SHUFFLE,
+    PLAYBACK_MODE_SINGLE_REPEAT,
+    fetch_lrclib_lyrics,
+    lyric_index_at,
+    parse_lrc,
+    scan_music_library,
+    sidecar_lyrics_path,
+)
+from video_call_client import (
+    activate_call,
+    fetch_remote_frame,
+    fetch_status as fetch_video_call_status,
+    hangup_call,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -64,6 +92,30 @@ BOOT_ANIMATION_MARKER_PATH = Path(
     "/dev/shm/riverbank-expression-boot-animation-boot-id"
 )
 DAILY_ENV_PATH = Path(os.environ.get("RIVERBANK_DAILY_ENV", DAILY_HOME / ".env"))
+POMODORO_STATE_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_POMODORO_STATE",
+        RIVERBANK_DATA / "pomodoro/state.json",
+    )
+)
+APP_MENU_STATE_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_APP_MENU_STATE",
+        RIVERBANK_DATA / "ui/app-pin.json",
+    )
+)
+MUSIC_PREFERENCES_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_MUSIC_PREFERENCES",
+        RIVERBANK_DATA / "ui/music-preferences.json",
+    )
+)
+MUSIC_ARTWORK_CACHE_DIR = Path(
+    os.environ.get(
+        "RIVERBANK_MUSIC_ARTWORK_CACHE",
+        RIVERBANK_DATA / "ui/music-artwork",
+    )
+)
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 VOICE_SOCKET_PATH = Path("/run/hermes-voice-control/control.sock")
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
@@ -137,16 +189,42 @@ DEFAULT_RADIAL_MENU = (
         "action": {"type": "open_settings"},
     },
     {
-        "id": "happy",
-        "label": "开心",
-        "glyph": "笑",
-        "action": {"type": "expression", "state": "happy", "ttl": 5},
+        "id": "app_pin",
+        "label": "空位",
+        "glyph": "+",
+        "action": {"type": "open_app_menu"},
     },
     {
-        "id": "sleep",
-        "label": "休眠",
-        "glyph": "眠",
-        "action": {"type": "expression", "state": "sleep", "ttl": 30},
+        "id": "applications",
+        "label": "应用",
+        "glyph": "应",
+        "action": {"type": "open_app_menu"},
+    },
+)
+DEFAULT_APPLICATION_MENU = (
+    {
+        "id": "pomodoro",
+        "label": "番茄",
+        "glyph": "茄",
+        "action": {"type": "launch_app", "app_id": "pomodoro"},
+    },
+    {
+        "id": "performance",
+        "label": "性能",
+        "glyph": "能",
+        "action": {"type": "launch_app", "app_id": "performance"},
+    },
+    {
+        "id": "music",
+        "label": "音乐",
+        "glyph": "乐",
+        "action": {"type": "launch_app", "app_id": "music"},
+    },
+    {
+        "id": "video_call",
+        "label": "通话",
+        "glyph": "话",
+        "action": {"type": "launch_app", "app_id": "video_call"},
     },
 )
 
@@ -509,7 +587,21 @@ class PersistentExpressionDisplay:
         configured_menu = config.get("radial_menu", DEFAULT_RADIAL_MENU)
         if not isinstance(configured_menu, list) or len(configured_menu) != 6:
             configured_menu = list(DEFAULT_RADIAL_MENU)
-        self.radial_menu = configured_menu
+        configured_applications = config.get(
+            "application_menu",
+            DEFAULT_APPLICATION_MENU,
+        )
+        if not isinstance(configured_applications, list):
+            configured_applications = list(DEFAULT_APPLICATION_MENU)
+        self.application_menu = ApplicationMenuModel(
+            APP_MENU_STATE_PATH,
+            configured_menu,
+            configured_applications,
+        )
+        self.menu_level = "main"
+        self.menu_pin_mode = False
+        self.application_return_pending = False
+        self.radial_menu = self.application_menu.main_items()
         self.display_diameter_mm = max(
             40.0, min(float(config.get("display_diameter_mm", 86.36)), 200.0)
         )
@@ -533,6 +625,22 @@ class PersistentExpressionDisplay:
         self.menu_background_surface: object | None = None
         self.menu_opened_at = 0.0
         self.menu_last_interaction_at = 0.0
+        self.menu_level_transition_active = False
+        self.menu_level_transition_started_at = 0.0
+        self.menu_level_transition_seconds = 0.22
+        self.menu_level_transition_source: object | None = None
+        self.menu_level_transition_target: object | None = None
+        self.app_pin_candidate_app_id: str | None = None
+        self.app_pin_drag_progress = 0.0
+        self.app_pin_drag_ready = False
+        self.app_pin_target_hit = False
+        self.app_pin_full_reached_at = 0.0
+        self.app_pin_hold_seconds = max(
+            0.2,
+            min(float(config.get("application_pin_hold_seconds", 0.35)), 0.8),
+        )
+        self.app_pin_drag_start_distance = self.menu_deadzone + 64.0
+        self.app_pin_drag_confirm_distance = self.menu_deadzone + 152.0
         self.menu_idle_seconds = max(
             2.0,
             min(float(config.get("radial_menu_idle_seconds", 2.0)), 10.0),
@@ -601,7 +709,11 @@ class PersistentExpressionDisplay:
         self.volume_slider_cache_key: tuple[int] | None = None
         self.volume_slider_cache_surface: object | None = None
         self.radial_menu_ring_cache: dict[int | None, object] = {}
-        self.radial_menu_content_cache: dict[int | None, object] = {}
+        self.radial_menu_content_cache: dict[tuple, object] = {}
+        self.radial_menu_time_cache_text = ""
+        self.app_pin_affordance_cache: dict[
+            tuple[int, int, bool], tuple[object, tuple[int, int]]
+        ] = {}
         self.status_chrome_cache: dict[tuple, object] = {}
         self.status_meter_cache: dict[tuple[str, int], tuple[object, tuple[int, int]]] = {}
         self.status_composite_cache: OrderedDict[tuple, object] = OrderedDict()
@@ -649,6 +761,218 @@ class PersistentExpressionDisplay:
         self.settings_transition_from_surface: object | None = None
         self.settings_transition_to_surface: object | None = None
         self.settings_transition_exits_settings = False
+        self.pomodoro = PomodoroTimer(
+            POMODORO_STATE_PATH,
+            focus_seconds=max(
+                60,
+                int(float(config.get("pomodoro_focus_minutes", 25)) * 60),
+            ),
+            short_break_seconds=max(
+                60,
+                int(float(config.get("pomodoro_short_break_minutes", 5)) * 60),
+            ),
+            long_break_seconds=max(
+                60,
+                int(float(config.get("pomodoro_long_break_minutes", 15)) * 60),
+            ),
+            long_break_every=max(
+                1,
+                int(config.get("pomodoro_long_break_every", 4)),
+            ),
+        )
+        self.pomodoro_active = False
+        self.pomodoro_statistics_active = False
+        self.pomodoro_statistics_page = 0
+        self.pomodoro_pointer_target: str | None = None
+        self.pomodoro_transition_active = False
+        self.pomodoro_transition_opening = True
+        self.pomodoro_transition_started_at = 0.0
+        self.pomodoro_transition_seconds = max(
+            0.16,
+            min(float(config.get("pomodoro_transition_seconds", 0.28)), 0.5),
+        )
+        self.pomodoro_transition_source: object | None = None
+        self.pomodoro_transition_target: object | None = None
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_phase_changed_at = 0.0
+        self.pomodoro_last_transition_serial = self.pomodoro.transition_serial
+        self.pomodoro_last_display_second = -1
+        self.pomodoro_completion_alert_active = False
+        self.pomodoro_completion_alert_started_at = 0.0
+        self.pomodoro_completion_alert_phase: str | None = None
+        self.pomodoro_completion_alert_cycles = 5
+        self.pomodoro_completion_alert_cycle_seconds = 0.80
+        self.pomodoro_completion_alert_rise_seconds = 0.18
+        self.pomodoro_completion_alert_hold_seconds = 0.18
+        self.pomodoro_completion_alert_pulse = 0
+        self.pomodoro_completion_alert_intensity = 0.0
+        self.pomodoro_completion_alert_lit = False
+        self.pomodoro_completion_alert_on_surface: object | None = None
+        self.pomodoro_completion_alert_off_surface: object | None = None
+        self.pomodoro_button_cache: OrderedDict[tuple, object] = OrderedDict()
+        self.pomodoro_button_cache_limit = 16
+        self.pomodoro_mark_cache: dict[int, object] = {}
+        self.pomodoro_duration_adjust_active = False
+        self.pomodoro_duration_dial_moved = False
+        self.pomodoro_duration_adjust_started_at = 0.0
+        self.pomodoro_duration_hold_seconds = max(
+            0.3,
+            min(float(config.get("pomodoro_duration_hold_seconds", 0.45)), 1.2),
+        )
+        self.pomodoro_duration_adjust_seconds = max(
+            0.16,
+            min(float(config.get("pomodoro_duration_adjust_seconds", 0.24)), 0.5),
+        )
+        self.pomodoro_duration_min_minutes = 1
+        self.pomodoro_duration_max_minutes = 180
+        self.pomodoro_duration_step_minutes = 1
+        # Once the long press has opened the dial, retain only enough motion
+        # filtering to reject sensor jitter.  The former 18 px threshold was
+        # wider than two one-minute arcs and made the values around 25
+        # impossible to select from the crown.
+        self.pomodoro_duration_drag_deadzone_pixels = 3.0
+        self.pomodoro_duration_selected_minutes = 25
+        initial_selectable_count = (
+            (self.pomodoro_duration_max_minutes - self.pomodoro_duration_min_minutes)
+            // self.pomodoro_duration_step_minutes
+            + 1
+        )
+        self.pomodoro_duration_pointer_clockwise = (
+            math.tau
+            * (
+                (self.pomodoro_duration_selected_minutes - self.pomodoro_duration_min_minutes)
+                // self.pomodoro_duration_step_minutes
+            )
+            / initial_selectable_count
+        )
+        self.pomodoro_duration_original_seconds = self.pomodoro.duration_for()
+        self.pomodoro_duration_dial_surface: object | None = None
+        self.pomodoro_duration_adjust_base_surfaces: dict[str, object] = {}
+        self.pomodoro_duration_wave_cache: dict[tuple[str, int], object] = {}
+        self.pomodoro_duration_time_cache: dict[int, object] = {}
+        self.performance_monitor = PerformanceMonitor()
+        self.performance_snapshot = PerformanceSnapshot()
+        self.performance_active = False
+        self.performance_section: str | None = None
+        self.performance_health_scroll_offset = 0.0
+        self.performance_health_scroll_start_offset = 0.0
+        self.performance_pointer_target: str | None = None
+        self.performance_future: Future[PerformanceSnapshot] | None = None
+        self.performance_next_update_at = 0.0
+        self.performance_refresh_seconds = max(
+            0.5,
+            min(float(config.get("performance_refresh_seconds", 1.0)), 5.0),
+        )
+        self.performance_transition_active = False
+        self.performance_transition_opening = True
+        self.performance_transition_started_at = 0.0
+        self.performance_transition_seconds = max(
+            0.16,
+            min(float(config.get("performance_transition_seconds", 0.28)), 0.5),
+        )
+        self.performance_transition_source: object | None = None
+        self.performance_transition_target: object | None = None
+        self.performance_transition_exits_page = False
+        self.performance_static_surface: object | None = None
+        self.performance_health_card_cache: dict[tuple[tuple[int, int], bool], object] = {}
+        self.performance_health_content_cache_key: tuple | None = None
+        self.performance_health_content_cache_surface: object | None = None
+        self.music_player = MusicPlayer(
+            app_path(config.get("music_library_dir", "/mnt/nvme64/Music")),
+            player_command=str(config.get("music_player_command", "/usr/bin/cvlc")),
+        )
+        self.music_active = False
+        self.music_pointer_target: str | None = None
+        self.music_volume_dragging = False
+        self.music_volume_interaction_started_at = 0.0
+        self.music_volume_last_interaction_at = 0.0
+        self.music_volume_expand_from = 0.0
+        self.music_volume_idle_seconds = max(
+            0.4,
+            min(float(config.get("music_volume_idle_seconds", 0.8)), 2.0),
+        )
+        self.music_volume_transition_seconds = max(
+            0.12,
+            min(float(config.get("music_volume_transition_seconds", 0.22)), 0.5),
+        )
+        self.music_volume_idle_surface_cache_key: int | None = None
+        self.music_volume_idle_surface_cache: object | None = None
+        self.music_volume_expanded_surface_cache_key: tuple[int, bool] | None = None
+        self.music_volume_expanded_surface_cache: object | None = None
+        self.music_scan_future: Future[list[MusicTrack]] | None = None
+        self.music_scan_completed = False
+        self.music_scan_error = ""
+        self.music_autoplay_pending = False
+        self.music_ffprobe_command = str(
+            config.get("music_ffprobe_command", "/usr/bin/ffprobe")
+        )
+        self.music_ffmpeg_command = str(
+            config.get("music_ffmpeg_command", "/usr/bin/ffmpeg")
+        )
+        self.music_artwork_future: Future[tuple[str, bytes, tuple[int, int]]] | None = None
+        self.music_artwork_future_path: str | None = None
+        self.music_artwork_requested_path: str | None = None
+        self.music_artwork_surface: object | None = None
+        self.music_artwork_cache: OrderedDict[str, object] = OrderedDict()
+        self.music_artwork_cache_limit = 12
+        self.music_artwork_failed_paths: set[str] = set()
+        self.music_center_mode = "artwork"
+        self.music_center_previous_mode = "artwork"
+        self.music_center_transition_active = False
+        self.music_center_transition_started_at = 0.0
+        self.music_center_transition_seconds = max(
+            0.18,
+            min(float(config.get("music_center_transition_seconds", 0.30)), 0.6),
+        )
+        self.music_transition_active = False
+        self.music_transition_opening = True
+        self.music_transition_started_at = 0.0
+        self.music_transition_seconds = max(
+            0.16,
+            min(float(config.get("music_transition_seconds", 0.28)), 0.5),
+        )
+        self.music_transition_source: object | None = None
+        self.music_transition_target: object | None = None
+        self.music_transition_exits_page = False
+        self.music_static_surface: object | None = None
+        self.music_lyrics_enabled = True
+        self.music_mode_hold_seconds = max(
+            0.5,
+            min(float(config.get("music_mode_hold_seconds", 0.75)), 1.5),
+        )
+        self.music_lyrics: list[LyricLine] = []
+        self.music_lyrics_path: Path | None = None
+        self.music_lyrics_track_path: str | None = None
+        self.music_lyric_index = -1
+        self.music_lyric_previous_index = -1
+        self.music_lyric_changed_at = 0.0
+        self.music_lyric_direction = 1
+        self.music_lyric_scroll_seconds = max(
+            0.18,
+            min(float(config.get("music_lyric_scroll_seconds", 0.32)), 0.6),
+        )
+        self.music_lyrics_notice = ""
+        self.music_lyrics_notice_until = 0.0
+        self.music_lyrics_fetch_future: Future[LyricsFetchResult] | None = None
+        self.music_lyrics_fetch_track_path: str | None = None
+        self.music_lyrics_search_attempted: set[str] = set()
+        self.music_lyrics_search_status = "idle"
+        self.music_lyrics_search_error = ""
+        self.music_lyrics_search_trigger = "idle"
+        self.music_marquee_surface_cache: OrderedDict[str, tuple[object, object]] = OrderedDict()
+        self.music_marquee_surface_cache_limit = 64
+        self.music_player_lyric_surface_cache: OrderedDict[tuple, object] = OrderedDict()
+        self.music_player_lyric_surface_cache_limit = 96
+        self.music_horizontal_fade_cache: dict[tuple[int, int, int], object] = {}
+        self.music_lyric_marquee_speed = max(
+            20.0,
+            min(float(config.get("music_lyric_marquee_speed", 70.0)), 120.0),
+        )
+        self.music_lyric_marquee_hold_seconds = max(
+            0.2,
+            min(float(config.get("music_lyric_marquee_hold_seconds", 0.65)), 2.0),
+        )
+        self.load_music_preferences()
         self.speech_bubble_active = False
         self.speech_bubble_text = ""
         self.speech_bubble_stable_chars = 0
@@ -702,6 +1026,30 @@ class PersistentExpressionDisplay:
         self.camera_measured_fps = 0.0
         self.camera_frame_count = 0
         self.camera_fps_window_started = time.monotonic()
+        self.video_call_active = False
+        self.video_call_pointer_target: str | None = None
+        self.video_call_frame_surface: object | None = None
+        self.video_call_frame_future: Future[bytes] | None = None
+        self.video_call_status_future: Future[dict] | None = None
+        self.video_call_status: dict = {
+            "active": False,
+            "waiting": False,
+            "connection_state": "idle",
+            "device_name": None,
+        }
+        self.video_call_base_url = str(
+            config.get("video_call_base_url", "http://127.0.0.1:19734")
+        )
+        self.video_call_view_fps = max(
+            5.0,
+            min(float(config.get("video_call_view_fps", 20.0)), 30.0),
+        )
+        self.video_call_frame_interval = 1.0 / self.video_call_view_fps
+        self.video_call_next_frame_at = 0.0
+        self.video_call_next_status_at = 0.0
+        self.video_call_last_frame_at = 0.0
+        self.video_call_last_error: str | None = None
+        self.video_call_error_logged_at = 0.0
         self.camera_gallery_dir = Path(
             str(
                 config.get(
@@ -826,6 +1174,22 @@ class PersistentExpressionDisplay:
             max_workers=1,
             thread_name_prefix="camera-view",
         )
+        self.video_call_executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="video-call-view",
+        )
+        self.performance_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="display-performance",
+        )
+        self.music_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="display-music",
+        )
+        self.lyrics_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="display-lyrics",
+        )
         self.last_above_refresh = 0.0
 
         os.environ.setdefault("DISPLAY", ":0")
@@ -865,6 +1229,57 @@ class PersistentExpressionDisplay:
             )
         ))
         self.font_status = pygame.font.Font(status_font_path, 20)
+        self.font_radial_time_high = pygame.font.Font(
+            status_font_path,
+            52 * UI_AA_SCALE,
+        )
+        self.font_pomodoro_time = pygame.font.Font(status_font_path, 82)
+        self.font_pomodoro_label = pygame.font.Font(font_path, 28)
+        pomodoro_title_font_path = app_path(
+            config.get(
+                "pomodoro_title_font_path",
+                "assets/fonts/MaShanZheng-Regular.ttf",
+            )
+        )
+        self.pomodoro_title_font_path = (
+            pomodoro_title_font_path
+            if pomodoro_title_font_path.is_file()
+            else Path(font_path)
+        )
+        self.font_pomodoro_title = pygame.font.Font(
+            str(self.pomodoro_title_font_path),
+            46,
+        )
+        self.font_pomodoro_stat_value = pygame.font.Font(status_font_path, 42)
+        performance_mono_path = Path(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+        )
+        self.font_performance_value = pygame.font.Font(
+            str(performance_mono_path if performance_mono_path.is_file() else status_font_path),
+            34,
+        )
+        self.font_music_track = pygame.font.Font(font_path, 30)
+        self.font_music_artist = pygame.font.Font(font_path, 22)
+        self.font_music_lyric_current_high = pygame.font.Font(
+            font_path,
+            50 * UI_AA_SCALE,
+        )
+        self.font_music_lyric_muted_high = pygame.font.Font(
+            font_path,
+            20 * UI_AA_SCALE,
+        )
+        self.font_music_lyric_toggle_high = pygame.font.Font(
+            font_path,
+            25 * UI_AA_SCALE,
+        )
+        self.font_music_player_lyric_current_high = pygame.font.Font(
+            font_path,
+            32 * UI_AA_SCALE,
+        )
+        self.font_music_player_lyric_muted_high = pygame.font.Font(
+            font_path,
+            24 * UI_AA_SCALE,
+        )
         self.camera_icon_cache: dict[tuple[str, bool], object] = {}
         self.overlay_surface = pygame.Surface(self.target_size, pygame.SRCALPHA)
         self.boot_surface = pygame.Surface(self.target_size, pygame.SRCALPHA)
@@ -1331,17 +1746,22 @@ class PersistentExpressionDisplay:
             return animation
         return self.first_frames[self.state]
 
-    def prepare_menu_background(self) -> None:
-        """Freeze and blur the current expression or camera frame once."""
-        base = self.pygame.Surface(self.target_size)
-        if self.camera_view_active and self.camera_frame_surface is not None:
-            base.fill((0, 0, 0))
-            base.blit(self.camera_frame_surface, (0, 0))
+    def prepare_menu_background(self, source_surface: object | None = None) -> None:
+        """Freeze and blur one complete frame for the menu background."""
+        if source_surface is not None:
+            base = source_surface.copy()
+            if base.get_size() != self.target_size:
+                base = self.pygame.transform.smoothscale(base, self.target_size)
         else:
-            animation = self.current_animation()
-            frame = animation.frames[self.frame_index % len(animation.frames)]
-            base.fill(animation.background)
-            base.blit(frame, (0, 0))
+            base = self.pygame.Surface(self.target_size)
+            if self.camera_view_active and self.camera_frame_surface is not None:
+                base.fill((0, 0, 0))
+                base.blit(self.camera_frame_surface, (0, 0))
+            else:
+                animation = self.current_animation()
+                frame = animation.frames[self.frame_index % len(animation.frames)]
+                base.fill(animation.background)
+                base.blit(frame, (0, 0))
         if self.menu_blur_radius <= 0:
             self.menu_background_surface = base
             return
@@ -1556,6 +1976,10 @@ class PersistentExpressionDisplay:
             or self.deadline is not None
             or self.pointer_down
             or self.menu_active
+            or self.music_active
+            or self.performance_active
+            or self.pomodoro_active
+            or self.pomodoro.status == "running"
             or self.settings_active
             or now < self.status_visible_until
             or self.token_popup_visible
@@ -1749,6 +2173,200 @@ class PersistentExpressionDisplay:
                 self.camera_snapshot_url,
                 self.target_size,
             )
+
+    def set_video_call_view(
+        self,
+        active: bool,
+        *,
+        request_service: bool = False,
+        hangup: bool = False,
+    ) -> dict:
+        """Show the remote call surface without owning either camera device."""
+
+        active = bool(active)
+        was_active = self.video_call_active
+        self.note_screensaver_activity()
+        if active:
+            self.prepare_voice_application_switch("video_call")
+            if self.camera_view_active:
+                self.set_camera_view(False)
+            self.settings_active = False
+            self.gallery_active = False
+            self.video_call_active = True
+            if not was_active:
+                self.video_call_frame_surface = None
+            self.video_call_pointer_target = None
+            self.video_call_next_frame_at = 0.0
+            self.video_call_next_status_at = 0.0
+            self.video_call_last_error = None
+            if request_service:
+                self.control_executor.submit(
+                    activate_call,
+                    base_url=self.video_call_base_url,
+                )
+        else:
+            self.video_call_active = False
+            self.video_call_pointer_target = None
+            if self.video_call_frame_future is not None:
+                self.video_call_frame_future.cancel()
+            self.video_call_frame_future = None
+            if self.video_call_status_future is not None:
+                self.video_call_status_future.cancel()
+            self.video_call_status_future = None
+            if hangup:
+                self.control_executor.submit(
+                    hangup_call,
+                    base_url=self.video_call_base_url,
+                )
+        self.needs_redraw = True
+        self.write_state()
+        log(
+            "video call view "
+            f"active={self.video_call_active} request_service={request_service} "
+            f"hangup={hangup}"
+        )
+        return {"ok": True, "video_call_active": self.video_call_active}
+
+    def close_video_call_to_application_menu(self, *, hangup: bool) -> None:
+        """Freeze the call frame before exposing the second-level app menu."""
+        now = time.monotonic()
+        frozen_call_frame = self.screen.copy()
+        self.set_video_call_view(False, hangup=hangup)
+        self.prepare_application_menu_return(
+            now,
+            background_surface=frozen_call_frame,
+        )
+        self.complete_application_menu_return(now)
+
+    def update_video_call(self, now: float) -> None:
+        if not self.video_call_active:
+            return
+        if self.video_call_status_future is not None and self.video_call_status_future.done():
+            try:
+                self.video_call_status = self.video_call_status_future.result()
+                self.video_call_last_error = None
+            except Exception as exc:
+                self.video_call_last_error = str(exc)
+            finally:
+                self.video_call_status_future = None
+                self.needs_redraw = True
+        if (
+            self.video_call_status_future is None
+            and now >= self.video_call_next_status_at
+        ):
+            self.video_call_next_status_at = now + 0.5
+            self.video_call_status_future = self.video_call_executor.submit(
+                fetch_video_call_status,
+                base_url=self.video_call_base_url,
+            )
+        if self.video_call_frame_future is not None and self.video_call_frame_future.done():
+            try:
+                self.video_call_frame_surface = self.decode_camera_frame(
+                    self.video_call_frame_future.result()
+                )
+                self.video_call_last_frame_at = time.time()
+                self.video_call_last_error = None
+                self.needs_redraw = True
+            except Exception as exc:
+                message = str(exc)
+                if "waiting for remote video" not in message:
+                    self.video_call_last_error = message
+                    if now - self.video_call_error_logged_at >= 5.0:
+                        log(f"video call frame warning: {exc}")
+                        self.video_call_error_logged_at = now
+            finally:
+                self.video_call_frame_future = None
+        if self.video_call_frame_future is None and now >= self.video_call_next_frame_at:
+            self.video_call_next_frame_at = now + self.video_call_frame_interval
+            self.video_call_frame_future = self.video_call_executor.submit(
+                fetch_remote_frame,
+                self.target_size,
+                base_url=self.video_call_base_url,
+            )
+
+    def video_call_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, self.gallery_back_button_center()) <= 48:
+            return "back"
+        if math.dist(position, (self.width // 2, round(self.height * 0.84))) <= 58:
+            return "hangup"
+        return None
+
+    def draw_video_call_page(self, now: float) -> None:
+        self.screen.fill((0, 0, 0))
+        if self.video_call_frame_surface is not None:
+            self.screen.blit(self.video_call_frame_surface, (0, 0))
+            shade = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
+            shade.fill((0, 0, 0, 0))
+            self.pygame.draw.rect(shade, (0, 0, 0, 105), (0, 0, self.width, 150))
+            self.pygame.draw.rect(
+                shade,
+                (0, 0, 0, 125),
+                (0, self.height - 170, self.width, 170),
+            )
+            self.screen.blit(shade, (0, 0))
+        else:
+            for radius, alpha in ((220, 18), (150, 26), (86, 40)):
+                self.draw_aa_circle(
+                    self.screen,
+                    (20, 129, 164, alpha),
+                    (self.width // 2, self.height // 2 - 20),
+                    radius,
+                )
+            self.draw_centered_text(
+                "等待 Windows 设备连接",
+                self.font_medium,
+                (208, 239, 247),
+                (self.width // 2, self.height // 2 - 8),
+            )
+            hint = (
+                "通话服务不可用"
+                if self.video_call_last_error
+                else "局域网或 Tailscale"
+            )
+            self.draw_centered_text(
+                hint,
+                self.font_small,
+                (103, 163, 180),
+                (self.width // 2, self.height // 2 + 40),
+            )
+
+        self.draw_gallery_back_button()
+        state = str(self.video_call_status.get("connection_state", "idle"))
+        state_label = {
+            "connected": "通话中",
+            "connecting": "连接中",
+            "new": "正在协商",
+            "idle": "等待连接",
+            "failed": "连接失败",
+            "closed": "通话结束",
+        }.get(state, state)
+        device_name = str(self.video_call_status.get("device_name") or "视频通话")
+        self.draw_centered_text(
+            device_name,
+            self.font_medium,
+            (226, 246, 251),
+            (self.width // 2, 94),
+        )
+        self.draw_centered_text(
+            state_label,
+            self.font_small,
+            (93, 211, 242) if state == "connected" else (133, 176, 188),
+            (self.width // 2, 130),
+        )
+
+        hangup_center = (self.width // 2, round(self.height * 0.84))
+        pressed = self.pointer_down and self.video_call_pointer_target == "hangup"
+        self.draw_aa_circle(
+            self.screen,
+            (211, 56, 67) if not pressed else (159, 40, 49),
+            hangup_center,
+            50,
+        )
+        phone = self.font_medium.render("挂断", True, (255, 245, 246))
+        self.screen.blit(phone, phone.get_rect(center=hangup_center))
+
+    def draw_video_call(self, now: float) -> None:
+        self.draw_video_call_page(now)
 
     def set_state(self, state: str, ttl: float | None = None, force: bool = False) -> dict:
         if state not in self.expressions:
@@ -2692,14 +3310,3668 @@ class PersistentExpressionDisplay:
         self.screen.blit(surface, (105, 660 - surface.get_height()))
         surface.set_alpha(None)
 
+    def pomodoro_back_center(self) -> tuple[int, int]:
+        return self.gallery_back_button_center()
+
+    def pomodoro_statistics_center(self) -> tuple[int, int]:
+        return round(self.width * 0.78), round(self.height * 0.175)
+
+    def pomodoro_dial_center(self) -> tuple[int, int]:
+        return 400, 382
+
+    def pomodoro_duration_crown_center(self) -> tuple[int, int]:
+        center = self.pomodoro_dial_center()
+        # With a 1–180 minute dial, 25 minutes sits 48 degrees clockwise
+        # from twelve o'clock.  Aligning the crown to that angle prevents
+        # the value from jumping as soon as a circular drag begins.
+        angle = math.radians(-42.0)
+        radius = 240
+        return (
+            round(center[0] + math.cos(angle) * radius),
+            round(center[1] + math.sin(angle) * radius),
+        )
+
+    def pomodoro_duration_crown_enabled(self, snapshot: dict) -> bool:
+        return (
+            snapshot["phase"] in {"focus", "short_break", "long_break"}
+            and snapshot["status"] != "running"
+            and not self.pomodoro_statistics_active
+        )
+
+    def draw_pomodoro_duration_crown(
+        self,
+        snapshot: dict,
+        *,
+        completion_alert: bool = False,
+        completion_presentation: bool = False,
+    ) -> None:
+        center = self.pomodoro_dial_center()
+        angle = math.radians(-42.0)
+        unit = (math.cos(angle), math.sin(angle))
+
+        def point(radius: float) -> tuple[float, float]:
+            return (
+                center[0] + unit[0] * radius,
+                center[1] + unit[1] * radius,
+            )
+
+        enabled = self.pomodoro_duration_crown_enabled(snapshot)
+        pressed = (
+            self.pointer_down
+            and self.pomodoro_pointer_target == "duration_crown"
+        )
+        shift = -4.0 if pressed else 0.0
+        if completion_alert:
+            connector_color = (0, 0, 0, 255)
+            body_color = (0, 0, 0, 255)
+            highlight_color = (24, 24, 24, 255)
+        elif completion_presentation:
+            focus_theme = snapshot["phase"] == "focus"
+            connector_color = (
+                (139, 64, 63, 230)
+                if focus_theme
+                else (34, 113, 75, 230)
+            )
+            body_color = (
+                (205, 78, 72, 255)
+                if focus_theme
+                else (55, 166, 102, 255)
+            )
+            highlight_color = (
+                (249, 151, 137, 220)
+                if focus_theme
+                else (126, 231, 166, 220)
+            )
+        else:
+            focus_theme = snapshot["phase"] == "focus"
+            connector_color = (
+                ((139, 64, 63, 230) if focus_theme else (34, 113, 75, 230))
+                if enabled
+                else (53, 72, 77, 190)
+            )
+            body_color = (
+                ((205, 78, 72, 255) if focus_theme else (55, 166, 102, 255))
+                if enabled
+                else (70, 87, 92, 230)
+            )
+            highlight_color = (
+                ((249, 151, 137, 220) if focus_theme else (126, 231, 166, 220))
+                if enabled
+                else (113, 130, 134, 170)
+            )
+        self.draw_aa_round_line(
+            self.screen,
+            connector_color,
+            point(207),
+            point(230 + shift),
+            6,
+        )
+        self.draw_aa_round_line(
+            self.screen,
+            (5, 18, 22, 250),
+            point(229 + shift),
+            point(253 + shift),
+            22,
+        )
+        self.draw_aa_round_line(
+            self.screen,
+            body_color,
+            point(231 + shift),
+            point(251 + shift),
+            16,
+        )
+        self.draw_aa_round_line(
+            self.screen,
+            highlight_color,
+            point(236 + shift),
+            point(248 + shift),
+            3,
+        )
+
+    def pomodoro_duration_minutes_from_position(
+        self,
+        position: tuple[int, int],
+    ) -> int:
+        clockwise = self.pomodoro_duration_clockwise_from_position(position)
+        count = (
+            (self.pomodoro_duration_max_minutes - self.pomodoro_duration_min_minutes)
+            // self.pomodoro_duration_step_minutes
+            + 1
+        )
+        index = round(clockwise / math.tau * count) % count
+        return (
+            self.pomodoro_duration_min_minutes
+            + index * self.pomodoro_duration_step_minutes
+        )
+
+    def pomodoro_duration_clockwise_from_position(
+        self,
+        position: tuple[int, int],
+    ) -> float:
+        center = self.pomodoro_dial_center()
+        angle = math.atan2(position[1] - center[1], position[0] - center[0])
+        return (angle + math.pi / 2) % math.tau
+
+    def begin_pomodoro_duration_adjustment(self, now: float) -> None:
+        if self.pomodoro_duration_adjust_active:
+            return
+        snapshot = self.pomodoro.snapshot()
+        if not self.pomodoro_duration_crown_enabled(snapshot):
+            return
+        duration_minutes = max(1, round(self.pomodoro.duration_for() / 60.0))
+        step = self.pomodoro_duration_step_minutes
+        selected = round(duration_minutes / step) * step
+        self.pomodoro_duration_selected_minutes = max(
+            self.pomodoro_duration_min_minutes,
+            min(selected, self.pomodoro_duration_max_minutes),
+        )
+        selected_index = (
+            self.pomodoro_duration_selected_minutes
+            - self.pomodoro_duration_min_minutes
+        ) // self.pomodoro_duration_step_minutes
+        selectable_count = (
+            (self.pomodoro_duration_max_minutes - self.pomodoro_duration_min_minutes)
+            // self.pomodoro_duration_step_minutes
+            + 1
+        )
+        self.pomodoro_duration_pointer_clockwise = (
+            selected_index * math.tau / selectable_count
+        )
+        self.pomodoro_duration_original_seconds = self.pomodoro.duration_for()
+        self.pomodoro_duration_adjust_active = True
+        self.pomodoro_duration_dial_moved = False
+        self.pomodoro_duration_adjust_started_at = now
+        self.pomodoro_pointer_target = "duration_dial"
+        self.needs_redraw = True
+        log(
+            "pomodoro duration dial opened "
+            f"minutes={self.pomodoro_duration_selected_minutes}"
+        )
+        self.write_state()
+
+    def update_pomodoro_duration_adjustment(
+        self,
+        position: tuple[int, int],
+    ) -> None:
+        if not self.pomodoro_duration_adjust_active:
+            return
+        if (
+            math.dist(position, self.pointer_start)
+            <= self.pomodoro_duration_drag_deadzone_pixels
+        ):
+            return
+        self.pomodoro_duration_dial_moved = True
+        self.pomodoro_duration_pointer_clockwise = (
+            self.pomodoro_duration_clockwise_from_position(position)
+        )
+        selected = self.pomodoro_duration_minutes_from_position(position)
+        if selected != self.pomodoro_duration_selected_minutes:
+            self.pomodoro_duration_selected_minutes = selected
+            self.needs_redraw = True
+
+    def commit_pomodoro_duration_adjustment(self) -> None:
+        if not self.pomodoro_duration_adjust_active:
+            return
+        selected = self.pomodoro_duration_selected_minutes
+        phase = self.pomodoro.phase
+        self.pomodoro.set_phase_duration(selected * 60)
+        self.pomodoro_duration_adjust_active = False
+        self.pomodoro_duration_dial_moved = False
+        self.pomodoro_duration_adjust_started_at = 0.0
+        self.pomodoro_pointer_target = None
+        self.pomodoro_last_display_second = -1
+        self.needs_redraw = True
+        log(
+            "pomodoro duration dial committed "
+            f"phase={phase} minutes={selected}"
+        )
+        self.write_state()
+
+    def pomodoro_duration_dial_ticks(self) -> object:
+        if self.pomodoro_duration_dial_surface is not None:
+            return self.pomodoro_duration_dial_surface
+        native_size = 500
+        center = native_size // 2
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (native_size * scale, native_size * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        tick_count = 72
+        for index in range(tick_count):
+            major = index % 12 == 0
+            angle = -math.pi / 2 + index * math.tau / tick_count
+            outer = 216
+            inner = outer - (13 if major else 7)
+            start = (
+                round((center + math.cos(angle) * inner) * scale),
+                round((center + math.sin(angle) * inner) * scale),
+            )
+            end = (
+                round((center + math.cos(angle) * outer) * scale),
+                round((center + math.sin(angle) * outer) * scale),
+            )
+            width = (3 if major else 1) * scale
+            color = (92, 137, 148, 230) if major else (43, 78, 88, 205)
+            self.pygame.draw.line(high, color, start, end, width)
+            cap = max(1, width // 2)
+            self.pygame.draw.circle(high, color, start, cap)
+            self.pygame.draw.circle(high, color, end, cap)
+        self.pomodoro_duration_dial_surface = self.pygame.transform.smoothscale(
+            high,
+            (native_size, native_size),
+        )
+        return self.pomodoro_duration_dial_surface
+
+    def pomodoro_duration_wave_surface(
+        self,
+        pointer_step: int,
+        phase: str,
+    ) -> object:
+        tick_count = 72
+        selected_phase = (
+            phase if phase in {"focus", "short_break", "long_break"} else "focus"
+        )
+        theme_key = "focus" if selected_phase == "focus" else "break"
+        key = (theme_key, int(pointer_step) % tick_count)
+        cached = self.pomodoro_duration_wave_cache.get(key)
+        if cached is not None:
+            return cached
+        native_size = 500
+        center = native_size // 2
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (native_size * scale, native_size * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        influence_radius = 10.0
+        outer_radius = 216.0
+        for index in range(tick_count):
+            circular_distance = abs(
+                (index - key[1] + tick_count / 2) % tick_count
+                - tick_count / 2
+            )
+            if circular_distance > influence_radius:
+                continue
+            weight = 0.5 * (
+                1.0
+                + math.cos(math.pi * circular_distance / influence_radius)
+            )
+            if weight <= 0.01:
+                continue
+            tick_length = 7.0 + 38.0 * weight
+            angle = -math.pi / 2 + index * math.tau / tick_count
+            start = (
+                round(
+                    (center + math.cos(angle) * (outer_radius - tick_length))
+                    * scale
+                ),
+                round(
+                    (center + math.sin(angle) * (outer_radius - tick_length))
+                    * scale
+                ),
+            )
+            end = (
+                round((center + math.cos(angle) * outer_radius) * scale),
+                round((center + math.sin(angle) * outer_radius) * scale),
+            )
+            width = max(2, round(2 + 4 * weight)) * scale
+            if theme_key == "focus":
+                color = (
+                    round(74 + 164 * weight),
+                    round(126 - 45 * weight),
+                    round(138 - 66 * weight),
+                    round(255 * (0.68 + 0.32 * weight)),
+                )
+            else:
+                color = (
+                    round(65 - 10 * weight),
+                    round(130 + 101 * weight),
+                    round(116 + 50 * weight),
+                    round(255 * (0.68 + 0.32 * weight)),
+                )
+            self.pygame.draw.line(high, color, start, end, width)
+            cap = max(1, width // 2)
+            self.pygame.draw.circle(high, color, start, cap)
+            self.pygame.draw.circle(high, color, end, cap)
+        cached = self.pygame.transform.smoothscale(
+            high,
+            (native_size, native_size),
+        )
+        self.pomodoro_duration_wave_cache[key] = cached
+        return cached
+
+    def pomodoro_duration_time_surface(self, minutes: int) -> object:
+        selected = int(minutes)
+        cached = self.pomodoro_duration_time_cache.get(selected)
+        if cached is None:
+            cached = self.font_pomodoro_time.render(
+                f"{selected:02d}:00",
+                True,
+                (242, 248, 249),
+            )
+            self.pomodoro_duration_time_cache[selected] = cached
+        return cached
+
+    def pomodoro_duration_adjust_base(self, phase: str) -> object:
+        selected_phase = (
+            phase if phase in {"focus", "short_break", "long_break"} else "focus"
+        )
+        theme_key = "focus" if selected_phase == "focus" else "break"
+        cached = self.pomodoro_duration_adjust_base_surfaces.get(theme_key)
+        if cached is not None:
+            return cached
+        focus_theme = selected_phase == "focus"
+        glow_color = (129, 39, 42, 76) if focus_theme else (31, 104, 68, 76)
+        accent_color = (222, 72, 66, 255) if focus_theme else (66, 181, 112, 255)
+        surface = self.pygame.Surface(self.target_size)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            center = self.pomodoro_dial_center()
+            self.screen.fill((0, 0, 0))
+            self.draw_aa_ring(
+                self.screen,
+                (42, 120, 148, 30),
+                (self.width // 2, self.height // 2),
+                min(self.width, self.height) // 2 - 10,
+                width=3,
+            )
+            self.draw_gallery_back_button()
+            self.draw_pomodoro_mark((318, 128), 20, selected_phase)
+            self.draw_centered_text(
+                "番茄钟",
+                self.font_pomodoro_title,
+                (222, 241, 246),
+                (425, 126),
+            )
+            ticks = self.pomodoro_duration_dial_ticks()
+            self.screen.blit(ticks, ticks.get_rect(center=center))
+            self.draw_aa_ring(
+                self.screen,
+                glow_color,
+                center,
+                150,
+                width=18,
+            )
+            self.draw_aa_ring(
+                self.screen,
+                (24, 53, 62, 238),
+                center,
+                142,
+                width=15,
+            )
+            self.draw_aa_ring(
+                self.screen,
+                accent_color,
+                center,
+                142,
+                width=16,
+            )
+            self.draw_centered_text(
+                "松手设定 · 每次 1 分钟",
+                self.font_small,
+                (105, 157, 168),
+                (400, 675),
+            )
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+        self.pomodoro_duration_adjust_base_surfaces[theme_key] = surface
+        return surface
+
+    def draw_pomodoro_statistics_button(self) -> None:
+        center = self.pomodoro_statistics_center()
+        pressed = (
+            self.pointer_down
+            and self.pomodoro_pointer_target == "statistics"
+        )
+        self.draw_aa_circle(
+            self.screen,
+            (10, 42, 50) if pressed else (5, 27, 37),
+            center,
+            37,
+        )
+        self.draw_aa_ring(
+            self.screen,
+            (96, 214, 193) if pressed else (70, 178, 213),
+            center,
+            37,
+            2,
+        )
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface((42 * scale, 42 * scale), self.pygame.SRCALPHA)
+        high.fill((0, 0, 0, 0))
+        bar_color = (208, 242, 235)
+        for x, height in ((8, 12), (17, 21), (26, 29)):
+            rect = self.pygame.Rect(
+                x * scale,
+                (34 - height) * scale,
+                7 * scale,
+                height * scale,
+            )
+            self.pygame.draw.rect(
+                high,
+                bar_color,
+                rect,
+                border_radius=round(3.5 * scale),
+            )
+        icon = self.pygame.transform.smoothscale(high, (42, 42))
+        self.screen.blit(icon, icon.get_rect(center=center))
+
+    def pomodoro_control_rects(self) -> dict[str, object]:
+        reset = self.pygame.Rect(0, 0, 126, 66)
+        primary = self.pygame.Rect(0, 0, 188, 74)
+        skip = self.pygame.Rect(0, 0, 126, 66)
+        reset.center = (226, 650)
+        primary.center = (400, 650)
+        skip.center = (574, 650)
+        return {"reset": reset, "primary": primary, "skip": skip}
+
+    def pomodoro_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, self.pomodoro_back_center()) <= 50:
+            return "back"
+        if self.pomodoro_duration_adjust_active:
+            return None
+        if self.pomodoro_statistics_active:
+            return None
+        if math.dist(position, self.pomodoro_statistics_center()) <= 50:
+            return "statistics"
+        snapshot = self.pomodoro.snapshot()
+        if (
+            self.pomodoro_duration_crown_enabled(snapshot)
+            and math.dist(position, self.pomodoro_duration_crown_center()) <= 34
+        ):
+            return "duration_crown"
+        for name, rect in self.pomodoro_control_rects().items():
+            if rect.inflate(16, 16).collidepoint(position):
+                return name
+        return None
+
+    def open_pomodoro(self) -> None:
+        if self.pomodoro_active:
+            return
+        self.pomodoro_transition_source = self.screen.copy()
+        self.pomodoro_active = True
+        self.pomodoro_statistics_active = False
+        self.pomodoro_statistics_page = 0
+        self.pomodoro_duration_adjust_active = False
+        self.pomodoro_duration_dial_moved = False
+        self.pomodoro_pointer_target = None
+        self.pomodoro_transition_active = True
+        self.pomodoro_transition_opening = True
+        self.pomodoro_transition_started_at = time.monotonic()
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_transition_target = self.render_pomodoro_surface(
+            self.pomodoro_transition_started_at,
+            statistics=False,
+        )
+        self.status_visible_until = 0.0
+        self.token_popup_visible = False
+        self.note_screensaver_activity(self.pomodoro_transition_started_at)
+        self.needs_redraw = True
+        self.write_state()
+        log("pomodoro page opened")
+
+    def close_pomodoro(self, animated: bool = True) -> None:
+        if not self.pomodoro_active:
+            return
+        now = time.monotonic()
+        return_target = self.prepare_application_menu_return(now)
+        if animated and not self.pomodoro_transition_active:
+            self.pomodoro_transition_source = self.screen.copy()
+            self.pomodoro_transition_target = return_target
+            self.pomodoro_transition_active = True
+            self.pomodoro_transition_opening = False
+            self.pomodoro_transition_started_at = now
+            self.pomodoro_transition_exits_page = True
+            self.pomodoro_statistics_active = False
+            self.pomodoro_statistics_page = 0
+            self.pomodoro_duration_adjust_active = False
+            self.pomodoro_duration_dial_moved = False
+            self.pomodoro_pointer_target = None
+            self.needs_redraw = True
+            self.write_state()
+            log("pomodoro page exit transition started")
+            return
+        self.pomodoro_active = False
+        self.pomodoro_statistics_active = False
+        self.pomodoro_statistics_page = 0
+        self.pomodoro_duration_adjust_active = False
+        self.pomodoro_duration_dial_moved = False
+        self.pomodoro_transition_active = False
+        self.pomodoro_transition_source = None
+        self.pomodoro_transition_target = None
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_pointer_target = None
+        self.complete_application_menu_return(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("pomodoro page closed")
+
+    def open_pomodoro_statistics(self) -> None:
+        if not self.pomodoro_active or self.pomodoro_statistics_active:
+            return
+        self.pomodoro_transition_source = self.screen.copy()
+        self.pomodoro_statistics_active = True
+        self.pomodoro_statistics_page = 0
+        self.pomodoro_pointer_target = None
+        self.pomodoro_transition_active = True
+        self.pomodoro_transition_opening = True
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_transition_started_at = time.monotonic()
+        self.pomodoro_transition_target = self.render_pomodoro_surface(
+            self.pomodoro_transition_started_at,
+            statistics=True,
+            statistics_page=0,
+        )
+        self.needs_redraw = True
+        self.write_state()
+        log("pomodoro statistics opened")
+
+    def close_pomodoro_statistics(self) -> None:
+        if not self.pomodoro_active or not self.pomodoro_statistics_active:
+            return
+        self.pomodoro_transition_source = self.screen.copy()
+        self.pomodoro_statistics_active = False
+        self.pomodoro_statistics_page = 0
+        self.pomodoro_pointer_target = None
+        self.pomodoro_transition_active = True
+        self.pomodoro_transition_opening = False
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_transition_started_at = time.monotonic()
+        self.pomodoro_transition_target = self.render_pomodoro_surface(
+            self.pomodoro_transition_started_at,
+            statistics=False,
+        )
+        self.needs_redraw = True
+        self.write_state()
+        log("pomodoro statistics returned")
+
+    def navigate_pomodoro_statistics(self, page: int) -> None:
+        requested_page = max(0, min(int(page), 1))
+        if (
+            not self.pomodoro_active
+            or not self.pomodoro_statistics_active
+            or requested_page == self.pomodoro_statistics_page
+            or self.pomodoro_transition_active
+        ):
+            return
+        previous_page = self.pomodoro_statistics_page
+        self.pomodoro_transition_source = self.screen.copy()
+        self.pomodoro_statistics_page = requested_page
+        self.pomodoro_pointer_target = None
+        self.pomodoro_transition_active = True
+        self.pomodoro_transition_opening = requested_page > previous_page
+        self.pomodoro_transition_exits_page = False
+        self.pomodoro_transition_started_at = time.monotonic()
+        self.pomodoro_transition_target = self.render_pomodoro_surface(
+            self.pomodoro_transition_started_at,
+            statistics=True,
+            statistics_page=requested_page,
+        )
+        self.needs_redraw = True
+        self.write_state()
+        log(
+            "pomodoro statistics page changed "
+            f"from={previous_page} to={requested_page}"
+        )
+
+    def pomodoro_back_swipe_detected(
+        self,
+        position: tuple[int, int],
+    ) -> bool:
+        dx = position[0] - self.pointer_start[0]
+        dy = position[1] - self.pointer_start[1]
+        minimum_distance = max(80, round(self.width * 0.12))
+        return dx >= minimum_distance and abs(dy) <= max(48, dx * 0.55)
+
+    def pomodoro_horizontal_swipe_direction(
+        self,
+        position: tuple[int, int],
+    ) -> int:
+        dx = position[0] - self.pointer_start[0]
+        dy = position[1] - self.pointer_start[1]
+        minimum_distance = max(80, round(self.width * 0.12))
+        if abs(dx) < minimum_distance or abs(dy) > max(48, abs(dx) * 0.55):
+            return 0
+        return 1 if dx > 0 else -1
+
+    def handle_pomodoro_target(self, target: str | None) -> None:
+        if target is None:
+            return
+        if target == "back":
+            if self.pomodoro_statistics_active:
+                self.close_pomodoro_statistics()
+            else:
+                self.close_pomodoro()
+        elif target == "statistics":
+            self.open_pomodoro_statistics()
+        elif target == "primary":
+            self.pomodoro.toggle()
+            log(f"pomodoro toggled status={self.pomodoro.status}")
+        elif target == "reset":
+            self.pomodoro.reset_phase()
+            log(f"pomodoro phase reset phase={self.pomodoro.phase}")
+        elif target == "skip":
+            self.pomodoro.skip()
+            self.pomodoro_phase_changed_at = time.monotonic()
+            log(f"pomodoro phase skipped next={self.pomodoro.phase}")
+        self.pomodoro_pointer_target = None
+        self.note_screensaver_activity(time.monotonic())
+        self.needs_redraw = True
+        self.write_state()
+
+    def pomodoro_button_surface(
+        self,
+        size: tuple[int, int],
+        role: str,
+        pressed: bool,
+        phase: str,
+        completion_alert: bool = False,
+    ) -> object:
+        key = (size, role, pressed, phase, completion_alert)
+        cached = self.pomodoro_button_cache.get(key)
+        if cached is not None:
+            self.pomodoro_button_cache.move_to_end(key)
+            return cached
+        scale = UI_AA_SCALE
+        width, height = size
+        high = self.pygame.Surface(
+            (width * scale, height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        rect = self.pygame.Rect(
+            2 * scale,
+            2 * scale,
+            (width - 4) * scale,
+            (height - 4) * scale,
+        )
+        focus = phase == "focus"
+        if role == "primary" and completion_alert:
+            base = (0, 0, 0, 255)
+            border = (28, 28, 28, 255)
+        elif role == "primary":
+            base = (187, 58, 55, 246) if focus else (47, 139, 91, 246)
+            if pressed:
+                base = (151, 44, 43, 248) if focus else (35, 108, 69, 248)
+            border = (246, 128, 116, 154) if focus else (117, 224, 159, 154)
+        else:
+            base = (13, 37, 48, 246) if not pressed else (23, 57, 68, 250)
+            border = (89, 154, 170, 92) if not pressed else (108, 204, 218, 150)
+        self.pygame.draw.rect(
+            high,
+            (0, 0, 0, 110),
+            rect.move(0, 3 * scale),
+            border_radius=(height // 2) * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            base,
+            rect,
+            border_radius=(height // 2) * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            border,
+            rect,
+            width=scale,
+            border_radius=(height // 2) * scale,
+        )
+        surface = self.pygame.transform.smoothscale(high, size)
+        self.pomodoro_button_cache[key] = surface
+        self.pomodoro_button_cache.move_to_end(key)
+        while len(self.pomodoro_button_cache) > self.pomodoro_button_cache_limit:
+            self.pomodoro_button_cache.popitem(last=False)
+        return surface
+
+    def draw_pomodoro_mark(
+        self,
+        center: tuple[int, int],
+        radius: int,
+        _phase: str,
+    ) -> None:
+        radius = max(8, int(radius))
+        surface = self.pomodoro_mark_cache.get(radius)
+        if surface is None:
+            scale = UI_AA_SCALE
+            padding = 10
+            native_size = (radius + padding) * 2
+            high = self.pygame.Surface(
+                (native_size * scale, native_size * scale),
+                self.pygame.SRCALPHA,
+            )
+            high.fill((0, 0, 0, 0))
+            cx = native_size * scale // 2
+            cy = round((native_size / 2 + radius * 0.12) * scale)
+            outline = (2, 10, 13, 255)
+            red = (226, 49, 45, 255)
+            red_shadow = (178, 31, 34, 255)
+            leaf = (69, 177, 103, 255)
+            leaf_light = (101, 202, 130, 255)
+
+            body_rect = self.pygame.Rect(
+                round((native_size / 2 - radius) * scale),
+                round((native_size / 2 - radius * 0.73) * scale),
+                radius * 2 * scale,
+                round(radius * 1.86 * scale),
+            )
+            self.pygame.draw.ellipse(high, outline, body_rect)
+            inner_body = body_rect.inflate(-5 * scale, -5 * scale)
+            self.pygame.draw.ellipse(high, red, inner_body)
+            shadow_rect = self.pygame.Rect(
+                inner_body.left + round(radius * 1.02 * scale),
+                inner_body.top + round(radius * 0.23 * scale),
+                round(radius * 0.55 * scale),
+                round(radius * 1.12 * scale),
+            )
+            self.pygame.draw.arc(
+                high,
+                red_shadow,
+                shadow_rect,
+                -math.pi / 2,
+                math.pi / 2,
+                max(scale, 3 * scale),
+            )
+
+            leaf_center_y = cy - round(radius * 0.48 * scale)
+            outer_leaf = [
+                (cx - round(radius * 0.92 * scale), leaf_center_y),
+                (cx - round(radius * 0.46 * scale), leaf_center_y - round(radius * 0.30 * scale)),
+                (cx - round(radius * 0.26 * scale), leaf_center_y - round(radius * 0.02 * scale)),
+                (cx - round(radius * 0.12 * scale), leaf_center_y - round(radius * 0.62 * scale)),
+                (cx + round(radius * 0.08 * scale), leaf_center_y - round(radius * 0.22 * scale)),
+                (cx + round(radius * 0.40 * scale), leaf_center_y - round(radius * 0.48 * scale)),
+                (cx + round(radius * 0.34 * scale), leaf_center_y - round(radius * 0.05 * scale)),
+                (cx + round(radius * 0.92 * scale), leaf_center_y),
+                (cx + round(radius * 0.42 * scale), leaf_center_y + round(radius * 0.23 * scale)),
+                (cx + round(radius * 0.48 * scale), leaf_center_y + round(radius * 0.62 * scale)),
+                (cx, leaf_center_y + round(radius * 0.32 * scale)),
+                (cx - round(radius * 0.48 * scale), leaf_center_y + round(radius * 0.62 * scale)),
+                (cx - round(radius * 0.42 * scale), leaf_center_y + round(radius * 0.22 * scale)),
+            ]
+            self.pygame.draw.polygon(high, outline, outer_leaf)
+            inner_leaf = [
+                (
+                    round(cx + (x - cx) * 0.82),
+                    round(leaf_center_y + (y - leaf_center_y) * 0.78),
+                )
+                for x, y in outer_leaf
+            ]
+            self.pygame.draw.polygon(high, leaf, inner_leaf)
+            self.pygame.draw.polygon(
+                high,
+                leaf_light,
+                [inner_leaf[0], inner_leaf[1], inner_leaf[2], inner_leaf[12]],
+            )
+
+            stem_outer = [
+                (cx - 3 * scale, leaf_center_y - round(radius * 0.42 * scale)),
+                (cx + round(radius * 0.16 * scale), leaf_center_y - round(radius * 0.98 * scale)),
+                (cx + round(radius * 0.34 * scale), leaf_center_y - round(radius * 1.08 * scale)),
+                (cx + 5 * scale, leaf_center_y - round(radius * 0.32 * scale)),
+            ]
+            self.pygame.draw.polygon(high, outline, stem_outer)
+            stem_inner = [
+                (cx, leaf_center_y - round(radius * 0.42 * scale)),
+                (cx + round(radius * 0.18 * scale), leaf_center_y - round(radius * 0.88 * scale)),
+                (cx + round(radius * 0.26 * scale), leaf_center_y - round(radius * 0.94 * scale)),
+                (cx + 3 * scale, leaf_center_y - round(radius * 0.35 * scale)),
+            ]
+            self.pygame.draw.polygon(high, leaf, stem_inner)
+
+            highlight_rect = self.pygame.Rect(
+                body_rect.left + round(radius * 0.18 * scale),
+                body_rect.top + round(radius * 0.34 * scale),
+                round(radius * 0.48 * scale),
+                round(radius * 0.90 * scale),
+            )
+            self.pygame.draw.arc(
+                high,
+                (255, 114, 103, 225),
+                highlight_rect,
+                math.pi / 2,
+                math.pi * 1.48,
+                max(scale, 3 * scale),
+            )
+            for angle, length in ((0.36, 0.22), (0.70, 0.18)):
+                mark_center = (
+                    round(cx + math.cos(angle) * radius * 0.70 * scale),
+                    round(cy + math.sin(angle) * radius * 0.70 * scale),
+                )
+                tangent = (-math.sin(angle), math.cos(angle))
+                half = radius * length * scale / 2
+                start = (
+                    round(mark_center[0] - tangent[0] * half),
+                    round(mark_center[1] - tangent[1] * half),
+                )
+                end = (
+                    round(mark_center[0] + tangent[0] * half),
+                    round(mark_center[1] + tangent[1] * half),
+                )
+                width = max(scale, 2 * scale)
+                self.pygame.draw.line(high, outline, start, end, width)
+                self.pygame.draw.circle(high, outline, start, width // 2)
+                self.pygame.draw.circle(high, outline, end, width // 2)
+
+            surface = self.pygame.transform.smoothscale(
+                high,
+                (native_size, native_size),
+            )
+            self.pomodoro_mark_cache[radius] = surface
+        self.screen.blit(surface, surface.get_rect(center=center))
+
+    def draw_pomodoro_duration_adjustment(
+        self,
+        now: float,
+        snapshot: dict,
+    ) -> None:
+        phase = str(snapshot.get("phase", "focus"))
+        focus_theme = phase == "focus"
+        glow_rgb = (129, 39, 42) if focus_theme else (31, 104, 68)
+        accent_color = (
+            (222, 72, 66, 255)
+            if focus_theme
+            else (66, 181, 112, 255)
+        )
+        elapsed = max(0.0, now - self.pomodoro_duration_adjust_started_at)
+        raw = min(1.0, elapsed / self.pomodoro_duration_adjust_seconds)
+        progress = 1.0 - (1.0 - raw) ** 3
+        center = self.pomodoro_dial_center()
+        if progress >= 0.999:
+            self.screen.blit(self.pomodoro_duration_adjust_base(phase), (0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
+            self.draw_aa_ring(
+                self.screen,
+                (42, 120, 148, 30),
+                (self.width // 2, self.height // 2),
+                min(self.width, self.height) // 2 - 10,
+                width=3,
+            )
+            self.draw_gallery_back_button()
+            self.draw_pomodoro_mark((318, 128), 20, phase)
+            self.draw_centered_text(
+                "番茄钟",
+                self.font_pomodoro_title,
+                (222, 241, 246),
+                (425, 126),
+            )
+            ticks = self.pomodoro_duration_dial_ticks().copy()
+            ticks.set_alpha(round(255 * progress))
+            self.screen.blit(ticks, ticks.get_rect(center=center))
+            radius = round(204 - 62 * progress)
+            self.draw_aa_ring(
+                self.screen,
+                (*glow_rgb, round(48 + 28 * progress)),
+                center,
+                radius + 8,
+                width=18,
+            )
+            self.draw_aa_ring(
+                self.screen,
+                (24, 53, 62, 238),
+                center,
+                radius,
+                width=15,
+            )
+            self.draw_aa_ring(
+                self.screen,
+                accent_color,
+                center,
+                radius,
+                width=16,
+            )
+            self.draw_centered_text(
+            "松手设定 · 每次 1 分钟",
+                self.font_small,
+                (105, 157, 168),
+                (400, 675),
+            )
+
+        pointer_step = round(
+            self.pomodoro_duration_pointer_clockwise / math.tau * 72
+        ) % 72
+        wave = self.pomodoro_duration_wave_surface(pointer_step, phase)
+        if progress < 0.999:
+            wave = wave.copy()
+            wave.set_alpha(round(255 * progress))
+        self.screen.blit(wave, wave.get_rect(center=center))
+        time_surface = self.pomodoro_duration_time_surface(
+            self.pomodoro_duration_selected_minutes
+        )
+        self.screen.blit(time_surface, time_surface.get_rect(center=center))
+
+    def draw_pomodoro_page(
+        self,
+        now: float,
+        *,
+        snapshot_override: dict | None = None,
+        completion_alert: bool = False,
+    ) -> None:
+        snapshot = snapshot_override or self.pomodoro.snapshot()
+        if self.pomodoro_duration_adjust_active and snapshot_override is None:
+            self.draw_pomodoro_duration_adjustment(now, snapshot)
+            return
+        phase = snapshot["phase"]
+        status = snapshot["status"]
+        focus = phase == "focus"
+        theme_accent = (222, 72, 66, 255) if focus else (66, 181, 112, 255)
+        ring_accent = (0, 0, 0, 255) if completion_alert else theme_accent
+        self.screen.fill(theme_accent[:3] if completion_alert else (0, 0, 0))
+        self.draw_aa_ring(
+            self.screen,
+            (42, 120, 148, 30),
+            (self.width // 2, self.height // 2),
+            min(self.width, self.height) // 2 - 10,
+            width=3,
+        )
+        self.draw_gallery_back_button()
+        self.draw_pomodoro_statistics_button()
+        self.draw_pomodoro_mark((318, 128), 20, phase)
+        self.draw_centered_text(
+            "番茄钟",
+            self.font_pomodoro_title,
+            (222, 241, 246),
+            (425, 126),
+        )
+
+        center = self.pomodoro_dial_center()
+        radius = 204
+        progress_width = 16
+        progress_inner_radius = radius - progress_width
+        progress_outer_radius = radius
+        # Keep the halo stable across ready/running. Status changes should alter
+        # only the arc length, never its apparent diameter or brightness layer.
+        glow_alpha = 24
+        self.draw_aa_ring(
+            self.screen,
+            (*ring_accent[:3], glow_alpha),
+            center,
+            radius + 8,
+            width=18,
+        )
+        self.draw_aa_ring(
+            self.screen,
+            (24, 53, 62, 238),
+            center,
+            radius,
+            width=15,
+        )
+        fraction = float(snapshot["remaining_fraction"])
+        if fraction >= 0.999:
+            self.draw_aa_ring(
+                self.screen,
+                ring_accent,
+                center,
+                radius,
+                width=progress_width,
+            )
+        elif fraction > 0.001:
+            self.draw_aa_gradient_arc(
+                self.screen,
+                center,
+                progress_inner_radius,
+                progress_outer_radius,
+                -math.pi / 2,
+                -math.pi / 2 + math.tau * fraction,
+                ring_accent,
+                # A fixed accent prevents the gradient from being re-stretched
+                # across the remaining span when running changes to paused.
+                ring_accent,
+            )
+        self.draw_pomodoro_duration_crown(
+            snapshot,
+            completion_alert=completion_alert,
+            completion_presentation=(
+                snapshot_override is not None and status == "completed"
+            ),
+        )
+
+        remaining = max(0, math.ceil(float(snapshot["remaining_seconds"])))
+        minutes, seconds = divmod(remaining, 60)
+        time_text = f"{minutes:02d}:{seconds:02d}"
+        time_surface = self.font_pomodoro_time.render(
+            time_text,
+            True,
+            (235, 246, 249),
+        )
+        self.screen.blit(time_surface, time_surface.get_rect(center=(400, 365)))
+        phase_labels = {
+            "focus": "专注",
+            "short_break": "短休",
+            "long_break": "长休",
+        }
+        status_labels = {
+            "ready": "准备开始",
+            "running": "进行中",
+            "paused": "已暂停",
+            "completed": "已完成",
+        }
+        self.draw_centered_text(
+            f"{phase_labels[phase]} · {status_labels[status]}",
+            self.font_pomodoro_label,
+            theme_accent[:3],
+            (400, 443),
+        )
+
+        dot_y = 505
+        completed_in_cycle = int(snapshot["cycle_position"])
+        dot_gap = 34
+        dot_start = 400 - dot_gap * 1.5
+        for index in range(int(snapshot["long_break_every"])):
+            dot_center = (round(dot_start + index * dot_gap), dot_y)
+            filled = index < completed_in_cycle
+            self.draw_aa_circle(
+                self.screen,
+                theme_accent[:3] if filled else (40, 72, 80),
+                dot_center,
+                7 if filled else 6,
+            )
+        self.draw_centered_text(
+            f"本轮 {completed_in_cycle}/4",
+            self.font_small,
+            (113, 151, 160),
+            (400, 538),
+        )
+
+        controls = self.pomodoro_control_rects()
+        for name, rect in controls.items():
+            pressed = self.pointer_down and self.pomodoro_pointer_target == name
+            role = "primary" if name == "primary" else "secondary"
+            self.screen.blit(
+                self.pomodoro_button_surface(
+                    rect.size,
+                    role,
+                    pressed,
+                    phase,
+                    completion_alert=completion_alert and name == "primary",
+                ),
+                rect.topleft,
+            )
+        labels = {
+            "reset": "重置",
+            "primary": "暂停" if status == "running" else "开始",
+            "skip": "跳过",
+        }
+        for name, rect in controls.items():
+            self.draw_centered_text(
+                labels[name],
+                self.font_medium,
+                (245, 249, 250) if name == "primary" else (189, 222, 230),
+                rect.center,
+            )
+        self.draw_centered_text(
+            (
+                f"{round(self.pomodoro.duration_for('focus') / 60)} 分钟专注"
+                " · 5 分钟休息"
+            ),
+            self.font_small,
+            (84, 126, 137),
+            (400, 716),
+        )
+
+    def pomodoro_completion_snapshot(self, completed_phase: str) -> dict:
+        snapshot = self.pomodoro.snapshot()
+        snapshot["phase"] = (
+            completed_phase
+            if completed_phase in {"focus", "short_break", "long_break"}
+            else "focus"
+        )
+        snapshot["status"] = "completed"
+        snapshot["remaining_seconds"] = 0.0
+        # The completion signal keeps the full theme ring visible so its
+        # colour-to-black inversion remains unambiguous during each pulse.
+        snapshot["remaining_fraction"] = 1.0
+        return snapshot
+
+    def render_pomodoro_completion_surface(
+        self,
+        now: float,
+        completed_phase: str,
+        *,
+        lit: bool,
+    ) -> object:
+        surface = self.pygame.Surface(self.target_size)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        original_target = self.pomodoro_pointer_target
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            self.pomodoro_pointer_target = None
+            self.draw_pomodoro_page(
+                now,
+                snapshot_override=self.pomodoro_completion_snapshot(completed_phase),
+                completion_alert=lit,
+            )
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+            self.pomodoro_pointer_target = original_target
+        return surface
+
+    def start_pomodoro_completion_alert(
+        self,
+        completed_phase: str,
+        now: float,
+    ) -> None:
+        phase = (
+            completed_phase
+            if completed_phase in {"focus", "short_break", "long_break"}
+            else "focus"
+        )
+        self.pomodoro_completion_alert_phase = phase
+        # Rendering the two completion surfaces can take a fraction of a
+        # second on the Pi. Start the pulse clock only after both caches are
+        # ready so the visible animation never skips its black first frame.
+        self.pomodoro_completion_alert_started_at = 0.0
+        self.pomodoro_completion_alert_pulse = 1
+        self.pomodoro_completion_alert_intensity = 0.0
+        self.pomodoro_completion_alert_lit = False
+        self.pomodoro_completion_alert_off_surface = (
+            self.render_pomodoro_completion_surface(now, phase, lit=False)
+        )
+        self.pomodoro_completion_alert_on_surface = (
+            self.render_pomodoro_completion_surface(now, phase, lit=True)
+        )
+        self.pomodoro_completion_alert_started_at = time.monotonic()
+        self.pomodoro_completion_alert_active = True
+        self.pointer_down = False
+        self.pointer_moved = False
+        self.pomodoro_pointer_target = None
+        self.performance_pointer_target = None
+        self.music_pointer_target = None
+        self.camera_pointer_target = None
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        log(
+            "pomodoro completion alert started "
+            f"phase={phase} cycles={self.pomodoro_completion_alert_cycles}"
+        )
+
+    def update_pomodoro_completion_alert(self, now: float) -> bool:
+        if not self.pomodoro_completion_alert_active:
+            return False
+        active, intensity, pulse = completion_flash_frame(
+            now - self.pomodoro_completion_alert_started_at,
+            cycles=self.pomodoro_completion_alert_cycles,
+            cycle_seconds=self.pomodoro_completion_alert_cycle_seconds,
+            rise_seconds=self.pomodoro_completion_alert_rise_seconds,
+            hold_seconds=self.pomodoro_completion_alert_hold_seconds,
+        )
+        if not active:
+            completed_phase = self.pomodoro_completion_alert_phase
+            self.pomodoro_completion_alert_active = False
+            self.pomodoro_completion_alert_started_at = 0.0
+            self.pomodoro_completion_alert_phase = None
+            self.pomodoro_completion_alert_pulse = self.pomodoro_completion_alert_cycles
+            self.pomodoro_completion_alert_intensity = 0.0
+            self.pomodoro_completion_alert_lit = False
+            self.pomodoro_completion_alert_on_surface = None
+            self.pomodoro_completion_alert_off_surface = None
+            self.note_screensaver_activity(now)
+            self.needs_redraw = True
+            log(f"pomodoro completion alert finished phase={completed_phase}")
+            return True
+        lit = intensity >= 0.999
+        changed = lit != self.pomodoro_completion_alert_lit or (
+            pulse != self.pomodoro_completion_alert_pulse
+        )
+        self.pomodoro_completion_alert_intensity = intensity
+        self.pomodoro_completion_alert_lit = lit
+        self.pomodoro_completion_alert_pulse = pulse
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def draw_pomodoro_completion_alert(self) -> None:
+        off_surface = self.pomodoro_completion_alert_off_surface
+        on_surface = self.pomodoro_completion_alert_on_surface
+        if off_surface is None:
+            self.screen.fill((0, 0, 0))
+            return
+        self.screen.blit(off_surface, (0, 0))
+        intensity = max(
+            0.0,
+            min(float(self.pomodoro_completion_alert_intensity), 1.0),
+        )
+        if on_surface is None or intensity <= 0.0:
+            return
+        on_surface.set_alpha(round(255 * intensity))
+        self.screen.blit(on_surface, (0, 0))
+        on_surface.set_alpha(None)
+
+    def update_pomodoro_timer(self, now: float) -> bool:
+        completed_phase = self.pomodoro.phase
+        if not self.pomodoro.update():
+            return False
+        self.pomodoro.save()
+        self.pomodoro_phase_changed_at = now
+        self.pomodoro_last_transition_serial = self.pomodoro.transition_serial
+        self.start_pomodoro_completion_alert(completed_phase, now)
+        self.needs_redraw = True
+        log(
+            "pomodoro phase completed "
+            f"completed={completed_phase} next={self.pomodoro.phase}"
+        )
+        return True
+
+    def draw_pomodoro_statistics_chrome(
+        self,
+        title: str,
+        page: int,
+    ) -> None:
+        self.screen.fill((0, 0, 0))
+        self.draw_aa_ring(
+            self.screen,
+            (42, 120, 148, 30),
+            (self.width // 2, self.height // 2),
+            min(self.width, self.height) // 2 - 10,
+            width=3,
+        )
+        self.draw_gallery_back_button()
+        self.draw_centered_text(
+            title,
+            self.font_large,
+            (222, 241, 246),
+            (400, 128),
+        )
+        for index, x in enumerate((389, 411)):
+            active = index == page
+            self.draw_aa_circle(
+                self.screen,
+                (100, 213, 231) if active else (39, 81, 91),
+                (x, 716),
+                5 if active else 4,
+            )
+
+    def draw_pomodoro_today_statistics(self, statistics: dict) -> None:
+        today = statistics["today"]
+        today_focus_seconds = float(today["focus_seconds"])
+        today_break_seconds = float(today["break_seconds"])
+        total_seconds = today_focus_seconds + today_break_seconds
+        focus_ratio = (
+            today_focus_seconds / total_seconds if total_seconds > 0.0 else 0.0
+        )
+        today_minutes = round(today_focus_seconds / 60.0)
+        break_minutes = round(today_break_seconds / 60.0)
+
+        chart_center = (400, 352)
+        chart_radius = 136
+        chart_width = 34
+        self.draw_aa_ring(
+            self.screen,
+            (25, 56, 65, 245),
+            chart_center,
+            chart_radius,
+            chart_width,
+        )
+        start = -math.pi / 2
+        if total_seconds > 0.0:
+            if today_break_seconds <= 0.0:
+                self.draw_aa_ring(
+                    self.screen,
+                    (229, 75, 67),
+                    chart_center,
+                    chart_radius,
+                    chart_width,
+                )
+            elif today_focus_seconds <= 0.0:
+                self.draw_aa_ring(
+                    self.screen,
+                    (72, 184, 113),
+                    chart_center,
+                    chart_radius,
+                    chart_width,
+                )
+            else:
+                split = start + math.tau * focus_ratio
+                focus_span = math.tau * focus_ratio
+                break_span = math.tau - focus_span
+                gap = min(
+                    math.radians(2.5),
+                    focus_span * 0.18,
+                    break_span * 0.18,
+                )
+                self.draw_aa_ring(
+                    self.screen,
+                    (229, 75, 67),
+                    chart_center,
+                    chart_radius,
+                    chart_width,
+                    start + gap,
+                    split - gap,
+                )
+                self.draw_aa_ring(
+                    self.screen,
+                    (72, 184, 113),
+                    chart_center,
+                    chart_radius,
+                    chart_width,
+                    split + gap,
+                    start + math.tau - gap,
+                )
+        self.draw_centered_text(
+            str(today_minutes),
+            self.font_pomodoro_stat_value,
+            (240, 247, 249),
+            (400, 334),
+        )
+        self.draw_centered_text(
+            "今日专注 · 分钟",
+            self.font_small,
+            (113, 166, 178),
+            (400, 383),
+        )
+        self.draw_aa_circle(self.screen, (229, 75, 67), (335, 516), 5)
+        self.draw_centered_text(
+            "专注",
+            self.font_small,
+            (167, 199, 207),
+            (370, 516),
+        )
+        self.draw_aa_circle(self.screen, (72, 184, 113), (434, 516), 5)
+        self.draw_centered_text(
+            "休息",
+            self.font_small,
+            (167, 199, 207),
+            (474, 516),
+        )
+        metrics = (
+            ("今日番茄", str(int(today["completed_focus_sessions"]))),
+            ("专注占比", f"{round(focus_ratio * 100)}%"),
+            ("今日休息", f"{break_minutes}分"),
+        )
+        for x, (label, value) in zip((225, 400, 575), metrics):
+            self.draw_centered_text(
+                value,
+                self.font_large,
+                (231, 242, 245),
+                (x, 585),
+            )
+            self.draw_centered_text(
+                label,
+                self.font_small,
+                (92, 142, 154),
+                (x, 624),
+            )
+        self.draw_centered_text(
+            "向左滑查看近 7 天",
+            self.font_small,
+            (67, 108, 119),
+            (400, 674),
+        )
+
+    def draw_pomodoro_week_statistics(self, statistics: dict) -> None:
+        seven_days = statistics["seven_days"]
+        focus_minutes = round(
+            float(statistics["seven_day_focus_seconds"]) / 60.0
+        )
+        break_minutes = round(
+            float(statistics["seven_day_break_seconds"]) / 60.0
+        )
+        completed = int(statistics["seven_day_completed_focus_sessions"])
+        daily_average = round(focus_minutes / 7.0)
+        metrics = (
+            ("专注累计", f"{focus_minutes}分"),
+            ("完成番茄", str(completed)),
+            ("日均专注", f"{daily_average}分"),
+        )
+        for x, (label, value) in zip((225, 400, 575), metrics):
+            self.draw_centered_text(
+                value,
+                self.font_large,
+                (231, 242, 245),
+                (x, 225),
+            )
+            self.draw_centered_text(
+                label,
+                self.font_small,
+                (92, 142, 154),
+                (x, 264),
+            )
+        self.draw_centered_text(
+            f"休息累计 {break_minutes} 分钟",
+            self.font_small,
+            (97, 154, 136),
+            (400, 304),
+        )
+        self.draw_centered_text(
+            "每日专注分钟",
+            self.font_small,
+            (142, 184, 194),
+            (400, 344),
+        )
+
+        chart_width_native = 490
+        chart_height_native = 230
+        chart_left = (self.width - chart_width_native) // 2
+        chart_top = 356
+        scale = UI_AA_SCALE
+        chart = self.pygame.Surface(
+            (chart_width_native * scale, chart_height_native * scale),
+            self.pygame.SRCALPHA,
+        )
+        chart.fill((0, 0, 0, 0))
+        recorded_maximum = max(
+            float(day["focus_seconds"]) for day in seven_days
+        )
+        maximum = max(1.0, recorded_maximum)
+        bar_positions: list[int] = []
+        bar_heights: list[int] = []
+        baseline = 196
+        for index, day in enumerate(seven_days):
+            x = 35 + index * 70
+            bar_positions.append(x)
+            seconds = float(day["focus_seconds"])
+            height = 7 if seconds <= 0.0 else max(
+                12,
+                round(158 * seconds / maximum),
+            )
+            bar_heights.append(height)
+            rect = self.pygame.Rect(
+                (x - 14) * scale,
+                (baseline - height) * scale,
+                28 * scale,
+                height * scale,
+            )
+            color = (
+                (241, 105, 91, 245)
+                if index == len(seven_days) - 1
+                else (151, 57, 57, 230)
+            )
+            if seconds <= 0.0:
+                color = (34, 72, 82, 220)
+            self.pygame.draw.rect(
+                chart,
+                color,
+                rect,
+                border_radius=14 * scale,
+            )
+        chart = self.pygame.transform.smoothscale(
+            chart,
+            (chart_width_native, chart_height_native),
+        )
+        self.screen.blit(chart, (chart_left, chart_top))
+        if recorded_maximum <= 0.0:
+            self.draw_pomodoro_mark((400, 438), 30, "focus")
+            self.draw_centered_text(
+                "开始一次专注后，这里会出现趋势",
+                self.font_small,
+                (82, 133, 144),
+                (400, 492),
+            )
+        for x, height, day in zip(bar_positions, bar_heights, seven_days):
+            minutes = round(float(day["focus_seconds"]) / 60.0)
+            if minutes > 0:
+                self.draw_centered_text(
+                    str(minutes),
+                    self.font_small,
+                    (150, 190, 199),
+                    (chart_left + x, chart_top + baseline - height - 18),
+                )
+            self.draw_centered_text(
+                str(day["weekday"]),
+                self.font_small,
+                (100, 145, 156),
+                (chart_left + x, chart_top + 220),
+            )
+        self.draw_centered_text(
+            "向右滑返回今日",
+            self.font_small,
+            (67, 108, 119),
+            (400, 674),
+        )
+
+    def draw_pomodoro_statistics_page(
+        self,
+        now: float,
+        page: int | None = None,
+    ) -> None:
+        del now
+        selected_page = (
+            self.pomodoro_statistics_page if page is None else int(page)
+        )
+        statistics = self.pomodoro.statistics_snapshot()
+        if selected_page == 0:
+            self.draw_pomodoro_statistics_chrome("专注统计", 0)
+            self.draw_pomodoro_today_statistics(statistics)
+        else:
+            self.draw_pomodoro_statistics_chrome("近 7 天", 1)
+            self.draw_pomodoro_week_statistics(statistics)
+
+    def render_pomodoro_surface(
+        self,
+        now: float | None = None,
+        *,
+        statistics: bool | None = None,
+        statistics_page: int | None = None,
+    ) -> object:
+        surface = self.pygame.Surface(self.target_size)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        original_target = self.pomodoro_pointer_target
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            self.pomodoro_pointer_target = None
+            render_now = time.monotonic() if now is None else now
+            show_statistics = (
+                self.pomodoro_statistics_active
+                if statistics is None
+                else bool(statistics)
+            )
+            if show_statistics:
+                self.draw_pomodoro_statistics_page(
+                    render_now,
+                    page=statistics_page,
+                )
+            else:
+                self.draw_pomodoro_page(render_now)
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+            self.pomodoro_pointer_target = original_target
+        return surface
+
+    def draw_pomodoro(self, now: float) -> None:
+        if not self.pomodoro_transition_active:
+            if self.pomodoro_statistics_active:
+                self.draw_pomodoro_statistics_page(now)
+            else:
+                self.draw_pomodoro_page(now)
+            return
+        source = self.pomodoro_transition_source
+        target = self.pomodoro_transition_target
+        if source is None or target is None:
+            self.pomodoro_transition_active = False
+            if self.pomodoro_statistics_active:
+                self.draw_pomodoro_statistics_page(now)
+            else:
+                self.draw_pomodoro_page(now)
+            return
+        raw = min(
+            1.0,
+            max(
+                0.0,
+                (now - self.pomodoro_transition_started_at)
+                / self.pomodoro_transition_seconds,
+            ),
+        )
+        if raw >= 1.0:
+            self.screen.blit(target, (0, 0))
+            self.pomodoro_transition_active = False
+            self.pomodoro_transition_source = None
+            self.pomodoro_transition_target = None
+            if self.pomodoro_transition_exits_page:
+                self.pomodoro_active = False
+                self.pomodoro_statistics_active = False
+                self.pomodoro_statistics_page = 0
+                self.pomodoro_pointer_target = None
+                self.complete_application_menu_return(now)
+                self.note_screensaver_activity(now)
+                log("pomodoro page exit transition completed")
+            self.pomodoro_transition_exits_page = False
+            self.write_state()
+            return
+        eased = 1.0 - (1.0 - raw) ** 3
+        direction = 1 if self.pomodoro_transition_opening else -1
+        travel = self.width
+        source_x = -round(direction * travel * eased)
+        target_x = round(direction * travel * (1.0 - eased))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(source, (source_x, 0))
+        self.screen.blit(target, (target_x, 0))
+
+    def request_performance_refresh(self, now: float | None = None) -> bool:
+        requested_at = time.monotonic() if now is None else now
+        if self.performance_future is not None:
+            return False
+        self.performance_future = self.performance_executor.submit(
+            self.performance_monitor.collect
+        )
+        self.performance_next_update_at = (
+            requested_at + self.performance_refresh_seconds
+        )
+        return True
+
+    def update_performance_async(self, now: float) -> bool:
+        changed = False
+        if self.performance_future is not None and self.performance_future.done():
+            try:
+                snapshot = self.performance_future.result()
+                changed = snapshot != self.performance_snapshot
+                self.performance_snapshot = snapshot
+                if (
+                    changed
+                    and self.performance_transition_active
+                    and self.performance_transition_opening
+                ):
+                    self.performance_transition_target = (
+                        self.render_performance_surface(now)
+                    )
+            except Exception as exc:
+                log(f"performance snapshot warning: {exc}")
+            finally:
+                self.performance_future = None
+                self.performance_next_update_at = (
+                    now + self.performance_refresh_seconds
+                )
+        if (
+            self.performance_active
+            and self.performance_future is None
+            and now >= self.performance_next_update_at
+        ):
+            self.request_performance_refresh(now)
+        return changed
+
+    def performance_background_surface(self) -> object:
+        if self.performance_static_surface is not None:
+            return self.performance_static_surface
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (self.width * scale, self.height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 255))
+
+        def scaled_rect(rect: tuple[int, int, int, int]) -> object:
+            return self.pygame.Rect(*(round(value * scale) for value in rect))
+
+        for rect in (
+            (110, 184, 580, 128),
+            (110, 328, 580, 110),
+            (110, 454, 580, 110),
+            (118, 585, 174, 88),
+            (313, 585, 174, 88),
+            (508, 585, 174, 88),
+        ):
+            target = scaled_rect(rect)
+            self.pygame.draw.rect(
+                high,
+                (5, 19, 27, 246),
+                target,
+                border_radius=round(24 * scale),
+            )
+            self.pygame.draw.rect(
+                high,
+                (25, 79, 94, 176),
+                target,
+                width=max(1, round(1.25 * scale)),
+                border_radius=round(24 * scale),
+            )
+        self.pygame.draw.circle(
+            high,
+            (22, 81, 98, 88),
+            (self.width * scale // 2, self.height * scale // 2),
+            round((min(self.width, self.height) // 2 - 10) * scale),
+            width=max(1, round(2 * scale)),
+        )
+        self.performance_static_surface = self.pygame.transform.smoothscale(
+            high,
+            self.target_size,
+        )
+        return self.performance_static_surface
+
+    @staticmethod
+    def performance_accent(percent: float) -> tuple[int, int, int]:
+        if percent >= 90.0:
+            return 255, 91, 91
+        if percent >= 75.0:
+            return 255, 177, 79
+        return 63, 211, 239
+
+    def draw_performance_bar(
+        self,
+        start: tuple[int, int],
+        end_x: int,
+        percent: float,
+        color: tuple[int, int, int],
+    ) -> None:
+        self.draw_aa_round_line(
+            self.screen,
+            (21, 51, 61, 255),
+            start,
+            (end_x, start[1]),
+            10,
+        )
+        fraction = max(0.0, min(float(percent) / 100.0, 1.0))
+        if fraction > 0.001:
+            self.draw_aa_round_line(
+                self.screen,
+                (*color, 255),
+                start,
+                (start[0] + (end_x - start[0]) * fraction, start[1]),
+                10,
+            )
+
+    def draw_performance_page(self, now: float) -> None:
+        if self.performance_section == "system":
+            self.draw_performance_health_page(now)
+            return
+        del now
+        snapshot = self.performance_snapshot
+        self.screen.blit(self.performance_background_surface(), (0, 0))
+        self.draw_gallery_back_button()
+        self.draw_centered_text(
+            "性能",
+            self.font_large,
+            (226, 245, 249),
+            (400, 105),
+        )
+        live_color = (92, 237, 164) if snapshot.sampled_at else (94, 139, 151)
+        self.draw_centered_text(
+            "● LIVE  1s",
+            self.font_status,
+            live_color,
+            (400, 143),
+        )
+
+        cpu_color = self.performance_accent(snapshot.cpu_percent)
+        cpu_label = self.font_status.render("CPU", True, (111, 181, 199))
+        self.screen.blit(cpu_label, (145, 203))
+        cpu_value = self.font_performance_value.render(
+            f"{snapshot.cpu_percent:4.1f}%",
+            True,
+            cpu_color,
+        )
+        self.screen.blit(cpu_value, cpu_value.get_rect(topright=(655, 194)))
+        detail = self.font_status.render(
+            f"{snapshot.cpu_temp_c:.0f}°C   {snapshot.cpu_freq_mhz / 1000.0:.2f} GHz   LOAD {snapshot.load_1:.2f}",
+            True,
+            (176, 210, 219),
+        )
+        self.screen.blit(detail, (145, 245))
+        self.draw_performance_bar((145, 288), 655, snapshot.cpu_percent, cpu_color)
+
+        memory_color = self.performance_accent(snapshot.memory_percent)
+        memory_label = self.font_status.render("MEMORY", True, (111, 181, 199))
+        self.screen.blit(memory_label, (145, 349))
+        memory_value = self.font_performance_value.render(
+            f"{snapshot.memory_percent:4.1f}%",
+            True,
+            memory_color,
+        )
+        self.screen.blit(memory_value, memory_value.get_rect(topright=(655, 340)))
+        memory_detail = self.font_status.render(
+            f"{format_bytes(snapshot.memory_used_bytes)} / {format_bytes(snapshot.memory_total_bytes)}",
+            True,
+            (151, 193, 205),
+        )
+        self.screen.blit(memory_detail, (145, 382))
+        self.draw_performance_bar((145, 417), 655, snapshot.memory_percent, memory_color)
+
+        disk_color = self.performance_accent(snapshot.disk_percent)
+        disk_label = self.font_status.render("NVME", True, (111, 181, 199))
+        self.screen.blit(disk_label, (145, 475))
+        disk_value = self.font_performance_value.render(
+            f"{snapshot.disk_percent:4.1f}%",
+            True,
+            disk_color,
+        )
+        self.screen.blit(disk_value, disk_value.get_rect(topright=(655, 466)))
+        disk_detail = self.font_status.render(
+            f"{format_bytes(snapshot.disk_used_bytes)} / {format_bytes(snapshot.disk_total_bytes)}",
+            True,
+            (151, 193, 205),
+        )
+        self.screen.blit(disk_detail, (145, 508))
+        self.draw_performance_bar((145, 543), 655, snapshot.disk_percent, disk_color)
+
+        hailo_state = (
+            "ACTIVE" if snapshot.hailo_active else "READY" if snapshot.hailo_ready else "OFFLINE"
+        )
+        hailo_color = (
+            (113, 245, 158)
+            if snapshot.hailo_ready
+            else (255, 111, 111)
+        )
+        self.draw_centered_text("HAILO-8", self.font_status, (103, 164, 181), (205, 611))
+        self.draw_centered_text(hailo_state, self.font_status, hailo_color, (205, 647))
+
+        self.draw_centered_text("NETWORK", self.font_status, (103, 164, 181), (400, 611))
+        network_text = (
+            f"↓{format_bytes(snapshot.network_rx_bps, per_second=True).replace(' ', '')} "
+            f"↑{format_bytes(snapshot.network_tx_bps, per_second=True).replace(' ', '')}"
+        )
+        network_surface = self.font_status.render(network_text, True, (189, 224, 232))
+        if network_surface.get_width() > 154:
+            network_surface = self.pygame.transform.smoothscale(
+                network_surface,
+                (154, network_surface.get_height()),
+            )
+        self.screen.blit(network_surface, network_surface.get_rect(center=(400, 647)))
+
+        health_ok = (
+            snapshot.health_total_count > 0
+            and snapshot.health_healthy_count == snapshot.health_total_count
+        )
+        self.draw_centered_text("SYSTEM", self.font_status, (103, 164, 181), (595, 611))
+        self.draw_centered_text(
+            f"{snapshot.health_healthy_count}/{snapshot.health_total_count}  ›",
+            self.font_status,
+            (113, 245, 158) if health_ok else (255, 177, 79),
+            (595, 647),
+        )
+
+        footer = (
+            f"DSI {self.display_refresh_hz:.1f} Hz  •  RSS {format_bytes(snapshot.process_rss_bytes)}"
+            f"  •  UP {self.format_uptime(snapshot.uptime_seconds)}"
+        )
+        self.draw_centered_text(
+            footer,
+            self.font_status,
+            (81, 139, 155),
+            (400, 708),
+        )
+
+    def performance_system_rect(self) -> object:
+        return self.pygame.Rect(508, 585, 174, 88)
+
+    def performance_health_checks(
+        self,
+    ) -> tuple[tuple[str, str, bool, str], ...]:
+        indexed = tuple(enumerate(self.system_status.health_checks))
+        return tuple(
+            record
+            for _index, record in sorted(
+                indexed,
+                key=lambda item: (item[1][2], item[0]),
+            )
+        )
+
+    def performance_health_viewport_rect(self) -> object:
+        return self.pygame.Rect(105, 178, 590, 448)
+
+    def performance_health_content_height(self) -> int:
+        count = len(self.performance_health_checks())
+        return max(1, count * 68 + max(0, count - 1) * 8)
+
+    def performance_health_max_scroll(self) -> float:
+        viewport = self.performance_health_viewport_rect()
+        return float(max(0, self.performance_health_content_height() - viewport.height))
+
+    def clamp_performance_health_scroll(self, value: float) -> float:
+        return max(0.0, min(float(value), self.performance_health_max_scroll()))
+
+    @staticmethod
+    def performance_health_detail_summary(detail: str) -> str:
+        value = str(detail or "").strip()
+        if not value:
+            return "检查未通过"
+        drift_match = re.search(r'"drift_count"\s*:\s*(\d+)', value)
+        if drift_match and int(drift_match.group(1)):
+            return f"{int(drift_match.group(1))} 项文件与正式基线不一致"
+        try:
+            payload = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            drift_count = int(payload.get("drift_count") or 0)
+            if drift_count:
+                return f"{drift_count} 项文件与正式基线不一致"
+            error = str(payload.get("error") or "").strip()
+            if error:
+                return error
+        replacements = {
+            "size_mismatch": "文件尺寸与正式基线不一致",
+            "sha256_mismatch": "文件内容校验不一致",
+            "missing": "必要文件缺失",
+        }
+        for marker, summary in replacements.items():
+            if marker in value:
+                return summary
+        return value
+
+    def performance_health_card_surface(
+        self,
+        size: tuple[int, int],
+        healthy: bool,
+    ) -> object:
+        key = (size, healthy)
+        cached = self.performance_health_card_cache.get(key)
+        if cached is not None:
+            return cached
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (size[0] * scale, size[1] * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        rect = high.get_rect()
+        fill = (5, 19, 27, 246) if healthy else (38, 23, 13, 250)
+        border = (25, 79, 94, 176) if healthy else (183, 104, 42, 220)
+        self.pygame.draw.rect(
+            high,
+            fill,
+            rect,
+            border_radius=20 * scale,
+        )
+        self.pygame.draw.rect(
+            high,
+            border,
+            rect,
+            width=max(1, round(1.25 * scale)),
+            border_radius=20 * scale,
+        )
+        surface = self.pygame.transform.smoothscale(high, size)
+        self.performance_health_card_cache[key] = surface
+        return surface
+
+    def performance_health_content_surface(self) -> object:
+        records = self.performance_health_checks()
+        cache_key = records
+        if (
+            self.performance_health_content_cache_surface is not None
+            and self.performance_health_content_cache_key == cache_key
+        ):
+            return self.performance_health_content_cache_surface
+        if (
+            self.performance_health_content_cache_key is not None
+            and self.performance_health_content_cache_key != cache_key
+        ):
+            # A newly failed or recovered item should be visible immediately.
+            self.performance_health_scroll_offset = 0.0
+            self.performance_health_scroll_start_offset = 0.0
+        viewport = self.performance_health_viewport_rect()
+        surface = self.pygame.Surface(
+            (viewport.width, self.performance_health_content_height()),
+            self.pygame.SRCALPHA,
+        )
+        surface.fill((0, 0, 0, 0))
+        height = 68
+        gap = 8
+        for index, (_check_id, name, healthy, detail) in enumerate(records):
+            rect = self.pygame.Rect(0, index * (height + gap), viewport.width, height)
+            surface.blit(
+                self.performance_health_card_surface(rect.size, healthy),
+                rect.topleft,
+            )
+            color = (92, 237, 164) if healthy else (255, 177, 79)
+            self.draw_aa_circle(
+                surface,
+                (*color, 255),
+                (rect.left + 27, rect.centery),
+                6,
+            )
+            if healthy:
+                name_surface = self.font_small.render(
+                    self.ellipsize_text(name, self.font_small, 410),
+                    True,
+                    (212, 235, 241),
+                )
+                surface.blit(
+                    name_surface,
+                    name_surface.get_rect(midleft=(rect.left + 49, rect.centery)),
+                )
+            else:
+                name_surface = self.font_small.render(
+                    self.ellipsize_text(name, self.font_small, 410),
+                    True,
+                    (236, 239, 238),
+                )
+                detail_surface = self.font_status.render(
+                    self.ellipsize_text(
+                        self.performance_health_detail_summary(detail),
+                        self.font_status,
+                        410,
+                    ),
+                    True,
+                    (205, 157, 112),
+                )
+                surface.blit(name_surface, (rect.left + 49, rect.top + 8))
+                surface.blit(detail_surface, (rect.left + 49, rect.top + 38))
+            state_surface = self.font_status.render(
+                "正常" if healthy else "异常",
+                True,
+                color,
+            )
+            surface.blit(
+                state_surface,
+                state_surface.get_rect(midright=(rect.right - 25, rect.centery)),
+            )
+        self.performance_health_content_cache_key = cache_key
+        self.performance_health_content_cache_surface = surface
+        return surface
+
+    def draw_performance_health_page(self, _now: float) -> None:
+        self.screen.blit(self.settings_background_surface(), (0, 0))
+        self.draw_gallery_back_button()
+        records = self.performance_health_checks()
+        healthy_count = sum(1 for _id, _name, healthy, _detail in records if healthy)
+        failed_count = len(records) - healthy_count
+        self.draw_centered_text(
+            "SYSTEM",
+            self.font_large,
+            (226, 245, 249),
+            (400, 92),
+        )
+        if records:
+            summary = (
+                f"{healthy_count}/{len(records)} 正常"
+                if not failed_count
+                else f"{healthy_count}/{len(records)} 正常  ·  {failed_count} 项异常"
+            )
+            summary_color = (113, 245, 158) if not failed_count else (255, 177, 79)
+        else:
+            summary = "正在读取检查结果"
+            summary_color = (111, 177, 195)
+        self.draw_centered_text(summary, self.font_status, summary_color, (400, 139))
+
+        if not records:
+            self.draw_centered_text(
+                "健康监控正在刷新…",
+                self.font_medium,
+                (151, 193, 205),
+                (400, 400),
+            )
+            return
+
+        viewport = self.performance_health_viewport_rect()
+        self.performance_health_scroll_offset = self.clamp_performance_health_scroll(
+            self.performance_health_scroll_offset
+        )
+        content = self.performance_health_content_surface()
+        source_area = self.pygame.Rect(
+            0,
+            round(self.performance_health_scroll_offset),
+            viewport.width,
+            min(viewport.height, content.get_height()),
+        )
+        self.screen.blit(content, viewport.topleft, source_area)
+
+        maximum_scroll = self.performance_health_max_scroll()
+        if maximum_scroll > 0:
+            track_top = viewport.top + 10
+            track_bottom = viewport.bottom - 10
+            track_height = track_bottom - track_top
+            thumb_height = max(
+                42,
+                round(track_height * viewport.height / content.get_height()),
+            )
+            thumb_travel = max(1, track_height - thumb_height)
+            thumb_top = track_top + round(
+                thumb_travel * self.performance_health_scroll_offset / maximum_scroll
+            )
+            self.draw_aa_round_line(
+                self.screen,
+                (30, 75, 88, 170),
+                (714, track_top),
+                (714, track_bottom),
+                4,
+            )
+            self.draw_aa_round_line(
+                self.screen,
+                (77, 199, 226, 235),
+                (714, thumb_top),
+                (714, thumb_top + thumb_height),
+                5,
+            )
+        self.draw_centered_text(
+            f"上下滑动查看 {len(records)} 项检查  ·  右滑返回",
+            self.font_status,
+            (81, 139, 155),
+            (400, 708),
+        )
+
+    def render_performance_surface(self, now: float | None = None) -> object:
+        surface = self.pygame.Surface(self.target_size)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        original_target = self.performance_pointer_target
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            self.performance_pointer_target = None
+            self.draw_performance_page(time.monotonic() if now is None else now)
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+            self.performance_pointer_target = original_target
+        return surface
+
+    def open_performance(self) -> None:
+        if self.performance_active:
+            return
+        now = time.monotonic()
+        self.performance_transition_source = self.screen.copy()
+        self.performance_active = True
+        self.performance_section = None
+        self.performance_health_scroll_offset = 0.0
+        self.performance_health_scroll_start_offset = 0.0
+        self.performance_pointer_target = None
+        self.performance_transition_active = True
+        self.performance_transition_opening = True
+        self.performance_transition_started_at = now
+        self.performance_transition_exits_page = False
+        self.request_performance_refresh(now)
+        self.performance_transition_target = self.render_performance_surface(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("performance page opened")
+
+    def close_performance(self, animated: bool = True) -> None:
+        if not self.performance_active:
+            return
+        now = time.monotonic()
+        return_target = self.prepare_application_menu_return(now)
+        self.performance_pointer_target = None
+        if animated:
+            self.performance_transition_source = self.screen.copy()
+            self.performance_transition_target = return_target
+            self.performance_transition_active = True
+            self.performance_transition_opening = False
+            self.performance_transition_started_at = now
+            self.performance_transition_exits_page = True
+        else:
+            self.performance_active = False
+            self.performance_section = None
+            self.performance_health_scroll_offset = 0.0
+            self.performance_health_scroll_start_offset = 0.0
+            self.performance_transition_active = False
+            self.performance_transition_source = None
+            self.performance_transition_target = None
+            self.performance_transition_exits_page = False
+            self.complete_application_menu_return(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("performance page close requested")
+
+    def performance_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, self.pomodoro_back_center()) <= 50:
+            return "back"
+        if (
+            self.performance_section is None
+            and self.performance_system_rect().collidepoint(position)
+        ):
+            return "system"
+        return None
+
+    def start_performance_section_transition(
+        self,
+        section: str | None,
+        direction: int,
+    ) -> bool:
+        if self.performance_transition_active:
+            return False
+        self.performance_transition_source = self.screen.copy()
+        self.performance_section = section
+        if section is None:
+            self.performance_health_scroll_offset = 0.0
+            self.performance_health_scroll_start_offset = 0.0
+        self.performance_transition_target = self.render_performance_surface()
+        self.performance_transition_active = True
+        self.performance_transition_opening = direction >= 0
+        self.performance_transition_started_at = time.monotonic()
+        self.performance_transition_exits_page = False
+        self.performance_pointer_target = None
+        self.needs_redraw = True
+        self.write_state()
+        return True
+
+    def draw_performance(self, now: float) -> None:
+        if not self.performance_transition_active:
+            self.draw_performance_page(now)
+            return
+        source = self.performance_transition_source
+        target = self.performance_transition_target
+        if source is None or target is None:
+            self.performance_transition_active = False
+            self.draw_performance_page(now)
+            return
+        raw = min(
+            1.0,
+            max(
+                0.0,
+                (now - self.performance_transition_started_at)
+                / self.performance_transition_seconds,
+            ),
+        )
+        if raw >= 1.0:
+            self.screen.blit(target, (0, 0))
+            self.performance_transition_active = False
+            self.performance_transition_source = None
+            self.performance_transition_target = None
+            if self.performance_transition_exits_page:
+                self.performance_active = False
+                self.performance_section = None
+                self.performance_health_scroll_offset = 0.0
+                self.performance_health_scroll_start_offset = 0.0
+                self.performance_pointer_target = None
+                self.complete_application_menu_return(now)
+                log("performance page exit transition completed")
+            self.performance_transition_exits_page = False
+            self.write_state()
+            return
+        eased = 1.0 - (1.0 - raw) ** 3
+        direction = 1 if self.performance_transition_opening else -1
+        travel = self.width
+        source_x = -round(direction * travel * eased)
+        target_x = round(direction * travel * (1.0 - eased))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(source, (source_x, 0))
+        self.screen.blit(target, (target_x, 0))
+
+    @staticmethod
+    def decode_music_artwork(path: str) -> tuple[str, bytes, tuple[int, int]]:
+        resampling = getattr(Image, "Resampling", Image)
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image = ImageOps.fit(
+                image,
+                (520, 520),
+                method=resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            ).convert("RGBA")
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).ellipse((2, 2, 517, 517), fill=255)
+        image.putalpha(mask)
+        return path, image.tobytes(), image.size
+
+    def request_music_artwork(self) -> bool:
+        track = self.music_player.current_track
+        artwork_path = track.artwork_path if track is not None else ""
+        if not artwork_path:
+            changed = self.music_artwork_surface is not None
+            self.music_artwork_surface = None
+            self.music_artwork_requested_path = None
+            if changed:
+                self.needs_redraw = True
+            return changed
+        cached = self.music_artwork_cache.get(artwork_path)
+        if cached is not None:
+            changed = self.music_artwork_surface is not cached
+            self.music_artwork_cache.move_to_end(artwork_path)
+            self.music_artwork_surface = cached
+            self.music_artwork_requested_path = artwork_path
+            if changed:
+                self.needs_redraw = True
+            return changed
+        desired_changed = self.music_artwork_requested_path != artwork_path
+        if desired_changed:
+            self.music_artwork_surface = None
+            self.music_artwork_requested_path = artwork_path
+        if artwork_path in self.music_artwork_failed_paths:
+            return desired_changed
+        if self.music_artwork_future is not None:
+            return desired_changed
+        self.music_artwork_future = self.music_executor.submit(
+            self.decode_music_artwork,
+            artwork_path,
+        )
+        self.music_artwork_future_path = artwork_path
+        return desired_changed
+
+    def update_music_artwork(self) -> bool:
+        changed = False
+        if self.music_artwork_future is not None and self.music_artwork_future.done():
+            try:
+                path, pixels, size = self.music_artwork_future.result()
+                high = self.pygame.image.fromstring(pixels, size, "RGBA")
+                surface = self.pygame.transform.smoothscale(high, (260, 260))
+                self.music_artwork_cache[path] = surface
+                self.music_artwork_cache.move_to_end(path)
+                while len(self.music_artwork_cache) > self.music_artwork_cache_limit:
+                    self.music_artwork_cache.popitem(last=False)
+            except Exception as exc:
+                if self.music_artwork_future_path:
+                    self.music_artwork_failed_paths.add(self.music_artwork_future_path)
+                log(f"music artwork decode warning: {exc}")
+            finally:
+                self.music_artwork_future = None
+                self.music_artwork_future_path = None
+            changed = True
+        if self.request_music_artwork():
+            changed = True
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def load_music_preferences(self) -> None:
+        try:
+            payload = json.loads(MUSIC_PREFERENCES_PATH.read_text(encoding="utf-8"))
+            self.music_lyrics_enabled = bool(payload.get("lyrics_enabled", True))
+            self.music_player.set_playback_mode(
+                str(payload.get("playback_mode", PLAYBACK_MODE_LIST_LOOP))
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            self.music_lyrics_enabled = True
+            self.music_player.set_playback_mode(PLAYBACK_MODE_LIST_LOOP)
+
+    def save_music_preferences(self) -> None:
+        try:
+            MUSIC_PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            temporary = MUSIC_PREFERENCES_PATH.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "lyrics_enabled": self.music_lyrics_enabled,
+                        "playback_mode": self.music_player.playback_mode,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, MUSIC_PREFERENCES_PATH)
+        except OSError as exc:
+            log(f"music preference save warning: {exc}")
+
+    def set_music_playback_mode(self, mode: str) -> bool:
+        if not self.music_player.set_playback_mode(mode):
+            return False
+        self.save_music_preferences()
+        self.music_lyrics_notice = self.music_playback_mode_label(
+            self.music_player.playback_mode
+        )
+        self.music_lyrics_notice_until = time.monotonic() + 1.6
+        self.needs_redraw = True
+        return True
+
+    def set_music_lyrics_enabled(self, enabled: bool) -> bool:
+        self.music_lyrics_enabled = bool(enabled)
+        self.save_music_preferences()
+        if self.music_lyrics_enabled and not self.music_lyrics:
+            self.music_lyrics_notice = "主页歌词已开启 · 当前曲目暂无歌词"
+        else:
+            self.music_lyrics_notice = (
+                "主页歌词已开启"
+                if self.music_lyrics_enabled
+                else "主页歌词已关闭"
+            )
+        self.music_lyrics_notice_until = time.monotonic() + 1.8
+        self.needs_redraw = True
+        return True
+
+    def refresh_music_lyrics(self, now: float, *, force: bool = False) -> bool:
+        track = self.music_player.current_track
+        track_path = track.path if track is not None else None
+        if not force and track_path == self.music_lyrics_track_path:
+            return False
+        previous_path = self.music_lyrics_track_path
+        self.music_lyrics_track_path = track_path
+        self.music_lyrics_path = sidecar_lyrics_path(track) if track is not None else None
+        self.music_lyrics = (
+            parse_lrc(self.music_lyrics_path) if self.music_lyrics_path is not None else []
+        )
+        self.music_lyric_index = lyric_index_at(
+            self.music_lyrics,
+            self.music_player.elapsed(now),
+        )
+        self.music_lyric_previous_index = self.music_lyric_index
+        self.music_lyric_changed_at = now
+        self.music_lyric_direction = 1
+        if track_path != previous_path:
+            self.music_center_mode = "artwork"
+            self.music_center_previous_mode = "artwork"
+            self.music_center_transition_active = False
+            log(
+                "music lyrics changed "
+                f"available={bool(self.music_lyrics)} lines={len(self.music_lyrics)} "
+                f"track={track.title if track is not None else 'none'}"
+            )
+        self.needs_redraw = True
+        return True
+
+    def update_music_lyrics(self, now: float) -> bool:
+        changed = self.update_automatic_lyrics_search(now)
+        if self.refresh_music_lyrics(now):
+            changed = True
+        if self.music_lyrics_notice_until and now >= self.music_lyrics_notice_until:
+            self.music_lyrics_notice_until = 0.0
+            self.music_lyrics_notice = ""
+            changed = True
+        if not self.music_lyrics:
+            return changed
+        index = lyric_index_at(self.music_lyrics, self.music_player.elapsed(now))
+        if index != self.music_lyric_index:
+            self.music_lyric_previous_index = self.music_lyric_index
+            self.music_lyric_direction = 1 if index >= self.music_lyric_index else -1
+            self.music_lyric_index = index
+            self.music_lyric_changed_at = now
+            changed = True
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def request_automatic_lyrics_search(
+        self,
+        *,
+        trigger: str = "playback-monitor",
+    ) -> bool:
+        track = self.music_player.current_track
+        if (
+            track is None
+            or self.music_player.status != "playing"
+            or self.music_lyrics
+            or self.music_lyrics_fetch_future is not None
+            or track.path in self.music_lyrics_search_attempted
+        ):
+            return False
+        local_path = sidecar_lyrics_path(track)
+        if local_path is not None:
+            self.refresh_music_lyrics(time.monotonic(), force=True)
+            self.music_lyrics_search_status = "local"
+            self.music_lyrics_search_trigger = trigger
+            log(
+                "automatic lyrics loaded from local file "
+                f"trigger={trigger} track={track.title}"
+            )
+            return True
+        self.music_lyrics_search_attempted.add(track.path)
+        self.music_lyrics_fetch_track_path = track.path
+        self.music_lyrics_search_status = "searching"
+        self.music_lyrics_search_error = ""
+        self.music_lyrics_search_trigger = trigger
+        self.music_lyrics_fetch_future = self.lyrics_executor.submit(
+            fetch_lrclib_lyrics,
+            track,
+        )
+        self.needs_redraw = True
+        log(
+            "automatic lyrics search started "
+            f"trigger={trigger} track={track.title}"
+        )
+        return True
+
+    def start_lyrics_search_for_playback(self, now: float, *, trigger: str) -> bool:
+        """Synchronize the track and enqueue lyric lookup as playback starts."""
+        changed = self.refresh_music_lyrics(now)
+        if self.music_player.status != "playing":
+            return changed
+        return self.request_automatic_lyrics_search(trigger=trigger) or changed
+
+    def update_automatic_lyrics_search(self, now: float) -> bool:
+        changed = False
+        future = self.music_lyrics_fetch_future
+        if future is not None and future.done():
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = LyricsFetchResult(
+                    self.music_lyrics_fetch_track_path or "",
+                    "error",
+                    error=str(exc),
+                )
+            self.music_lyrics_fetch_future = None
+            self.music_lyrics_fetch_track_path = None
+            self.music_lyrics_search_status = result.status
+            self.music_lyrics_search_error = result.error
+            current = self.music_player.current_track
+            if result.found and current is not None and result.track_path == current.path:
+                self.refresh_music_lyrics(now, force=True)
+                self.music_lyrics_notice = "已自动匹配同步歌词"
+                self.music_lyrics_notice_until = now + 1.8
+            elif result.status == "instrumental":
+                self.music_lyrics_notice = "纯音乐，无歌词"
+                self.music_lyrics_notice_until = now + 1.8
+            elif result.status == "not_found":
+                self.music_lyrics_notice = "未找到同步歌词"
+                self.music_lyrics_notice_until = now + 1.8
+            elif result.status == "rate_limited":
+                self.music_lyrics_notice = "歌词源暂时繁忙"
+                self.music_lyrics_notice_until = now + 1.8
+            if result.error:
+                log(
+                    "automatic lyrics search warning "
+                    f"status={result.status} error={result.error}"
+                )
+            else:
+                log(
+                    "automatic lyrics search completed "
+                    f"status={result.status} path={result.lyrics_path or 'none'}"
+                )
+            changed = True
+        if self.request_automatic_lyrics_search(trigger="playback-monitor"):
+            changed = True
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def music_lyrics_overlay_active(self, now: float) -> bool:
+        return bool(
+            self.music_lyrics_enabled
+            and self.music_lyrics
+            and self.music_lyric_index >= 0
+            and self.music_player.status in {"playing", "paused"}
+            and not self.music_active
+            and not self.performance_active
+            and not self.pomodoro_active
+            and not self.settings_active
+            and not self.camera_view_active
+            and not self.gallery_active
+            and not self.menu_active
+            and not self.token_popup_visible
+            and now >= self.status_visible_until
+            and self.speech_bubble_opacity(now) <= 0.0
+        )
+
+    def music_lyric_band_geometry(self) -> tuple[int, int, int, int]:
+        center_x = self.width / 2.0
+        center_y = round(self.height * 0.8)
+        half_height = 36
+        circle_radius = min(self.width, self.height) / 2.0 - 3.0
+        furthest_y = max(
+            abs(center_y - half_height - self.height / 2.0),
+            abs(center_y + half_height - self.height / 2.0),
+        )
+        half_chord = math.sqrt(max(0.0, circle_radius ** 2 - furthest_y ** 2))
+        left = math.ceil(center_x - half_chord) + 8
+        right = math.floor(center_x + half_chord) - 8
+        return left, right, center_y, half_height * 2
+
+    def music_marquee_surfaces(self, text: str) -> tuple[object, object]:
+        cleaned = " ".join(str(text).split())
+        cached = self.music_marquee_surface_cache.get(cleaned)
+        if cached is not None:
+            self.music_marquee_surface_cache.move_to_end(cleaned)
+            return cached
+        bright_high = self.font_music_lyric_current_high.render(
+            cleaned,
+            True,
+            (229, 248, 251),
+        )
+        shadow_high = self.font_music_lyric_current_high.render(
+            cleaned,
+            True,
+            (0, 0, 0),
+        )
+        target_size = (
+            max(1, round(bright_high.get_width() / UI_AA_SCALE)),
+            max(1, round(bright_high.get_height() / UI_AA_SCALE)),
+        )
+        bright = self.pygame.transform.smoothscale(bright_high, target_size)
+        shadow = self.pygame.transform.smoothscale(shadow_high, target_size)
+        shadow.set_alpha(210)
+        result = (bright, shadow)
+        self.music_marquee_surface_cache[cleaned] = result
+        self.music_marquee_surface_cache.move_to_end(cleaned)
+        while len(self.music_marquee_surface_cache) > self.music_marquee_surface_cache_limit:
+            self.music_marquee_surface_cache.popitem(last=False)
+        return result
+
+    def music_horizontal_fade_mask(
+        self,
+        width: int,
+        height: int,
+        fade_width: int,
+    ) -> object:
+        key = (width, height, fade_width)
+        cached = self.music_horizontal_fade_cache.get(key)
+        if cached is not None:
+            return cached
+        mask = self.pygame.Surface((width, height), self.pygame.SRCALPHA)
+        for x in range(width):
+            edge_distance = min(x, width - 1 - x)
+            ratio = max(0.0, min(edge_distance / max(1, fade_width), 1.0))
+            smooth = ratio * ratio * (3.0 - 2.0 * ratio)
+            alpha = round(255 * smooth)
+            self.pygame.draw.line(mask, (255, 255, 255, alpha), (x, 0), (x, height))
+        self.music_horizontal_fade_cache[key] = mask
+        return mask
+
+    def music_marquee_x(
+        self,
+        text_width: int,
+        left: int,
+        right: int,
+        now: float,
+    ) -> float:
+        available_width = max(1, right - left)
+        if text_width <= available_width:
+            return left + (available_width - text_width) / 2.0
+        overflow = text_width - available_width
+        hold = self.music_lyric_marquee_hold_seconds
+        travel = overflow / self.music_lyric_marquee_speed
+        cycle = hold + travel + hold + travel
+        line = self.music_lyrics[self.music_lyric_index]
+        line_elapsed = max(0.0, self.music_player.elapsed(now) - line.timestamp_seconds)
+        phase = line_elapsed % cycle
+        if phase < hold:
+            offset = 0.0
+        elif phase < hold + travel:
+            offset = (phase - hold) * self.music_lyric_marquee_speed
+        elif phase < hold + travel + hold:
+            offset = float(overflow)
+        else:
+            offset = overflow - (
+                phase - hold - travel - hold
+            ) * self.music_lyric_marquee_speed
+        return left - max(0.0, min(float(overflow), offset))
+
+    def draw_music_lyrics_overlay(self, now: float) -> None:
+        if not self.music_lyrics_overlay_active(now):
+            return
+        line = self.music_lyrics[self.music_lyric_index]
+        bright, shadow = self.music_marquee_surfaces(line.text)
+        left, right, center_y, band_height = self.music_lyric_band_geometry()
+        x = round(self.music_marquee_x(bright.get_width(), left, right, now))
+        y = center_y - bright.get_height() // 2
+        band_width = right - left
+        band = self.pygame.Surface((band_width, band_height), self.pygame.SRCALPHA)
+        local_y = y - (center_y - band_height // 2)
+        band.blit(shadow, (x - left + 2, local_y + 2))
+        band.blit(bright, (x - left, local_y))
+        band.blit(
+            self.music_horizontal_fade_mask(band_width, band_height, 56),
+            (0, 0),
+            special_flags=self.pygame.BLEND_RGBA_MULT,
+        )
+        self.screen.blit(band, (left, center_y - band_height // 2))
+
+    def request_music_scan(self) -> bool:
+        if self.music_scan_future is not None:
+            return False
+        self.music_scan_error = ""
+        self.music_scan_future = self.music_executor.submit(
+            scan_music_library,
+            self.music_player.library_dir,
+            self.music_ffprobe_command,
+            MUSIC_ARTWORK_CACHE_DIR,
+            self.music_ffmpeg_command,
+        )
+        self.needs_redraw = True
+        return True
+
+    def update_music(self, now: float) -> bool:
+        changed = False
+        if self.music_scan_future is not None and self.music_scan_future.done():
+            try:
+                tracks = self.music_scan_future.result()
+                self.music_player.set_library(tracks)
+                self.music_scan_completed = True
+                self.music_scan_error = ""
+                log(
+                    "music library scan completed "
+                    f"tracks={len(tracks)} path={self.music_player.library_dir}"
+                )
+                if self.music_autoplay_pending:
+                    self.music_autoplay_pending = False
+                    if self.music_player.play():
+                        log("music autoplay started after library scan")
+            except Exception as exc:
+                self.music_scan_error = str(exc)
+                self.music_scan_completed = True
+                self.music_autoplay_pending = False
+                log(f"music library scan warning: {exc}")
+            finally:
+                self.music_scan_future = None
+            self.refresh_music_lyrics(now, force=True)
+            if self.start_lyrics_search_for_playback(now, trigger="library-scan"):
+                changed = True
+            changed = True
+        if self.music_player.poll():
+            changed = True
+            self.refresh_music_lyrics(now, force=True)
+            if self.start_lyrics_search_for_playback(now, trigger="automatic-advance"):
+                changed = True
+            current = self.music_player.current_track
+            if self.music_player.status == "playing" and current is not None:
+                log(f"music track advanced title={current.title}")
+            else:
+                log("music playback completed")
+        if (
+            changed
+            and self.music_transition_active
+            and self.music_transition_opening
+        ):
+            self.music_transition_target = self.render_music_surface(now)
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def music_background_surface(self) -> object:
+        if self.music_static_surface is not None:
+            return self.music_static_surface
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (self.width * scale, self.height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 255))
+        center = (self.width * scale // 2, self.height * scale // 2)
+        self.pygame.draw.circle(
+            high,
+            (18, 74, 91, 96),
+            center,
+            round((min(self.width, self.height) // 2 - 10) * scale),
+            width=max(1, round(2 * scale)),
+        )
+        self.music_static_surface = self.pygame.transform.smoothscale(
+            high,
+            self.target_size,
+        )
+        return self.music_static_surface
+
+    def render_music_center_album_surface(self) -> object:
+        surface = self.pygame.Surface((270, 270), self.pygame.SRCALPHA)
+        self.draw_aa_circle(surface, (4, 20, 29, 255), (135, 135), 130)
+        if self.music_artwork_surface is not None:
+            surface.blit(self.music_artwork_surface, (5, 5))
+            return surface
+        note_color = (85, 216, 236, 255)
+        scale = UI_AA_SCALE
+        note = self.pygame.Surface(
+            (surface.get_width() * scale, surface.get_height() * scale),
+            self.pygame.SRCALPHA,
+        )
+
+        def scaled_points(points: tuple[tuple[int, int], ...]) -> list[tuple[int, int]]:
+            return [(x * scale, y * scale) for x, y in points]
+
+        # A broad, slightly bowed beam with substantial stems mirrors the
+        # reference double-note silhouette while remaining crisp on the DSI.
+        self.pygame.draw.polygon(
+            note,
+            note_color,
+            scaled_points(
+                (
+                    (88, 82),
+                    (109, 76),
+                    (134, 72),
+                    (160, 69),
+                    (184, 68),
+                    (184, 96),
+                    (160, 97),
+                    (134, 100),
+                    (109, 105),
+                    (88, 112),
+                )
+            ),
+        )
+        self.pygame.draw.rect(
+            note,
+            note_color,
+            self.pygame.Rect(88 * scale, 92 * scale, 21 * scale, 80 * scale),
+        )
+        self.pygame.draw.rect(
+            note,
+            note_color,
+            self.pygame.Rect(163 * scale, 83 * scale, 21 * scale, 76 * scale),
+        )
+        self.pygame.draw.ellipse(
+            note,
+            note_color,
+            self.pygame.Rect(61 * scale, 157 * scale, 55 * scale, 39 * scale),
+        )
+        self.pygame.draw.ellipse(
+            note,
+            note_color,
+            self.pygame.Rect(136 * scale, 144 * scale, 55 * scale, 39 * scale),
+        )
+        surface.blit(
+            self.pygame.transform.smoothscale(note, surface.get_size()),
+            (0, 0),
+        )
+        return surface
+
+    def music_player_lyrics_geometry(self) -> tuple[int, int, int, int]:
+        center_x = self.width / 2.0
+        center_y = self.height // 2
+        band_height = 180
+        circle_radius = min(self.width, self.height) / 2.0 - 3.0
+        furthest_y = band_height / 2.0
+        half_chord = math.sqrt(max(0.0, circle_radius ** 2 - furthest_y ** 2))
+        left = math.ceil(center_x - half_chord) + 12
+        right = math.floor(center_x + half_chord) - 12
+        return left, right, center_y, band_height
+
+    def music_player_lyric_surface(
+        self,
+        text: str,
+        *,
+        current: bool,
+        max_width: int,
+    ) -> object:
+        cleaned = " ".join(str(text).split())
+        key = (cleaned, current, max_width)
+        cached = self.music_player_lyric_surface_cache.get(key)
+        if cached is not None:
+            self.music_player_lyric_surface_cache.move_to_end(key)
+            return cached
+        font = (
+            self.font_music_player_lyric_current_high
+            if current
+            else self.font_music_player_lyric_muted_high
+        )
+        color = (229, 248, 251) if current else (103, 158, 172)
+        high = font.render(cleaned, True, color)
+        target_size = (
+            max(1, round(high.get_width() / UI_AA_SCALE)),
+            max(1, round(high.get_height() / UI_AA_SCALE)),
+        )
+        if target_size[0] > max_width:
+            ratio = max_width / target_size[0]
+            target_size = (max_width, max(1, round(target_size[1] * ratio)))
+        surface = self.pygame.transform.smoothscale(high, target_size)
+        self.music_player_lyric_surface_cache[key] = surface
+        self.music_player_lyric_surface_cache.move_to_end(key)
+        while (
+            len(self.music_player_lyric_surface_cache)
+            > self.music_player_lyric_surface_cache_limit
+        ):
+            self.music_player_lyric_surface_cache.popitem(last=False)
+        return surface
+
+    def draw_music_player_lyric_group(
+        self,
+        band: object,
+        index: int,
+        offset_y: float,
+        opacity: float,
+    ) -> None:
+        if opacity <= 0.0:
+            return
+        if not self.music_lyrics:
+            rendered = self.music_player_lyric_surface(
+                "暂无歌词",
+                current=True,
+                max_width=band.get_width() - 80,
+            )
+            rendered.set_alpha(round(255 * opacity))
+            band.blit(
+                rendered,
+                rendered.get_rect(
+                    center=(band.get_width() // 2, round(90 + offset_y))
+                ),
+            )
+            rendered.set_alpha(None)
+            return
+        active_index = max(0, min(index, len(self.music_lyrics) - 1))
+        for relative, center_y in ((-1, 40), (0, 90), (1, 140)):
+            line_index = active_index + relative
+            if not 0 <= line_index < len(self.music_lyrics):
+                continue
+            current = relative == 0
+            rendered = self.music_player_lyric_surface(
+                self.music_lyrics[line_index].text,
+                current=current,
+                max_width=band.get_width() - 72,
+            )
+            rendered.set_alpha(round(255 * opacity * (1.0 if current else 0.62)))
+            band.blit(
+                rendered,
+                rendered.get_rect(
+                    center=(band.get_width() // 2, round(center_y + offset_y))
+                ),
+            )
+            rendered.set_alpha(None)
+
+    def render_music_player_lyrics_band(self, now: float) -> tuple[object, tuple[int, int]]:
+        left, right, center_y, band_height = self.music_player_lyrics_geometry()
+        band_width = right - left
+        band = self.pygame.Surface((band_width, band_height), self.pygame.SRCALPHA)
+        active_index = max(0, self.music_lyric_index)
+        elapsed = max(0.0, now - self.music_lyric_changed_at)
+        transitioning = bool(
+            self.music_lyrics
+            and self.music_lyric_previous_index >= 0
+            and self.music_lyric_previous_index != self.music_lyric_index
+            and elapsed < self.music_lyric_scroll_seconds
+        )
+        if transitioning:
+            raw = min(1.0, elapsed / self.music_lyric_scroll_seconds)
+            eased = 1.0 - (1.0 - raw) ** 3
+            travel = 50.0 * self.music_lyric_direction
+            self.draw_music_player_lyric_group(
+                band,
+                self.music_lyric_previous_index,
+                -travel * eased,
+                1.0 - eased,
+            )
+            self.draw_music_player_lyric_group(
+                band,
+                active_index,
+                travel * (1.0 - eased),
+                eased,
+            )
+        else:
+            self.draw_music_player_lyric_group(band, active_index, 0.0, 1.0)
+        band.blit(
+            self.music_horizontal_fade_mask(band_width, band_height, 72),
+            (0, 0),
+            special_flags=self.pygame.BLEND_RGBA_MULT,
+        )
+        return band, (left, center_y - band_height // 2)
+
+    def draw_music_album_center(self, _now: float, opacity: float) -> None:
+        if opacity <= 0.0:
+            return
+        layer = self.pygame.Surface((300, 300), self.pygame.SRCALPHA)
+        layer.blit(self.render_music_center_album_surface(), (15, 15))
+        self.draw_aa_ring(layer, (44, 190, 220, 215), (150, 150), 132, 3)
+        layer.set_alpha(round(255 * opacity))
+        self.screen.blit(layer, (250, 155))
+
+    def draw_music_player_lyrics(self, now: float, opacity: float) -> None:
+        if opacity <= 0.0:
+            return
+        band, position = self.render_music_player_lyrics_band(now)
+        band.set_alpha(round(255 * opacity))
+        self.screen.blit(band, position)
+
+    def music_mode_opacity(self, mode: str, now: float) -> float:
+        if not self.music_center_transition_active:
+            return 1.0 if self.music_center_mode == mode else 0.0
+        elapsed = max(0.0, now - self.music_center_transition_started_at)
+        raw = min(1.0, elapsed / self.music_center_transition_seconds)
+        eased = raw * raw * (3.0 - 2.0 * raw)
+        if self.music_center_mode == mode:
+            return eased
+        if self.music_center_previous_mode == mode:
+            return 1.0 - eased
+        return 0.0
+
+    def toggle_music_center_mode(self, now: float | None = None) -> None:
+        changed_at = time.monotonic() if now is None else now
+        self.music_center_previous_mode = self.music_center_mode
+        self.music_center_mode = (
+            "lyrics" if self.music_center_mode == "artwork" else "artwork"
+        )
+        self.music_center_transition_active = True
+        self.music_center_transition_started_at = changed_at
+        self.needs_redraw = True
+
+    def draw_music_center(self, now: float) -> None:
+        if not self.music_center_transition_active:
+            if self.music_center_mode == "lyrics":
+                self.draw_music_player_lyrics(now, 1.0)
+            else:
+                self.draw_music_album_center(now, 1.0)
+            return
+        elapsed = max(0.0, now - self.music_center_transition_started_at)
+        raw = min(1.0, elapsed / self.music_center_transition_seconds)
+        if raw >= 1.0:
+            self.music_center_transition_active = False
+            if self.music_center_mode == "lyrics":
+                self.draw_music_player_lyrics(now, 1.0)
+            else:
+                self.draw_music_album_center(now, 1.0)
+            self.write_state()
+            return
+        eased = raw * raw * (3.0 - 2.0 * raw)
+        if self.music_center_previous_mode == "artwork":
+            self.draw_music_album_center(now, 1.0 - eased)
+        else:
+            self.draw_music_player_lyrics(now, 1.0 - eased)
+        if self.music_center_mode == "artwork":
+            self.draw_music_album_center(now, eased)
+        else:
+            self.draw_music_player_lyrics(now, eased)
+
+    @staticmethod
+    def format_music_time(seconds: float) -> str:
+        total = max(0, round(seconds))
+        return f"{total // 60}:{total % 60:02d}"
+
+    @staticmethod
+    def ellipsize_music_text(text: str, font: object, max_width: int) -> str:
+        cleaned = " ".join(str(text).split())
+        if font.size(cleaned)[0] <= max_width:
+            return cleaned
+        suffix = "…"
+        while cleaned and font.size(cleaned + suffix)[0] > max_width:
+            cleaned = cleaned[:-1]
+        return cleaned + suffix if cleaned else suffix
+
+    def music_control_centers(self) -> dict[str, tuple[int, int]]:
+        return {
+            "previous": (270, 632),
+            "toggle": (400, 632),
+            "next": (530, 632),
+            "lyrics": (545, 140),
+            "mode": (624, 140),
+        }
+
+    @staticmethod
+    def music_volume_geometry() -> tuple[tuple[int, int], int, float, float]:
+        return (400, 400), 348, -0.42, 0.55
+
+    def music_volume_percent_from_position(
+        self,
+        position: tuple[int, int],
+    ) -> int:
+        center, _, start_angle, end_angle = self.music_volume_geometry()
+        angle = math.atan2(position[1] - center[1], position[0] - center[0])
+        ratio = (end_angle - angle) / max(0.001, end_angle - start_angle)
+        return max(0, min(round(ratio * 100), 100))
+
+    def is_music_volume_position(self, position: tuple[int, int]) -> bool:
+        center, radius, start_angle, end_angle = self.music_volume_geometry()
+        dx = position[0] - center[0]
+        dy = position[1] - center[1]
+        pointer_radius = math.hypot(dx, dy)
+        angle = math.atan2(dy, dx)
+        return (
+            radius - 30 <= pointer_radius <= radius + 34
+            and start_angle - 0.08 <= angle <= end_angle + 0.08
+        )
+
+    def music_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, self.pomodoro_back_center()) <= 50:
+            return "back"
+        if self.is_music_volume_position(position):
+            return "volume"
+        for name, center in self.music_control_centers().items():
+            radius = 51 if name == "toggle" else (35 if name == "lyrics" else 42)
+            if math.dist(position, center) <= radius:
+                return name
+        if math.dist(position, (400, 305)) <= 132:
+            return "center"
+        if self.music_center_mode == "lyrics" or self.music_center_transition_active:
+            left, right, center_y, band_height = self.music_player_lyrics_geometry()
+            if left <= position[0] <= right and (
+                center_y - band_height // 2
+                <= position[1]
+                <= center_y + band_height // 2
+            ):
+                return "center"
+        return None
+
+    def music_volume_expansion(self, now: float) -> float:
+        if self.music_volume_dragging:
+            raw = min(
+                1.0,
+                max(0.0, now - self.music_volume_interaction_started_at)
+                / self.music_volume_transition_seconds,
+            )
+            eased = raw * raw * (3.0 - 2.0 * raw)
+            return self.music_volume_expand_from + (
+                1.0 - self.music_volume_expand_from
+            ) * eased
+        if self.music_volume_last_interaction_at <= 0.0:
+            return 0.0
+        elapsed = max(0.0, now - self.music_volume_last_interaction_at)
+        if elapsed <= self.music_volume_idle_seconds:
+            return 1.0
+        raw = min(
+            1.0,
+            (elapsed - self.music_volume_idle_seconds)
+            / self.music_volume_transition_seconds,
+        )
+        eased = raw * raw * (3.0 - 2.0 * raw)
+        return 1.0 - eased
+
+    def draw_music_volume_control(self, now: float) -> None:
+        center, radius, start_angle, end_angle = self.music_volume_geometry()
+        percent = max(0, min(int(self.system_status.volume_percent), 100))
+        ratio = percent / 100.0
+        pressed = self.pointer_down and self.music_pointer_target == "volume"
+        active_angle = end_angle - (end_angle - start_angle) * ratio
+        knob_center = (
+            round(center[0] + math.cos(active_angle) * radius),
+            round(center[1] + math.sin(active_angle) * radius),
+        )
+
+        if (
+            self.music_volume_idle_surface_cache is None
+            or self.music_volume_idle_surface_cache_key != percent
+        ):
+            idle_layer = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
+            self.draw_capsule_arc(
+                idle_layer,
+                center,
+                radius - 2,
+                radius + 2,
+                start_angle,
+                end_angle,
+                (42, 112, 128, 205),
+                steps=44,
+                soft_edge=True,
+            )
+            self.draw_aa_circle(
+                idle_layer,
+                (102, 226, 244, 255),
+                knob_center,
+                7,
+            )
+            self.music_volume_idle_surface_cache_key = percent
+            self.music_volume_idle_surface_cache = idle_layer
+
+        cache_key = (percent, pressed)
+        if (
+            self.music_volume_expanded_surface_cache is None
+            or self.music_volume_expanded_surface_cache_key != cache_key
+        ):
+            expanded_layer = self.pygame.Surface(
+                self.target_size,
+                self.pygame.SRCALPHA,
+            )
+            self.draw_capsule_arc(
+                expanded_layer,
+                center,
+                radius - 19,
+                radius + 19,
+                start_angle,
+                end_angle,
+                (5, 27, 36, 246),
+                border=(18, 86, 103, 220),
+                border_width=2,
+                steps=48,
+                soft_edge=True,
+            )
+            self.draw_capsule_arc(
+                expanded_layer,
+                center,
+                radius - 4,
+                radius + 4,
+                start_angle,
+                end_angle,
+                (24, 72, 83, 255),
+                steps=44,
+                soft_edge=False,
+            )
+            if percent > 0:
+                self.draw_capsule_arc(
+                    expanded_layer,
+                    center,
+                    radius - 4,
+                    radius + 4,
+                    active_angle,
+                    end_angle,
+                    (56, 209, 235, 255),
+                    steps=44,
+                    soft_edge=True,
+                )
+            knob_color = (
+                (116, 237, 250, 255)
+                if pressed
+                else (221, 248, 251, 255)
+            )
+            self.draw_aa_circle(expanded_layer, knob_color, knob_center, 11)
+            self.draw_aa_circle(
+                expanded_layer,
+                (17, 82, 98, 255),
+                knob_center,
+                5,
+            )
+            self.music_volume_expanded_surface_cache_key = cache_key
+            self.music_volume_expanded_surface_cache = expanded_layer
+
+        expansion = max(0.0, min(self.music_volume_expansion(now), 1.0))
+        if expansion < 1.0 and self.music_volume_idle_surface_cache is not None:
+            self.music_volume_idle_surface_cache.set_alpha(
+                round(255 * (1.0 - expansion))
+            )
+            self.screen.blit(self.music_volume_idle_surface_cache, (0, 0))
+            self.music_volume_idle_surface_cache.set_alpha(None)
+        if expansion > 0.0 and self.music_volume_expanded_surface_cache is not None:
+            self.music_volume_expanded_surface_cache.set_alpha(round(255 * expansion))
+            self.screen.blit(self.music_volume_expanded_surface_cache, (0, 0))
+            self.music_volume_expanded_surface_cache.set_alpha(None)
+
+    def draw_music_transport_button(
+        self,
+        name: str,
+        center: tuple[int, int],
+        enabled: bool,
+    ) -> None:
+        pressed = self.pointer_down and self.music_pointer_target == name
+        outer = (47, 199, 226, 255) if enabled else (45, 72, 80, 220)
+        inner = (9, 39, 51, 255) if enabled else (6, 23, 31, 255)
+        if pressed and enabled:
+            inner = (20, 91, 110, 255)
+        radius = 47 if name == "toggle" else 38
+        self.draw_aa_circle(self.screen, outer, center, radius)
+        self.draw_aa_circle(self.screen, inner, center, radius - 3)
+        icon_color = (223, 247, 250, 255) if enabled else (76, 101, 108, 255)
+        x, y = center
+        if name == "toggle":
+            if self.music_player.status == "playing":
+                self.draw_aa_round_line(
+                    self.screen, icon_color, (x - 10, y - 14), (x - 10, y + 14), 7
+                )
+                self.draw_aa_round_line(
+                    self.screen, icon_color, (x + 10, y - 14), (x + 10, y + 14), 7
+                )
+            else:
+                self.draw_aa_polygon(
+                    self.screen,
+                    icon_color,
+                    ((x - 10, y - 17), (x - 10, y + 17), (x + 19, y)),
+                )
+            return
+        if name == "previous":
+            points = ((x + 12, y - 14), (x + 12, y + 14), (x - 12, y))
+            line_x = x - 16
+        else:
+            points = ((x - 12, y - 14), (x - 12, y + 14), (x + 12, y))
+            line_x = x + 16
+        self.draw_aa_polygon(self.screen, icon_color, points)
+        self.draw_aa_round_line(
+            self.screen,
+            icon_color,
+            (line_x, y - 14),
+            (line_x, y + 14),
+            5,
+        )
+
+    @staticmethod
+    def music_playback_mode_label(mode: str) -> str:
+        return {
+            PLAYBACK_MODE_LIST_LOOP: "列表循环",
+            PLAYBACK_MODE_SINGLE_REPEAT: "单曲循环",
+            PLAYBACK_MODE_SHUFFLE: "乱序播放",
+        }.get(mode, "列表循环")
+
+    def draw_music_playback_mode_button(self) -> None:
+        center = self.music_control_centers()["mode"]
+        pressed = self.pointer_down and self.music_pointer_target == "mode"
+        self.draw_aa_circle(self.screen, (38, 128, 151, 235), center, 37)
+        self.draw_aa_circle(
+            self.screen,
+            (11, 42, 53, 255) if not pressed else (20, 83, 100, 255),
+            center,
+            34,
+        )
+        color = (191, 237, 245, 255)
+        x, y = center
+        mode = self.music_player.playback_mode
+        if mode == PLAYBACK_MODE_SINGLE_REPEAT:
+            # RiverBank defines single-track looping as one continuous loop
+            # arrow.  Keep the arrowhead tangent to the stroke so it reads as
+            # one glyph—there is deliberately no numeral or second arrow.
+            radius = 17
+            stroke = 3
+            # Rotate the complete glyph 90° counter-clockwise so the gap no
+            # longer hollows out the top and the arrowhead stays clear of the
+            # camera privacy indicator at the button's right edge.
+            start_angle = math.radians(225)
+            end_angle = math.radians(488)
+            self.draw_aa_ring(
+                self.screen,
+                color,
+                center,
+                radius,
+                stroke,
+                start_angle=start_angle,
+                end_angle=end_angle,
+            )
+            start_point = (
+                round(x + math.cos(start_angle) * radius),
+                round(y - math.sin(start_angle) * radius),
+            )
+            self.draw_aa_circle(
+                self.screen,
+                color,
+                start_point,
+                math.ceil(stroke / 2),
+            )
+            end_point = (
+                x + math.cos(end_angle) * radius,
+                y - math.sin(end_angle) * radius,
+            )
+            tangent = (-math.sin(end_angle), -math.cos(end_angle))
+            normal = (math.cos(end_angle), -math.sin(end_angle))
+            tip = (
+                round(end_point[0] + tangent[0] * 5),
+                round(end_point[1] + tangent[1] * 5),
+            )
+            base = (
+                end_point[0] - tangent[0] * 3,
+                end_point[1] - tangent[1] * 3,
+            )
+            self.draw_aa_polygon(
+                self.screen,
+                color,
+                (
+                    tip,
+                    (
+                        round(base[0] + normal[0] * 5),
+                        round(base[1] + normal[1] * 5),
+                    ),
+                    (
+                        round(base[0] - normal[0] * 5),
+                        round(base[1] - normal[1] * 5),
+                    ),
+                ),
+            )
+            return
+        if mode == PLAYBACK_MODE_SHUFFLE:
+            for start, joint, end in (
+                ((x - 17, y - 11), (x - 7, y - 11), (x + 9, y + 10)),
+                ((x - 17, y + 11), (x - 7, y + 11), (x + 9, y - 10)),
+            ):
+                self.draw_aa_round_line(self.screen, color, start, joint, 4)
+                self.draw_aa_round_line(self.screen, color, joint, end, 4)
+            self.draw_aa_polygon(
+                self.screen,
+                color,
+                ((x + 8, y - 16), (x + 20, y - 10), (x + 8, y - 4)),
+            )
+            self.draw_aa_polygon(
+                self.screen,
+                color,
+                ((x + 8, y + 4), (x + 20, y + 10), (x + 8, y + 16)),
+            )
+            return
+        for offset in (-11, 0, 11):
+            self.draw_aa_circle(self.screen, color, (x - 14, y + offset), 3)
+            self.draw_aa_round_line(
+                self.screen,
+                color,
+                (x - 5, y + offset),
+                (x + 17, y + offset),
+                4,
+            )
+
+    def draw_music_expression_lyrics_button(self) -> None:
+        """Draw the persistent toggle for lyrics on the expression desktop."""
+
+        center = self.music_control_centers()["lyrics"]
+        pressed = self.pointer_down and self.music_pointer_target == "lyrics"
+        selected = self.music_lyrics_enabled
+        outer = (49, 203, 229, 245) if selected else (27, 74, 86, 220)
+        inner = (16, 76, 91, 255) if selected else (5, 28, 35, 255)
+        if pressed:
+            inner = (24, 102, 120, 255)
+        self.draw_aa_circle(self.screen, outer, center, 32)
+        self.draw_aa_circle(self.screen, inner, center, 29)
+        glyph_high = self.font_music_lyric_toggle_high.render(
+            "词",
+            True,
+            (221, 246, 250) if selected else (83, 124, 134),
+        )
+        glyph = self.pygame.transform.smoothscale(
+            glyph_high,
+            (
+                max(1, glyph_high.get_width() // UI_AA_SCALE),
+                max(1, glyph_high.get_height() // UI_AA_SCALE),
+            ),
+        )
+        self.screen.blit(glyph, glyph.get_rect(center=center))
+
+    def draw_music_page(self, now: float) -> None:
+        snapshot = self.music_player.snapshot(now)
+        track = self.music_player.current_track
+        self.screen.blit(self.music_background_surface(), (0, 0))
+        self.draw_gallery_back_button()
+        self.draw_centered_text(
+            "音乐",
+            self.font_large,
+            (226, 245, 249),
+            (400, 105),
+        )
+        self.draw_music_expression_lyrics_button()
+        self.draw_music_playback_mode_button()
+
+        # Album artwork and synchronized lyrics cross-fade in the center region.
+        # The circular frame belongs to the album layer only; lyrics are borderless.
+        self.draw_music_center(now)
+
+        if track is None:
+            heading = "正在扫描音乐库" if self.music_scan_future is not None else "音乐库为空"
+            if self.music_scan_error:
+                heading = "音乐库读取失败"
+            self.draw_centered_text(
+                heading,
+                self.font_music_track,
+                (214, 239, 244),
+                (400, 470),
+            )
+            self.draw_centered_text(
+                "将音频放入 SSD / Music，长按模式按钮刷新",
+                self.font_small,
+                (105, 166, 180),
+                (400, 514),
+            )
+        else:
+            title = self.ellipsize_music_text(track.title, self.font_music_track, 500)
+            artist = self.ellipsize_music_text(
+                track.artist or "未知艺术家",
+                self.font_music_artist,
+                450,
+            )
+            artwork_opacity = self.music_mode_opacity("artwork", now)
+            if artwork_opacity > 0.0:
+                title_surface = self.font_music_track.render(
+                    title,
+                    True,
+                    (226, 245, 249),
+                )
+                artist_surface = self.font_music_artist.render(
+                    artist,
+                    True,
+                    (111, 177, 191),
+                )
+                layer_alpha = round(255 * artwork_opacity)
+                title_surface.set_alpha(layer_alpha)
+                artist_surface.set_alpha(layer_alpha)
+                self.screen.blit(
+                    title_surface,
+                    title_surface.get_rect(center=(400, 462)),
+                )
+                self.screen.blit(
+                    artist_surface,
+                    artist_surface.get_rect(center=(400, 497)),
+                )
+            self.draw_aa_round_line(
+                self.screen,
+                (23, 69, 80, 255),
+                (155, 539),
+                (645, 539),
+                8,
+            )
+            progress = float(snapshot["progress"])
+            if progress > 0.0:
+                progress_x = 155 + 490 * progress
+                self.draw_aa_round_line(
+                    self.screen,
+                    (55, 209, 235, 255),
+                    (155, 539),
+                    (progress_x, 539),
+                    8,
+                )
+            elapsed_text = self.font_status.render(
+                self.format_music_time(float(snapshot["elapsed_seconds"])),
+                True,
+                (101, 160, 173),
+            )
+            duration_text = self.font_status.render(
+                self.format_music_time(float(snapshot["duration_seconds"])),
+                True,
+                (101, 160, 173),
+            )
+            self.screen.blit(elapsed_text, (155, 552))
+            self.screen.blit(duration_text, (645 - duration_text.get_width(), 552))
+
+        self.draw_music_volume_control(now)
+
+        enabled = bool(self.music_player.tracks)
+        for name in ("previous", "toggle", "next"):
+            self.draw_music_transport_button(
+                name,
+                self.music_control_centers()[name],
+                enabled,
+            )
+        status_label = {
+            "playing": "正在播放",
+            "paused": "已暂停",
+            "stopped": "待播放",
+            "empty": "等待音乐",
+            "error": "播放失败",
+        }.get(self.music_player.status, self.music_player.status)
+        footer = f"{status_label}  ·  {len(self.music_player.tracks)} 首"
+        footer_color = (89, 148, 162)
+        if self.music_lyrics_notice and now < self.music_lyrics_notice_until:
+            footer = self.music_lyrics_notice
+            footer_color = (141, 201, 214)
+        self.draw_centered_text(
+            footer,
+            self.font_small,
+            footer_color,
+            (400, 715),
+        )
+
+    def render_music_surface(self, now: float | None = None) -> object:
+        surface = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        original_target = self.music_pointer_target
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            self.music_pointer_target = None
+            self.draw_music_page(time.monotonic() if now is None else now)
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+            self.music_pointer_target = original_target
+        return surface
+
+    def open_music(self) -> None:
+        if self.music_active:
+            return
+        now = time.monotonic()
+        self.music_transition_source = self.screen.copy()
+        self.music_active = True
+        self.music_pointer_target = None
+        self.music_volume_dragging = False
+        self.music_volume_interaction_started_at = 0.0
+        self.music_volume_last_interaction_at = 0.0
+        self.music_volume_expand_from = 0.0
+        self.music_transition_active = True
+        self.music_transition_opening = True
+        self.music_transition_started_at = now
+        self.music_transition_exits_page = False
+        self.request_music_scan()
+        self.request_system_status_refresh(now)
+        self.music_transition_target = self.render_music_surface(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("music page opened")
+
+    def close_music(self, animated: bool = True) -> None:
+        if not self.music_active:
+            return
+        now = time.monotonic()
+        return_target = self.prepare_application_menu_return(now)
+        self.music_pointer_target = None
+        self.music_volume_dragging = False
+        self.music_volume_interaction_started_at = 0.0
+        self.music_volume_last_interaction_at = 0.0
+        self.music_volume_expand_from = 0.0
+        if animated:
+            self.music_transition_source = self.screen.copy()
+            self.music_transition_target = return_target
+            self.music_transition_active = True
+            self.music_transition_opening = False
+            self.music_transition_started_at = now
+            self.music_transition_exits_page = True
+        else:
+            self.music_active = False
+            self.music_transition_active = False
+            self.music_transition_source = None
+            self.music_transition_target = None
+            self.music_transition_exits_page = False
+            self.complete_application_menu_return(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("music page close requested")
+
+    def handle_music_target(self, target: str | None) -> None:
+        if target == "back":
+            self.close_music(animated=True)
+        elif target == "refresh":
+            if self.request_music_scan():
+                self.music_lyrics_notice = "正在刷新音乐库"
+                self.music_lyrics_notice_until = time.monotonic() + 2.0
+        elif target == "mode":
+            mode = self.music_player.cycle_playback_mode()
+            self.set_music_playback_mode(mode)
+        elif target == "lyrics":
+            self.set_music_lyrics_enabled(not self.music_lyrics_enabled)
+        elif target == "center":
+            self.toggle_music_center_mode()
+        elif target == "toggle":
+            self.music_player.toggle()
+        elif target == "previous":
+            self.music_player.previous()
+        elif target == "next":
+            self.music_player.next()
+        else:
+            return
+        if target in {"toggle", "previous", "next"}:
+            self.start_lyrics_search_for_playback(
+                time.monotonic(),
+                trigger=f"control-{target}",
+            )
+        self.needs_redraw = True
+        self.write_state()
+        log(f"music control target={target} status={self.music_player.status}")
+
+    def draw_music(self, now: float) -> None:
+        if not self.music_transition_active:
+            self.draw_music_page(now)
+            return
+        source = self.music_transition_source
+        target = self.music_transition_target
+        if source is None or target is None:
+            self.music_transition_active = False
+            self.draw_music_page(now)
+            return
+        raw = min(
+            1.0,
+            max(
+                0.0,
+                (now - self.music_transition_started_at)
+                / self.music_transition_seconds,
+            ),
+        )
+        if raw >= 1.0:
+            self.screen.blit(target, (0, 0))
+            self.music_transition_active = False
+            self.music_transition_source = None
+            self.music_transition_target = None
+            if self.music_transition_exits_page:
+                self.music_active = False
+                self.music_pointer_target = None
+                self.complete_application_menu_return(now)
+                log("music page exit transition completed")
+            self.music_transition_exits_page = False
+            if self.music_lyrics_overlay_active(now):
+                self.draw_music_lyrics_overlay(now)
+            self.write_state()
+            return
+        eased = 1.0 - (1.0 - raw) ** 3
+        direction = 1 if self.music_transition_opening else -1
+        travel = self.width
+        source_x = -round(direction * travel * eased)
+        target_x = round(direction * travel * (1.0 - eased))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(source, (source_x, 0))
+        self.screen.blit(target, (target_x, 0))
+
     def draw(self) -> None:
         render_started = time.perf_counter()
         now = time.monotonic()
         if self.boot_active:
             self.screen.fill((0, 0, 0))
             self.draw_boot_animation(now)
+        elif self.pomodoro_completion_alert_active:
+            self.draw_pomodoro_completion_alert()
         elif self.screensaver_active:
             self.draw_screensaver()
+        elif self.video_call_active:
+            self.draw_video_call(now)
+        elif self.music_active:
+            self.draw_music(now)
+        elif self.performance_active:
+            self.draw_performance(now)
+        elif self.pomodoro_active:
+            self.draw_pomodoro(now)
         elif self.settings_active:
             self.draw_settings(now)
         else:
@@ -2725,22 +6997,40 @@ class PersistentExpressionDisplay:
                     self.draw_token_popup()
             elif self.pointer_down and not self.gallery_active:
                 self.draw_hold_progress(now)
-            if (
-                self.camera_indicator_active()
-                and not self.menu_active
-                and not self.token_popup_visible
-                and now >= self.status_visible_until
-            ):
-                # The panel is physically circular. Keep the compact indicator on the
-                # visible upper-right arc instead of placing it in a clipped corner.
-                self.draw_camera_indicator(
+        if (
+            not self.pomodoro_completion_alert_active
+            and self.music_lyrics_overlay_active(now)
+        ):
+            self.draw_music_lyrics_overlay(now)
+        indicator_mode = self.activity_indicator_mode()
+        if (
+            not self.boot_active
+            and not self.screensaver_active
+            and not self.pomodoro_completion_alert_active
+            and indicator_mode is not None
+            and not self.menu_active
+            and not self.token_popup_visible
+        ):
+            application_page = self.application_page_active()
+            # The expression desktop retains its calibrated upper-right point,
+            # and its expanded status bar renders the camera item in place.
+            # Every application page instead shares one unambiguous privacy
+            # location at the top-centre of the physical circular display.
+            if application_page or now >= self.status_visible_until:
+                self.draw_activity_indicator(
                     now,
-                    self.expression_camera_indicator_position(),
+                    (
+                        self.application_camera_indicator_position()
+                        if application_page
+                        else self.expression_camera_indicator_position()
+                    ),
+                    mode=indicator_mode,
                     compact=True,
                 )
         if (
             not self.boot_active
             and not self.screensaver_active
+            and not self.pomodoro_completion_alert_active
             and self.speech_bubble_opacity(now) > 0.0
         ):
             self.draw_speech_bubble(now)
@@ -3499,6 +7789,56 @@ class PersistentExpressionDisplay:
             ),
         )
 
+    def draw_aa_round_line(
+        self,
+        target: object,
+        color: tuple[int, ...],
+        start: tuple[float, float],
+        end: tuple[float, float],
+        width: int,
+    ) -> None:
+        """Draw a supersampled line with fully rounded end caps."""
+
+        line_width = max(1, round(width))
+        radius = max(1, math.ceil(line_width / 2))
+        padding = radius + 3
+        left = math.floor(min(start[0], end[0]) - padding)
+        top = math.floor(min(start[1], end[1]) - padding)
+        right = math.ceil(max(start[0], end[0]) + padding)
+        bottom = math.ceil(max(start[1], end[1]) + padding)
+        native_width = max(1, right - left)
+        native_height = max(1, bottom - top)
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (native_width * scale, native_height * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        scaled_start = (
+            round((start[0] - left) * scale),
+            round((start[1] - top) * scale),
+        )
+        scaled_end = (
+            round((end[0] - left) * scale),
+            round((end[1] - top) * scale),
+        )
+        scaled_width = line_width * scale
+        cap_radius = max(1, round(scaled_width / 2))
+        self.pygame.draw.line(
+            high,
+            color,
+            scaled_start,
+            scaled_end,
+            scaled_width,
+        )
+        self.pygame.draw.circle(high, color, scaled_start, cap_radius)
+        self.pygame.draw.circle(high, color, scaled_end, cap_radius)
+        smooth = self.pygame.transform.smoothscale(
+            high,
+            (native_width, native_height),
+        )
+        target.blit(smooth, (left, top))
+
     def draw_aa_ring(
         self,
         target: object,
@@ -3707,33 +8047,92 @@ class PersistentExpressionDisplay:
         target: object | None = None,
         scale: int = 1,
     ) -> None:
+        self.draw_activity_indicator(
+            now,
+            center,
+            mode="camera",
+            compact=compact,
+            target=target,
+            scale=scale,
+        )
+
+    def draw_activity_indicator(
+        self,
+        now: float,
+        center: tuple[int, int],
+        mode: str,
+        compact: bool = False,
+        target: object | None = None,
+        scale: int = 1,
+    ) -> None:
+        """Draw camera green, Pomodoro red, or a red/green shared pulse."""
+
         canvas = target or self.screen
         period = 3.2
-        wave = 0.5 + 0.5 * math.cos(2.0 * math.pi * (now % period) / period)
+        angle = 2.0 * math.pi * (now % period) / period
+        wave = 0.5 + 0.5 * math.cos(angle)
         brightness = round(70 + 185 * wave)
         radius = (5 if compact else 7) * scale
         glow = round(22 + 35 * wave)
+        if mode == "pomodoro":
+            glow_color = (glow, 8, 8)
+            core_color = (brightness, 44, 38)
+        elif mode == "combined":
+            green_ratio = 0.5 + 0.5 * math.cos(angle)
+            red_ratio = 1.0 - green_ratio
+            shared_brightness = 0.52 + 0.48 * (
+                0.5 + 0.5 * math.cos(2.0 * angle)
+            )
+            core_color = (
+                round((232 * red_ratio + 35 * green_ratio) * shared_brightness),
+                round((55 * red_ratio + 255 * green_ratio) * shared_brightness),
+                round((48 * red_ratio + 100 * green_ratio) * shared_brightness),
+            )
+            glow_color = (
+                round((46 * red_ratio + 8 * green_ratio) * shared_brightness),
+                round((8 * red_ratio + 57 * green_ratio) * shared_brightness),
+                round((8 * red_ratio + 26 * green_ratio) * shared_brightness),
+            )
+        else:
+            glow_color = (8, glow, 26)
+            core_color = (35, brightness, 100)
         if scale > 1:
             self.pygame.draw.circle(
                 canvas,
-                (8, glow, 26),
+                glow_color,
                 center,
                 radius + 7 * scale,
             )
-            self.pygame.draw.circle(canvas, (35, brightness, 100), center, radius)
+            self.pygame.draw.circle(canvas, core_color, center, radius)
         else:
-            self.draw_aa_circle(canvas, (8, glow, 26), center, radius + 7)
-            self.draw_aa_circle(canvas, (35, brightness, 100), center, radius)
+            self.draw_aa_circle(canvas, glow_color, center, radius + 7)
+            self.draw_aa_circle(canvas, core_color, center, radius)
 
     def camera_indicator_sources(self) -> tuple[str, ...]:
         sources = list(self.system_status.camera_active_sources)
         sources.extend(self.runtime_vision_sources)
         if self.camera_view_active and not self.gallery_active:
             sources.append("screen_visual_mode")
+        if self.video_call_active or bool(self.video_call_status.get("active")):
+            sources.append("video_call")
         return tuple(dict.fromkeys(sources))
 
     def camera_indicator_active(self) -> bool:
         return bool(self.camera_indicator_sources())
+
+    def pomodoro_background_indicator_active(self) -> bool:
+        return self.pomodoro.status == "running" and not self.pomodoro_active
+
+    def activity_indicator_mode(self) -> str | None:
+        camera_active = self.camera_indicator_active()
+        pomodoro_active = self.pomodoro_background_indicator_active()
+        if camera_active and pomodoro_active:
+            return "combined"
+        if pomodoro_active:
+            return "pomodoro"
+        if camera_active:
+            return "camera"
+        return None
 
     def set_vision_activity(
         self,
@@ -3780,6 +8179,24 @@ class PersistentExpressionDisplay:
         return (
             round(self.width / 2.0 + math.cos(angle) * safe_radius),
             round(self.height / 2.0 + math.sin(angle) * safe_radius),
+        )
+
+    def application_camera_indicator_position(self) -> tuple[int, int]:
+        """Return the common privacy-light point for every full-page app."""
+
+        return (self.width // 2, max(34, round(self.height * 0.05)))
+
+    def application_page_active(self) -> bool:
+        """Whether the renderer is showing a page rather than the desktop."""
+
+        return bool(
+            self.video_call_active
+            or self.music_active
+            or self.performance_active
+            or self.pomodoro_active
+            or self.settings_active
+            or self.gallery_active
+            or self.camera_view_active
         )
 
     def draw_wifi_icon(
@@ -3896,26 +8313,46 @@ class PersistentExpressionDisplay:
     ) -> None:
         canvas = target or self.screen
         x, y = center
+        # Keep the power control visually subordinate to the status indicators.
+        # Its geometry is intentionally lighter than a literal scaled-down copy:
+        # a compact 24 px body, a 3 px stroke and a shorter centre stem give it
+        # the same optical weight as the neighbouring Bluetooth/bell glyphs.
+        radius = 12 * scale
+        stroke = 3 * scale
         arc = self.pygame.Rect(
-            x - 12 * scale,
-            y - 12 * scale,
-            24 * scale,
-            24 * scale,
+            x - radius,
+            y - radius + 1 * scale,
+            radius * 2,
+            radius * 2,
         )
+        start_angle = math.radians(140)
+        end_angle = math.radians(400)
         self.pygame.draw.arc(
             canvas,
             color,
             arc,
-            math.radians(-55),
-            math.radians(250),
-            width=3 * scale,
+            start_angle,
+            end_angle,
+            width=stroke,
         )
-        tip = (
-            (x + 12 * scale, y - 8 * scale),
-            (x + 3 * scale, y - 8 * scale),
-            (x + 10 * scale, y + 1 * scale),
+        arc_center = (x, y + 1 * scale)
+        for angle in (start_angle, end_angle):
+            endpoint = (
+                round(arc_center[0] + math.cos(angle) * radius),
+                round(arc_center[1] - math.sin(angle) * radius),
+            )
+            self.pygame.draw.circle(canvas, color, endpoint, stroke // 2)
+        power_top = (x, y - 14 * scale)
+        power_bottom = (x, y - 2 * scale)
+        self.pygame.draw.line(
+            canvas,
+            color,
+            power_top,
+            power_bottom,
+            width=stroke,
         )
-        self.pygame.draw.polygon(canvas, color, tip)
+        self.pygame.draw.circle(canvas, color, power_top, stroke // 2)
+        self.pygame.draw.circle(canvas, color, power_bottom, stroke // 2)
 
     def draw_screensaver_icon(
         self,
@@ -4163,15 +8600,16 @@ class PersistentExpressionDisplay:
                 scale=scale,
             )
         elif kind == "camera":
-            camera_active = (
-                self.camera_indicator_active()
+            activity_mode = (
+                self.activity_indicator_mode()
                 if camera_active_override is None
-                else camera_active_override
+                else ("camera" if camera_active_override else None)
             )
-            if camera_active:
-                self.draw_camera_indicator(
+            if activity_mode is not None:
+                self.draw_activity_indicator(
                     now,
                     (middle_x, middle_y),
+                    mode=activity_mode,
                     compact=True,
                     target=item,
                     scale=scale,
@@ -4205,6 +8643,195 @@ class PersistentExpressionDisplay:
             self.width // 2,
             self.height // 2 + self.radial_menu_offset_px,
         )
+
+    def radial_menu_context_items(
+        self,
+        level: str,
+        pin_mode: bool = False,
+    ) -> list[dict]:
+        if level == "applications":
+            return self.application_menu.application_items(pin_mode)
+        return self.application_menu.main_items()
+
+    def render_application_menu_return_surface(self, now: float) -> object:
+        """Render the shared second-level destination for application exits."""
+        surface = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
+        original_screen = self.screen
+        try:
+            self.screen = surface
+            self.draw_radial_menu(now)
+        finally:
+            self.screen = original_screen
+        return surface
+
+    def prepare_application_menu_return(
+        self,
+        now: float,
+        *,
+        background_surface: object | None = None,
+    ) -> object:
+        """Prepare navigation state and the transition target for an app exit."""
+        self.prepare_menu_background(background_surface)
+        self.menu_active = True
+        self.set_radial_menu_context("applications", False, animate=False)
+        self.menu_selected = None
+        self.reset_application_pin_gesture()
+        self.menu_opened_at = now
+        self.menu_last_interaction_at = now
+        self.status_visible_until = 0.0
+        self.token_popup_visible = False
+        self.token_popup_last_interaction_at = 0.0
+        self.application_return_pending = True
+        self.request_system_status_refresh(now)
+        return self.render_application_menu_return_surface(now)
+
+    def complete_application_menu_return(self, now: float) -> None:
+        """Start the menu idle window only after the exit animation completes."""
+        self.menu_active = True
+        self.set_radial_menu_context("applications", False, animate=False)
+        self.menu_selected = None
+        self.reset_application_pin_gesture()
+        self.menu_opened_at = now
+        self.menu_last_interaction_at = now
+        self.application_return_pending = False
+        self.needs_redraw = True
+        log("application returned to second-level menu")
+
+    def set_radial_menu_context(
+        self,
+        level: str,
+        pin_mode: bool = False,
+        *,
+        animate: bool = True,
+    ) -> None:
+        level = "applications" if level == "applications" else "main"
+        # Kept in the control protocol for backward compatibility. Application
+        # pinning is now an outward continuation gesture, not a separate mode.
+        pin_mode = False
+        if self.menu_level == level and self.menu_pin_mode == pin_mode:
+            self.radial_menu = self.radial_menu_context_items(level, pin_mode)
+            return
+        source = None
+        if animate and self.menu_active:
+            source = self.radial_menu_content_surface(self.menu_selected)
+        self.menu_level = level
+        self.menu_pin_mode = pin_mode
+        self.radial_menu = self.radial_menu_context_items(level, pin_mode)
+        self.menu_selected = None
+        self.reset_application_pin_gesture()
+        if source is not None:
+            self.menu_level_transition_source = source
+            self.menu_level_transition_target = self.radial_menu_content_surface(None)
+            self.menu_level_transition_started_at = time.monotonic()
+            self.menu_level_transition_active = True
+        else:
+            self.menu_level_transition_active = False
+            self.menu_level_transition_source = None
+            self.menu_level_transition_target = None
+        self.menu_last_interaction_at = time.monotonic()
+        self.needs_redraw = True
+
+    def open_application_menu(self, pin_mode: bool = False) -> None:
+        self.set_radial_menu_context("applications", False, animate=True)
+        log("application menu opened")
+
+    def reset_application_pin_gesture(self) -> None:
+        self.app_pin_candidate_app_id = None
+        self.app_pin_drag_progress = 0.0
+        self.app_pin_drag_ready = False
+        self.app_pin_target_hit = False
+        self.app_pin_full_reached_at = 0.0
+
+    def application_pin_target_contains(
+        self,
+        position: tuple[int, int],
+        selected: int,
+    ) -> bool:
+        """Match touch hit-testing to the visible outer pin-option arc."""
+        outer_radius = min(self.width, self.height) * 0.325
+        return pin_target_hit(
+            position,
+            self.radial_menu_center(),
+            selected,
+            target_radius=outer_radius + 40.0,
+            target_half_width=20.0,
+            radial_padding=12.0,
+            angular_padding_degrees=3.0,
+        )
+
+    def update_application_pin_hold(self, now: float) -> bool:
+        """Advance dwell confirmation even while the finger is stationary."""
+        ready = pin_gesture_ready(
+            self.app_pin_drag_progress if self.app_pin_target_hit else 0.0,
+            self.app_pin_full_reached_at,
+            now,
+            self.app_pin_hold_seconds,
+        )
+        if ready == self.app_pin_drag_ready:
+            return False
+        self.app_pin_drag_ready = ready
+        self.needs_redraw = True
+        return True
+
+    def update_application_pin_gesture(
+        self,
+        selected: int | None,
+        distance: float,
+    ) -> None:
+        app_id: str | None = None
+        if self.menu_level == "applications" and selected is not None:
+            item = self.radial_menu[selected]
+            action = item.get("action") if isinstance(item.get("action"), dict) else {}
+            if str(action.get("type", "")) == "launch_app":
+                candidate = str(action.get("app_id", "")).strip()
+                if self.application_menu.application(candidate) is not None:
+                    app_id = candidate
+        if app_id is None or distance <= self.app_pin_drag_start_distance:
+            changed = bool(
+                self.app_pin_candidate_app_id
+                or self.app_pin_drag_progress
+                or self.app_pin_drag_ready
+            )
+            self.reset_application_pin_gesture()
+            if changed:
+                self.needs_redraw = True
+            return
+        progress = pin_gesture_progress(
+            distance,
+            self.app_pin_drag_start_distance,
+            self.app_pin_drag_confirm_distance,
+        )
+        now = time.monotonic()
+        target_hit = progress >= 0.985 and self.application_pin_target_contains(
+            self.pointer_position,
+            selected,
+        )
+        if target_hit:
+            if (
+                app_id != self.app_pin_candidate_app_id
+                or not self.app_pin_target_hit
+                or self.app_pin_full_reached_at <= 0.0
+            ):
+                self.app_pin_full_reached_at = now
+        else:
+            self.app_pin_full_reached_at = 0.0
+        ready = pin_gesture_ready(
+            progress if target_hit else 0.0,
+            self.app_pin_full_reached_at,
+            now,
+            self.app_pin_hold_seconds,
+        )
+        if (
+            app_id != self.app_pin_candidate_app_id
+            or abs(progress - self.app_pin_drag_progress) >= 0.01
+            or target_hit != self.app_pin_target_hit
+            or ready != self.app_pin_drag_ready
+        ):
+            self.app_pin_candidate_app_id = app_id
+            self.app_pin_drag_progress = progress
+            self.app_pin_target_hit = target_hit
+            self.app_pin_drag_ready = ready
+            self.needs_redraw = True
 
     def draw_volume_slider_overlay(self, now: float, transition: float) -> None:
         display_center, inner_radius, outer_radius, start_angle, end_angle = (
@@ -4549,16 +9176,55 @@ class PersistentExpressionDisplay:
         now = time.monotonic()
         for mode in ("volume", "restart", "screensaver"):
             self.control_overlay_surface(mode, now)
-        for selected_index in (None, *range(len(self.radial_menu))):
-            self.radial_menu_content_surface(selected_index)
+        original_level = self.menu_level
+        original_pin_mode = self.menu_pin_mode
+        original_menu = self.radial_menu
+        for level, pin_mode in (
+            ("main", False),
+            ("applications", False),
+        ):
+            self.menu_level = level
+            self.menu_pin_mode = pin_mode
+            self.radial_menu = self.radial_menu_context_items(level, pin_mode)
+            for selected_index in (None, *range(len(self.radial_menu))):
+                self.radial_menu_content_surface(selected_index)
+            if level == "applications":
+                for selected_index, item in enumerate(self.radial_menu):
+                    action = (
+                        item.get("action")
+                        if isinstance(item.get("action"), dict)
+                        else {}
+                    )
+                    if str(action.get("type", "")) != "launch_app":
+                        continue
+                    for frame in range(1, 25):
+                        progress = frame / 24.0
+                        self.application_pin_affordance_surface(
+                            selected_index,
+                            progress,
+                            frame == 24,
+                        )
+        self.menu_level = original_level
+        self.menu_pin_mode = original_pin_mode
+        self.radial_menu = original_menu
         for meter in ("wifi", "token", "volume"):
             for level in range(21):
                 self.status_meter_surface(meter, level)
         self.status_bar_surface(now)
+        for phase in ("focus", "short_break"):
+            self.pomodoro_duration_adjust_base(phase)
+            for pointer_step in range(72):
+                self.pomodoro_duration_wave_surface(pointer_step, phase)
+        for minutes in range(
+            self.pomodoro_duration_min_minutes,
+            self.pomodoro_duration_max_minutes + 1,
+            self.pomodoro_duration_step_minutes,
+        ):
+            self.pomodoro_duration_time_surface(minutes)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         log(
             "control and radial-menu transition cache ready "
-            f"entries={3 + 1 + len(self.radial_menu) + 63} "
+            f"entries={len(self.control_overlay_cache) + len(self.radial_menu_content_cache) + len(self.app_pin_affordance_cache) + 64 + len(self.pomodoro_duration_wave_cache) + len(self.pomodoro_duration_time_cache)} "
             f"elapsed={elapsed_ms:.1f}ms"
         )
 
@@ -5143,7 +9809,24 @@ class PersistentExpressionDisplay:
 
     def radial_menu_content_surface(self, selected_index: int | None) -> object:
         """Cache every expensive static 4x menu primitive per selection state."""
-        cached = self.radial_menu_content_cache.get(selected_index)
+        clock_text = time.strftime("%H:%M") if self.menu_level == "main" else ""
+        if clock_text and clock_text != self.radial_menu_time_cache_text:
+            self.radial_menu_time_cache_text = clock_text
+            stale_main_keys = [
+                key
+                for key in self.radial_menu_content_cache
+                if key and key[0] == "main"
+            ]
+            for key in stale_main_keys:
+                self.radial_menu_content_cache.pop(key, None)
+        cache_key = (
+            self.menu_level,
+            self.menu_pin_mode,
+            self.application_menu.pinned_app_id,
+            selected_index,
+            clock_text,
+        )
+        cached = self.radial_menu_content_cache.get(cache_key)
         if cached is not None:
             return cached
         surface = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
@@ -5224,8 +9907,171 @@ class PersistentExpressionDisplay:
                 round(inner_radius),
                 width,
             )
-        self.radial_menu_content_cache[selected_index] = surface
+        if self.menu_level == "applications":
+            title = self.font_small.render(
+                "应用",
+                True,
+                (151, 205, 222),
+            )
+            surface.blit(title, title.get_rect(center=center))
+        elif clock_text:
+            high = self.font_radial_time_high.render(
+                clock_text,
+                True,
+                (211, 235, 242),
+            )
+            clock = self.pygame.transform.smoothscale(
+                high,
+                (
+                    max(1, round(high.get_width() / UI_AA_SCALE)),
+                    max(1, round(high.get_height() / UI_AA_SCALE)),
+                ),
+            )
+            surface.blit(clock, clock.get_rect(center=(center[0], center[1] - 2)))
+        self.radial_menu_content_cache[cache_key] = surface
         return surface
+
+    def application_pin_affordance_surface(
+        self,
+        selected: int,
+        progress: float,
+        ready: bool,
+    ) -> tuple[object, tuple[int, int]]:
+        """Return one pre-renderable, cropped frame of the morphing pin arc."""
+        frame_count = 24
+        frame = max(1, min(round(progress * frame_count), frame_count))
+        cache_key = (selected, frame, bool(ready))
+        cached = self.app_pin_affordance_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        progress = frame / frame_count
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        center = self.radial_menu_center()
+        outer_radius = min(self.width, self.height) * 0.325
+        middle_angle = -math.pi / 2 + selected * math.tau / 6
+        half_sector = math.tau / 12
+        start_angle = middle_angle - half_sector + math.radians(2.5)
+        end_angle = middle_angle + half_sector - math.radians(2.5)
+        middle_radius = outer_radius + 40.0
+        thickness = 7.0 + 33.0 * eased
+        inner = middle_radius - thickness / 2.0
+        outer = middle_radius + thickness / 2.0
+        layer = self.pygame.Surface(self.target_size, self.pygame.SRCALPHA)
+        layer.fill((0, 0, 0, 0))
+        glow_alpha = round((34 + 42 * eased) * progress)
+        self.draw_capsule_arc(
+            layer,
+            center,
+            inner - 6.0 * eased,
+            outer + 6.0 * eased,
+            start_angle,
+            end_angle,
+            (57, 205, 242, glow_alpha),
+            soft_edge=True,
+            steps=28,
+        )
+        if ready:
+            fill = (105, 226, 248, 252)
+        else:
+            fill = (
+                round(70 + 22 * eased),
+                round(205 + 18 * eased),
+                round(239 + 8 * eased),
+                round(225 + 27 * eased),
+            )
+        self.draw_capsule_arc(
+            layer,
+            center,
+            inner,
+            outer,
+            start_angle,
+            end_angle,
+            fill,
+            soft_edge=True,
+            steps=36,
+        )
+        label_progress = max(0.0, min((progress - 0.24) / 0.36, 1.0))
+        if label_progress > 0.0:
+            self.draw_curved_arc_text(
+                layer,
+                "固定到首页菜单",
+                center,
+                middle_radius,
+                middle_angle,
+                min(end_angle - start_angle - math.radians(12), math.radians(32)),
+                (3, 27, 35),
+                round(255 * label_progress),
+            )
+        bounds = layer.get_bounding_rect(min_alpha=1)
+        cropped = self.pygame.Surface(bounds.size, self.pygame.SRCALPHA)
+        cropped.blit(layer, (0, 0), bounds)
+        cached = (cropped, (bounds.x, bounds.y))
+        self.app_pin_affordance_cache[cache_key] = cached
+        return cached
+
+    def draw_curved_arc_text(
+        self,
+        target: object,
+        text: str,
+        center: tuple[int, int],
+        radius: float,
+        middle_angle: float,
+        angular_span: float,
+        color: tuple[int, int, int],
+        alpha: int,
+    ) -> None:
+        """Lay out glyphs individually on an arc with a curved baseline."""
+        glyphs = list(text)
+        if not glyphs:
+            return
+        if len(glyphs) == 1:
+            angles = [middle_angle]
+        else:
+            step = angular_span / (len(glyphs) - 1)
+            angles = [
+                middle_angle - angular_span / 2.0 + index * step
+                for index in range(len(glyphs))
+            ]
+        middle_rotation = math.degrees(middle_angle) + 90.0
+        flip = middle_rotation > 90.0 or middle_rotation < -90.0
+        if flip:
+            angles.reverse()
+        for glyph_text, angle in zip(glyphs, angles):
+            glyph = self.font_small.render(glyph_text, True, color)
+            glyph.set_alpha(max(0, min(alpha, 255)))
+            rotation = math.degrees(angle) + 90.0 + (180.0 if flip else 0.0)
+            while rotation > 180.0:
+                rotation -= 360.0
+            while rotation <= -180.0:
+                rotation += 360.0
+            oriented = self.pygame.transform.rotozoom(glyph, -rotation, 1.0)
+            anchor = (
+                round(center[0] + math.cos(angle) * radius),
+                round(center[1] + math.sin(angle) * radius),
+            )
+            target.blit(oriented, oriented.get_rect(center=anchor))
+
+    def draw_application_pin_affordance(self) -> None:
+        """Morph the selected app's outer line into a pin confirmation arc."""
+        progress = max(0.0, min(self.app_pin_drag_progress, 1.0))
+        selected = self.menu_selected
+        if (
+            self.menu_level != "applications"
+            or selected is None
+            or self.app_pin_candidate_app_id is None
+            or progress <= 0.0
+        ):
+            return
+        item = self.radial_menu[selected]
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        if str(action.get("app_id", "")) != self.app_pin_candidate_app_id:
+            return
+        surface, position = self.application_pin_affordance_surface(
+            selected,
+            progress,
+            self.app_pin_drag_ready,
+        )
+        self.screen.blit(surface, position)
 
     def draw_radial_menu(self, now: float) -> None:
         if self.menu_background_surface is not None:
@@ -5234,10 +10080,33 @@ class PersistentExpressionDisplay:
         layer.fill((0, 0, 0, 105))
         self.screen.blit(layer, (0, 0))
         self.draw_status_bar(now)
-        self.screen.blit(
-            self.radial_menu_content_surface(self.menu_selected),
-            (0, 0),
-        )
+        if self.menu_level_transition_active:
+            elapsed = now - self.menu_level_transition_started_at
+            raw = max(
+                0.0,
+                min(elapsed / self.menu_level_transition_seconds, 1.0),
+            )
+            eased = 1.0 - (1.0 - raw) ** 3
+            source = self.menu_level_transition_source
+            target = self.menu_level_transition_target
+            if source is not None:
+                faded = source.copy()
+                faded.set_alpha(round(255 * (1.0 - eased)))
+                self.screen.blit(faded, (0, 0))
+            if target is not None:
+                appearing = target.copy()
+                appearing.set_alpha(round(255 * eased))
+                self.screen.blit(appearing, (0, 0))
+            if raw >= 1.0:
+                self.menu_level_transition_active = False
+                self.menu_level_transition_source = None
+                self.menu_level_transition_target = None
+        else:
+            self.screen.blit(
+                self.radial_menu_content_surface(self.menu_selected),
+                (0, 0),
+            )
+            self.draw_application_pin_affordance()
         if self.token_popup_visible:
             self.draw_token_popup()
 
@@ -5360,10 +10229,27 @@ class PersistentExpressionDisplay:
         position: tuple[int, int],
         force: bool = False,
     ) -> None:
+        percent = self.volume_percent_from_position(position)
+        self.set_system_volume_percent(percent, force=force)
+
+    def set_music_volume_from_position(
+        self,
+        position: tuple[int, int],
+        force: bool = False,
+    ) -> None:
+        percent = self.music_volume_percent_from_position(position)
+        self.set_system_volume_percent(percent, force=force)
+
+    def set_system_volume_percent(
+        self,
+        percent: int,
+        *,
+        force: bool = False,
+    ) -> None:
         now = time.monotonic()
         if not force and now - self.volume_last_set_at < 0.055:
             return
-        percent = self.volume_percent_from_position(position)
+        percent = max(0, min(int(percent), 100))
         if not force and percent == self.system_status.volume_percent:
             self.volume_last_interaction_at = now
             return
@@ -5546,12 +10432,16 @@ class PersistentExpressionDisplay:
                     )
                 ),
             )
+        self.update_application_pin_gesture(selected, distance)
         if selected != self.menu_selected:
             self.menu_selected = selected
             self.needs_redraw = True
 
     def handle_pointer_down(self, position: tuple[int, int]) -> None:
         now = time.monotonic()
+        if self.pomodoro_completion_alert_active:
+            self.last_touch_at = now
+            return
         if self.pointer_down or now - self.last_touch_at < self.touch_debounce:
             return
         self.last_touch_at = now
@@ -5568,9 +10458,48 @@ class PersistentExpressionDisplay:
         self.pointer_position = position
         self.pointer_moved = False
         self.menu_selected = None
+        self.reset_application_pin_gesture()
         self.edge_exit_candidate = False
         self.edge_exit_ready = False
         self.edge_exit_progress = 0.0
+        if self.video_call_active:
+            self.video_call_pointer_target = self.video_call_target_at(position)
+            self.needs_redraw = True
+            return
+        if self.music_active:
+            if self.music_transition_active:
+                self.pointer_down = False
+                self.music_pointer_target = None
+                return
+            self.music_pointer_target = self.music_target_at(position)
+            if self.music_pointer_target == "volume":
+                self.music_volume_expand_from = self.music_volume_expansion(now)
+                self.music_volume_dragging = True
+                self.music_volume_interaction_started_at = now
+                self.music_volume_last_interaction_at = now
+                self.set_music_volume_from_position(position, force=True)
+            self.needs_redraw = True
+            return
+        if self.performance_active:
+            if self.performance_transition_active:
+                self.pointer_down = False
+                self.performance_pointer_target = None
+                return
+            if self.performance_section == "system":
+                self.performance_health_scroll_start_offset = (
+                    self.performance_health_scroll_offset
+                )
+            self.performance_pointer_target = self.performance_target_at(position)
+            self.needs_redraw = True
+            return
+        if self.pomodoro_active:
+            if self.pomodoro_transition_active:
+                self.pointer_down = False
+                self.pomodoro_pointer_target = None
+                return
+            self.pomodoro_pointer_target = self.pomodoro_target_at(position)
+            self.needs_redraw = True
+            return
         if self.settings_active:
             if self.settings_transition_active:
                 self.pointer_down = False
@@ -5715,6 +10644,51 @@ class PersistentExpressionDisplay:
             self.menu_last_interaction_at = time.monotonic()
         if math.dist(position, self.pointer_start) > 24:
             self.pointer_moved = True
+        if self.video_call_active:
+            if self.pointer_moved:
+                self.video_call_pointer_target = None
+            self.needs_redraw = True
+            return
+        if self.music_active:
+            if self.music_volume_dragging:
+                self.music_volume_last_interaction_at = time.monotonic()
+                self.set_music_volume_from_position(position)
+                self.needs_redraw = True
+                return
+            if self.pointer_moved:
+                self.music_pointer_target = None
+            self.needs_redraw = True
+            return
+        if self.performance_active:
+            if self.pointer_moved:
+                self.performance_pointer_target = None
+                if self.performance_section == "system":
+                    dx = position[0] - self.pointer_start[0]
+                    dy = position[1] - self.pointer_start[1]
+                    if abs(dy) > abs(dx) * 0.72:
+                        self.performance_health_scroll_offset = (
+                            self.clamp_performance_health_scroll(
+                                self.performance_health_scroll_start_offset - dy
+                            )
+                        )
+            self.needs_redraw = True
+            return
+        if self.pomodoro_active:
+            if self.pomodoro_duration_adjust_active:
+                self.update_pomodoro_duration_adjustment(position)
+            elif self.pomodoro_pointer_target == "duration_crown":
+                if (
+                    time.monotonic() - self.pointer_started_at
+                    >= self.pomodoro_duration_hold_seconds
+                ):
+                    self.begin_pomodoro_duration_adjustment(time.monotonic())
+                    self.update_pomodoro_duration_adjustment(position)
+                elif math.dist(position, self.pointer_start) > 60:
+                    self.pomodoro_pointer_target = None
+            elif self.pointer_moved:
+                self.pomodoro_pointer_target = None
+            self.needs_redraw = True
+            return
         if self.settings_active:
             self.settings_last_interaction_at = time.monotonic()
             if self.pointer_moved:
@@ -5786,6 +10760,10 @@ class PersistentExpressionDisplay:
                 self.set_system_volume_from_position(position)
             return
         if self.menu_active:
+            if self.menu_level_transition_active:
+                self.menu_selected = None
+                self.needs_redraw = True
+                return
             # Status controls are tap targets, not hover targets. A directional
             # menu gesture may cross their arcs without changing control layers.
             self.update_menu_selection(position)
@@ -5795,6 +10773,142 @@ class PersistentExpressionDisplay:
             return
         self.pointer_position = position
         self.touch_count += 1
+        if self.video_call_active:
+            target = self.video_call_pointer_target
+            swipe_direction = (
+                self.pomodoro_horizontal_swipe_direction(position)
+                if self.pointer_moved
+                else 0
+            )
+            if swipe_direction > 0:
+                self.close_video_call_to_application_menu(hangup=True)
+            elif (
+                not self.pointer_moved
+                and target in {"back", "hangup"}
+                and target == self.video_call_target_at(position)
+            ):
+                self.close_video_call_to_application_menu(hangup=True)
+            self.video_call_pointer_target = None
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
+        if self.music_active:
+            target = self.music_pointer_target
+            held_seconds = max(0.0, time.monotonic() - self.pointer_started_at)
+            if self.music_volume_dragging:
+                self.set_music_volume_from_position(position, force=True)
+                self.music_volume_dragging = False
+                self.music_volume_last_interaction_at = time.monotonic()
+                self.music_volume_expand_from = 1.0
+                self.music_pointer_target = None
+                self.pointer_down = False
+                self.pointer_moved = False
+                self.needs_redraw = True
+                self.write_state()
+                return
+            swipe_direction = (
+                self.pomodoro_horizontal_swipe_direction(position)
+                if self.pointer_moved
+                else 0
+            )
+            if swipe_direction > 0:
+                self.close_music(animated=True)
+                log("music returned by left-to-right swipe")
+            elif (
+                not self.pointer_moved
+                and target is not None
+                and target == self.music_target_at(position)
+            ):
+                self.handle_music_target(
+                    "refresh"
+                    if target == "mode"
+                    and held_seconds >= self.music_mode_hold_seconds
+                    else target
+                )
+            self.music_pointer_target = None
+            self.music_volume_dragging = False
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
+        if self.performance_active:
+            target = self.performance_pointer_target
+            swipe_direction = (
+                self.pomodoro_horizontal_swipe_direction(position)
+                if self.pointer_moved
+                else 0
+            )
+            if self.performance_section == "system":
+                if swipe_direction > 0:
+                    self.start_performance_section_transition(None, -1)
+                    log("performance health returned by left-to-right swipe")
+                elif (
+                    not self.pointer_moved
+                    and target == "back"
+                    and target == self.performance_target_at(position)
+                ):
+                    self.start_performance_section_transition(None, -1)
+            elif swipe_direction > 0:
+                self.close_performance(animated=True)
+                log("performance returned by left-to-right swipe")
+            elif (
+                not self.pointer_moved
+                and target == "back"
+                and target == self.performance_target_at(position)
+            ):
+                self.close_performance(animated=True)
+            elif (
+                not self.pointer_moved
+                and target == "system"
+                and target == self.performance_target_at(position)
+            ):
+                self.performance_health_scroll_offset = 0.0
+                self.performance_health_scroll_start_offset = 0.0
+                self.request_system_status_refresh(time.monotonic())
+                self.start_performance_section_transition("system", 1)
+                log("performance health detail opened")
+            self.performance_pointer_target = None
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
+        if self.pomodoro_active:
+            if self.pomodoro_duration_adjust_active:
+                self.update_pomodoro_duration_adjustment(position)
+                self.commit_pomodoro_duration_adjustment()
+                self.pointer_down = False
+                self.pointer_moved = False
+                self.needs_redraw = True
+                return
+            target = self.pomodoro_pointer_target
+            swipe_direction = (
+                self.pomodoro_horizontal_swipe_direction(position)
+                if self.pointer_moved
+                else 0
+            )
+            if self.pomodoro_statistics_active and swipe_direction < 0:
+                self.navigate_pomodoro_statistics(1)
+            elif (
+                self.pomodoro_statistics_active
+                and swipe_direction > 0
+                and self.pomodoro_statistics_page > 0
+            ):
+                self.navigate_pomodoro_statistics(0)
+            elif swipe_direction > 0:
+                self.handle_pomodoro_target("back")
+                log("pomodoro returned by left-to-right swipe")
+            elif not self.pointer_moved and target == self.pomodoro_target_at(position):
+                self.handle_pomodoro_target(target)
+            self.pomodoro_pointer_target = None
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
         if self.settings_active:
             target = self.settings_pointer_target
             if self.pointer_moved and self.settings_back_swipe_detected(position):
@@ -5851,6 +10965,14 @@ class PersistentExpressionDisplay:
                 log("camera visual voice mode exited by edge-inward swipe")
                 return
         if self.menu_active:
+            if self.menu_level_transition_active:
+                self.pointer_down = False
+                self.pointer_moved = False
+                self.menu_selected = None
+                self.menu_last_interaction_at = time.monotonic()
+                self.needs_redraw = True
+                self.write_state()
+                return
             if self.screensaver_panel_mode:
                 self.pointer_down = False
                 self.pointer_moved = False
@@ -5923,10 +11045,44 @@ class PersistentExpressionDisplay:
                 self.write_state()
                 return
             self.update_menu_selection(position)
+            if (
+                self.menu_level == "applications"
+                and self.app_pin_drag_ready
+                and self.app_pin_candidate_app_id
+                and self.menu_selected is not None
+            ):
+                selected_item = dict(self.radial_menu[self.menu_selected])
+                selected_action = (
+                    selected_item.get("action")
+                    if isinstance(selected_item.get("action"), dict)
+                    else {}
+                )
+                if str(selected_action.get("type", "")) == "launch_app":
+                    self.execute_menu_item(
+                        {
+                            "id": selected_item.get("id"),
+                            "label": selected_item.get("label"),
+                            "glyph": selected_item.get("glyph"),
+                            "action": {
+                                "type": "pin_app",
+                                "app_id": self.app_pin_candidate_app_id,
+                            },
+                        }
+                    )
+                    self.pointer_down = False
+                    self.pointer_moved = False
+                    self.menu_selected = None
+                    self.write_state()
+                    return
+            self.update_menu_selection(position)
             selected = self.menu_selected
             if selected is not None:
-                self.close_radial_menu()
-                self.execute_menu_action(selected)
+                item = dict(self.radial_menu[selected])
+                if self.menu_action_keeps_open(item):
+                    self.execute_menu_item(item)
+                else:
+                    self.close_radial_menu()
+                    self.execute_menu_item(item)
             else:
                 # Releasing the long press only finishes opening the menu. Keep it
                 # available for a second directional gesture instead of treating a
@@ -5948,6 +11104,15 @@ class PersistentExpressionDisplay:
         self.write_state()
 
     def update_long_press(self, now: float) -> None:
+        if self.pomodoro_active:
+            if (
+                self.pointer_down
+                and self.pomodoro_pointer_target == "duration_crown"
+                and now - self.pointer_started_at
+                >= self.pomodoro_duration_hold_seconds
+            ):
+                self.begin_pomodoro_duration_adjustment(now)
+            return
         if self.pointer_down and self.camera_pointer_target == "gallery_ui":
             if (
                 not self.pointer_moved
@@ -5969,6 +11134,9 @@ class PersistentExpressionDisplay:
         if (
             not self.pointer_down
             or self.menu_active
+            or self.music_active
+            or self.performance_active
+            or self.pomodoro_active
             or self.settings_active
             or self.pointer_moved
             or self.camera_pointer_target is not None
@@ -5977,6 +11145,7 @@ class PersistentExpressionDisplay:
         if now - self.pointer_started_at < self.long_press_seconds:
             return
         self.prepare_menu_background()
+        self.set_radial_menu_context("main", False, animate=False)
         self.menu_active = True
         self.menu_selected = None
         self.menu_opened_at = now
@@ -5990,6 +11159,10 @@ class PersistentExpressionDisplay:
     def close_radial_menu(self) -> None:
         self.menu_active = False
         self.menu_selected = None
+        self.set_radial_menu_context("main", False, animate=False)
+        self.menu_level_transition_active = False
+        self.menu_level_transition_source = None
+        self.menu_level_transition_target = None
         self.token_popup_visible = False
         self.token_popup_last_interaction_at = 0.0
         self.menu_background_surface = None
@@ -6016,12 +11189,90 @@ class PersistentExpressionDisplay:
             log(f"voice menu action warning: {exc}")
             return False
 
-    def execute_menu_action(self, selected: int) -> None:
-        item = dict(self.radial_menu[selected])
+    @staticmethod
+    def menu_item_action_type(item: dict) -> str:
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        return str(action.get("type", "emit"))
+
+    def menu_action_keeps_open(self, item: dict) -> bool:
+        action_type = self.menu_item_action_type(item)
+        return action_type in {
+            "open_app_menu",
+            "open_app_pin_menu",
+            "menu_back",
+            "clear_app_pin",
+            "pin_app",
+            "noop",
+        }
+
+    def launch_application(self, app_id: str) -> bool:
+        if app_id == "pomodoro":
+            self.open_pomodoro()
+            return True
+        if app_id == "performance":
+            self.open_performance()
+            return True
+        if app_id == "music":
+            self.open_music()
+            return True
+        if app_id == "video_call":
+            self.set_video_call_view(True, request_service=True)
+            return True
+        return False
+
+    def prepare_voice_application_switch(self, target: str) -> None:
+        """Close other full-page apps without stopping their background work."""
+
+        self.close_radial_menu()
+        if target != "video_call":
+            self.video_call_active = False
+            self.video_call_pointer_target = None
+            if self.video_call_frame_future is not None:
+                self.video_call_frame_future.cancel()
+            self.video_call_frame_future = None
+        if target != "pomodoro":
+            self.pomodoro_active = False
+            self.pomodoro_statistics_active = False
+            self.pomodoro_duration_adjust_active = False
+            self.pomodoro_transition_active = False
+            self.pomodoro_transition_source = None
+            self.pomodoro_transition_target = None
+            self.pomodoro_pointer_target = None
+        if target != "performance":
+            self.performance_active = False
+            self.performance_section = None
+            self.performance_health_scroll_offset = 0.0
+            self.performance_health_scroll_start_offset = 0.0
+            self.performance_transition_active = False
+            self.performance_transition_source = None
+            self.performance_transition_target = None
+            self.performance_pointer_target = None
+        if target != "music":
+            self.music_active = False
+            self.music_transition_active = False
+            self.music_transition_source = None
+            self.music_transition_target = None
+            self.music_pointer_target = None
+            self.music_volume_dragging = False
+        self.needs_redraw = True
+
+    def execute_menu_item(self, item: dict) -> None:
         action = item.get("action") if isinstance(item.get("action"), dict) else {}
         action_type = str(action.get("type", "emit"))
         result = "emitted"
-        if action_type != "camera_voice" and self.camera_view_active:
+        navigation_actions = {
+            "open_app_menu",
+            "open_app_pin_menu",
+            "menu_back",
+            "clear_app_pin",
+            "pin_app",
+            "noop",
+        }
+        if (
+            action_type != "camera_voice"
+            and action_type not in navigation_actions
+            and self.camera_view_active
+        ):
             self.set_camera_view(False)
             self.send_voice_command({"command": "visual_mode", "active": False})
         if action_type == "voice_trigger":
@@ -6052,6 +11303,40 @@ class PersistentExpressionDisplay:
         elif action_type == "open_settings":
             self.open_settings()
             result = "opened"
+        elif action_type == "open_pomodoro":
+            self.open_pomodoro()
+            result = "opened"
+        elif action_type == "open_app_menu":
+            self.open_application_menu(False)
+            result = "opened"
+        elif action_type == "open_app_pin_menu":
+            self.open_application_menu(False)
+            result = "opened"
+        elif action_type == "menu_back":
+            self.set_radial_menu_context("main", False, animate=True)
+            result = "returned"
+        elif action_type == "clear_app_pin":
+            if self.application_menu.clear_pin():
+                self.radial_menu_content_cache.clear()
+                self.set_radial_menu_context("main", False, animate=True)
+                result = "cleared"
+            else:
+                result = "clear_failed"
+        elif action_type == "pin_app":
+            app_id = str(action.get("app_id", "")).strip()
+            if self.application_menu.pin(app_id):
+                self.radial_menu_content_cache.clear()
+                self.set_radial_menu_context("main", False, animate=True)
+                result = "pinned"
+            else:
+                result = "pin_failed"
+        elif action_type == "launch_app":
+            app_id = str(action.get("app_id", "")).strip()
+            result = "opened" if self.launch_application(app_id) else "failed"
+        elif action_type == "noop":
+            self.menu_selected = None
+            self.menu_last_interaction_at = time.monotonic()
+            result = "ignored"
         elif action_type == "expression":
             response = self.set_state(
                 str(action.get("state", self.default_state)),
@@ -6073,6 +11358,9 @@ class PersistentExpressionDisplay:
         )
         os.replace(temporary, MENU_EVENT_PATH)
         log(f"radial menu selected id={item.get('id')} action={action_type} result={result}")
+
+    def execute_menu_action(self, selected: int) -> None:
+        self.execute_menu_item(dict(self.radial_menu[selected]))
 
     def process_pygame_events(self) -> None:
         for event in self.pygame.event.get():
@@ -6153,6 +11441,36 @@ class PersistentExpressionDisplay:
             "radial_menu_offset_px": self.radial_menu_offset_px,
             "pointer_down": self.pointer_down,
             "radial_menu_active": self.menu_active,
+            "radial_menu_level": self.menu_level,
+            "application_return_navigation": {
+                "target": "applications",
+                "pending": self.application_return_pending,
+                "applies_to": ["pomodoro", "performance", "music", "future-apps"],
+                "idle_window_starts_after_transition": True,
+            },
+            "radial_menu_center_display": {
+                "main": "current-time",
+                "format": "24-hour-HH:MM",
+                "interactive": False,
+            },
+            "radial_menu_pin_mode": self.menu_pin_mode,
+            "radial_menu_pinned_app": self.application_menu.pinned_app_id,
+            "radial_menu_pin_gesture": {
+                "candidate_app": self.app_pin_candidate_app_id,
+                "progress": round(self.app_pin_drag_progress, 3),
+                "ready": self.app_pin_drag_ready,
+                "target_hit": self.app_pin_target_hit,
+                "hold_seconds": self.app_pin_hold_seconds,
+                "full_reached_monotonic": self.app_pin_full_reached_at or None,
+                "start_distance_px": round(self.app_pin_drag_start_distance),
+                "confirm_distance_px": round(self.app_pin_drag_confirm_distance),
+                "release_action": "pin-to-home-menu-after-target-hit-and-hold",
+            },
+            "radial_menu_level_transition": {
+                "active": self.menu_level_transition_active,
+                "duration_ms": round(self.menu_level_transition_seconds * 1000),
+                "style": "cached-crossfade-ease-out",
+            },
             "radial_menu_idle_seconds": self.menu_idle_seconds,
             "radial_menu_opened_monotonic": self.menu_opened_at or None,
             "radial_menu_last_interaction_monotonic": (
@@ -6185,6 +11503,210 @@ class PersistentExpressionDisplay:
                 "listening_label": False,
             },
             "screensaver_settings_active": self.screensaver_panel_mode,
+            "pomodoro": {
+                **self.pomodoro.snapshot(),
+                "active": self.pomodoro_active,
+                "statistics_active": self.pomodoro_statistics_active,
+                "statistics_page": self.pomodoro_statistics_page,
+                "statistics": self.pomodoro.statistics_snapshot(),
+                "pointer_target": self.pomodoro_pointer_target,
+                "duration_dial": {
+                    "active": self.pomodoro_duration_adjust_active,
+                    "moved": self.pomodoro_duration_dial_moved,
+                    "selected_minutes": self.pomodoro_duration_selected_minutes,
+                    "pointer_degrees_clockwise": round(
+                        math.degrees(self.pomodoro_duration_pointer_clockwise),
+                        2,
+                    ),
+                    "minimum_minutes": self.pomodoro_duration_min_minutes,
+                    "maximum_minutes": self.pomodoro_duration_max_minutes,
+                    "step_minutes": self.pomodoro_duration_step_minutes,
+                    "visual_tick_count": 72,
+                    "hold_seconds": self.pomodoro_duration_hold_seconds,
+                    "editable_phases": [
+                        "focus",
+                        "short_break",
+                        "long_break",
+                    ],
+                    "allowed_statuses": ["ready", "paused"],
+                    "scope": "current-phase-one-off",
+                    "gesture": "hold-crown-then-circular-drag-release-to-confirm",
+                },
+                "completion_alert": {
+                    "active": self.pomodoro_completion_alert_active,
+                    "completed_phase": self.pomodoro_completion_alert_phase,
+                    "cycles": self.pomodoro_completion_alert_cycles,
+                    "cycle_seconds": self.pomodoro_completion_alert_cycle_seconds,
+                    "rise_seconds": self.pomodoro_completion_alert_rise_seconds,
+                    "hold_seconds": self.pomodoro_completion_alert_hold_seconds,
+                    "fall_seconds": round(
+                        self.pomodoro_completion_alert_cycle_seconds
+                        - self.pomodoro_completion_alert_rise_seconds
+                        - self.pomodoro_completion_alert_hold_seconds,
+                        3,
+                    ),
+                    "total_seconds": round(
+                        self.pomodoro_completion_alert_cycles
+                        * self.pomodoro_completion_alert_cycle_seconds,
+                        3,
+                    ),
+                    "pulse": self.pomodoro_completion_alert_pulse,
+                    "intensity": round(
+                        self.pomodoro_completion_alert_intensity,
+                        4,
+                    ),
+                    "lit": self.pomodoro_completion_alert_lit,
+                    "transition": "smoothstep-alpha-crossfade",
+                    "focus_background": "tomato-red",
+                    "break_background": "leaf-green",
+                    "theme_controls_when_lit": "black",
+                    "input_blocked_during_alert": True,
+                },
+                "transition": {
+                    "active": self.pomodoro_transition_active,
+                    "opening": self.pomodoro_transition_opening,
+                    "exits_page": self.pomodoro_transition_exits_page,
+                    "duration_ms": round(
+                        self.pomodoro_transition_seconds * 1000
+                    ),
+                    "style": "cached-carousel-slide-ease-out",
+                    "pre_rendered": True,
+                },
+                "colors": {
+                    "focus": "tomato-red",
+                    "break": "leaf-green",
+                },
+                "continues_when_page_closed": True,
+                "restores_after_service_restart": True,
+            },
+            "performance": {
+                **self.performance_snapshot.as_dict(),
+                "active": self.performance_active,
+                "section": self.performance_section,
+                "health_scroll_offset": round(
+                    self.performance_health_scroll_offset,
+                    2,
+                ),
+                "health_scroll_max": round(
+                    self.performance_health_max_scroll(),
+                    2,
+                ),
+                "pointer_target": self.performance_pointer_target,
+                "refresh_seconds": self.performance_refresh_seconds,
+                "refresh_pending": self.performance_future is not None,
+                "transition": {
+                    "active": self.performance_transition_active,
+                    "opening": self.performance_transition_opening,
+                    "exits_page": self.performance_transition_exits_page,
+                    "duration_ms": round(
+                        self.performance_transition_seconds * 1000
+                    ),
+                    "style": "cached-carousel-slide-ease-out",
+                },
+            },
+            "music": {
+                **self.music_player.snapshot(),
+                "active": self.music_active,
+                "pointer_target": self.music_pointer_target,
+                "scan_pending": self.music_scan_future is not None,
+                "scan_completed": self.music_scan_completed,
+                "scan_error": self.music_scan_error,
+                "autoplay_pending": self.music_autoplay_pending,
+                "voice_controls": [
+                    "open",
+                    "close",
+                    "play",
+                    "pause",
+                    "previous",
+                    "next",
+                    "set-mode",
+                    "set-lyrics",
+                ],
+                "playback_mode_control": {
+                    "tap_action": "cycle-list-single-shuffle",
+                    "hold_action": "refresh-library",
+                    "hold_seconds": self.music_mode_hold_seconds,
+                    "label": self.music_playback_mode_label(
+                        self.music_player.playback_mode
+                    ),
+                },
+                "volume_control": {
+                    "percent": self.system_status.volume_percent,
+                    "dragging": self.music_volume_dragging,
+                    "geometry": list(self.music_volume_geometry()),
+                    "scope": "system-default-audio-sink",
+                    "direction": "bottom-zero-top-full",
+                    "interaction": "touch-or-drag-arc",
+                    "idle_style": "thin-arc-and-position-dot",
+                    "adjusting_style": "expanded-capsule-track",
+                    "idle_seconds": self.music_volume_idle_seconds,
+                },
+                "supported_extensions": sorted(
+                    ["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus"]
+                ),
+                "lyrics": {
+                    "enabled": True,
+                    "expression_overlay_enabled": self.music_lyrics_enabled,
+                    "expression_overlay_toggle": "lyrics-button",
+                    "available": bool(self.music_lyrics),
+                    "automatic_search": True,
+                    "search_status": self.music_lyrics_search_status,
+                    "search_trigger": self.music_lyrics_search_trigger,
+                    "search_pending": self.music_lyrics_fetch_future is not None,
+                    "search_error": self.music_lyrics_search_error or None,
+                    "provider": "lrclib",
+                    "manual_control": False,
+                    "expression_overlay_manual_control": True,
+                    "path": str(self.music_lyrics_path) if self.music_lyrics_path else None,
+                    "line_count": len(self.music_lyrics),
+                    "current_index": self.music_lyric_index,
+                    "current_line": (
+                        self.music_lyrics[self.music_lyric_index].text
+                        if 0 <= self.music_lyric_index < len(self.music_lyrics)
+                        else None
+                    ),
+                    "overlay_active": self.music_lyrics_overlay_active(time.monotonic()),
+                    "format": "same-basename-lrc",
+                    "display_style": "single-line-borderless-horizontal-marquee",
+                    "band_geometry": list(self.music_lyric_band_geometry()),
+                    "horizontal_edge_fade_px": 56,
+                    "marquee_speed_px_per_second": self.music_lyric_marquee_speed,
+                    "short_lines_centered": True,
+                },
+                "artwork": {
+                    "available": bool(
+                        self.music_player.current_track
+                        and self.music_player.current_track.artwork_path
+                    ),
+                    "path": (
+                        self.music_player.current_track.artwork_path
+                        if self.music_player.current_track
+                        and self.music_player.current_track.artwork_path
+                        else None
+                    ),
+                    "decoded": self.music_artwork_surface is not None,
+                    "loading": self.music_artwork_future is not None,
+                },
+                "center": {
+                    "mode": self.music_center_mode,
+                    "tap_action": "toggle-artwork-lyrics",
+                    "lyrics_style": "borderless-horizontal-axis-vertical-scroll",
+                    "lyrics_geometry": list(self.music_player_lyrics_geometry()),
+                    "horizontal_edge_fade_px": 72,
+                    "transition_active": self.music_center_transition_active,
+                    "transition_ms": round(
+                        self.music_center_transition_seconds * 1000
+                    ),
+                },
+                "continues_when_page_closed": True,
+                "transition": {
+                    "active": self.music_transition_active,
+                    "opening": self.music_transition_opening,
+                    "exits_page": self.music_transition_exits_page,
+                    "duration_ms": round(self.music_transition_seconds * 1000),
+                    "style": "cached-carousel-slide-ease-out",
+                },
+            },
             "settings": {
                 "active": self.settings_active,
                 "section": self.settings_section,
@@ -6241,6 +11763,20 @@ class PersistentExpressionDisplay:
                 {"id": item.get("id"), "label": item.get("label"), "glyph": item.get("glyph")}
                 for item in self.radial_menu
             ],
+            "video_call": {
+                **self.video_call_status,
+                "view_active": self.video_call_active,
+                "pointer_target": self.video_call_pointer_target,
+                "last_frame_at": self.video_call_last_frame_at or None,
+                "last_error": self.video_call_last_error,
+                "frame_pending": self.video_call_frame_future is not None,
+                "status_pending": self.video_call_status_future is not None,
+                "view_fps": self.video_call_view_fps,
+                "base_url": self.video_call_base_url,
+                "transport_scope": "LAN-or-tailnet",
+                "local_camera_source": "camera-hub",
+                "controls": ["open", "hangup"],
+            },
             "camera_view": {
                 "active": self.camera_view_active,
                 "fps": self.camera_view_fps,
@@ -6294,6 +11830,29 @@ class PersistentExpressionDisplay:
                 "lease_directory": str(ACTIVE_VISION_LEASE_DIR),
                 "runtime_sources": sorted(self.runtime_vision_sources),
             },
+            "activity_indicator": {
+                "mode": self.activity_indicator_mode(),
+                "pomodoro_background_active": (
+                    self.pomodoro_background_indicator_active()
+                ),
+                "camera_active": self.camera_indicator_active(),
+                "position": list(
+                    self.application_camera_indicator_position()
+                    if self.application_page_active()
+                    else self.expression_camera_indicator_position()
+                ),
+                "desktop_position": list(
+                    self.expression_camera_indicator_position()
+                ),
+                "application_position": list(
+                    self.application_camera_indicator_position()
+                ),
+                "placement": (
+                    "application-top-centre"
+                    if self.application_page_active()
+                    else "desktop-upper-right"
+                ),
+            },
             "last_menu_selection": self.last_menu_selection,
             "system_status": self.system_status.as_dict(),
             "renderer_pid": os.getpid(),
@@ -6323,6 +11882,15 @@ class PersistentExpressionDisplay:
                 self.draw()
             self.refresh_always_on_top()
             return
+        if self.update_pomodoro_timer(now):
+            self.write_state()
+        if self.update_pomodoro_completion_alert(now):
+            self.write_state()
+        if (
+            self.pomodoro_completion_alert_active
+            and now - self.last_overlay_redraw >= self.render_interval
+        ):
+            self.needs_redraw = True
         if self.update_speech_bubble(now):
             self.write_state()
         if self.screensaver_active:
@@ -6333,6 +11901,7 @@ class PersistentExpressionDisplay:
                 self.refresh_always_on_top()
                 return
         self.update_camera_view(now)
+        self.update_video_call(now)
         self.update_camera_capture(now)
         self.update_gallery_page_transition(now)
         self.prune_vision_activity(now)
@@ -6342,12 +11911,75 @@ class PersistentExpressionDisplay:
         if self.update_system_status_async(now):
             self.needs_redraw = True
             self.write_state()
+        if self.update_performance_async(now):
+            self.needs_redraw = True
+            self.write_state()
+        if self.update_music(now):
+            self.write_state()
+        if self.update_music_lyrics(now):
+            self.write_state()
+        if self.update_music_artwork():
+            self.write_state()
         if self.update_wifi_toggle(now):
             self.write_state()
         if self.wifi_toggle_notice_until and now >= self.wifi_toggle_notice_until:
             self.wifi_toggle_notice_until = 0.0
             self.wifi_toggle_error = ""
             self.needs_redraw = True
+        if self.video_call_active:
+            if now - self.last_overlay_redraw >= self.render_interval:
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
+        if self.music_active:
+            if (
+                self.music_transition_active
+                or self.music_center_transition_active
+                or self.music_volume_expansion(now) > 0.0
+                or self.music_player.status == "playing"
+            ) and now - self.last_overlay_redraw >= self.render_interval:
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
+        if self.performance_active:
+            if (
+                self.performance_transition_active
+                and now - self.last_overlay_redraw >= self.render_interval
+            ):
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
+        if self.pomodoro_active:
+            self.update_long_press(now)
+            display_second = max(
+                0,
+                math.ceil(self.pomodoro.remaining()),
+            )
+            if (
+                self.pomodoro_transition_active
+                and now - self.last_overlay_redraw >= self.render_interval
+            ):
+                self.needs_redraw = True
+            elif (
+                self.pomodoro_duration_adjust_active
+                and now - self.pomodoro_duration_adjust_started_at
+                < self.pomodoro_duration_adjust_seconds
+                and now - self.last_overlay_redraw >= self.render_interval
+            ):
+                self.needs_redraw = True
+            elif display_second != self.pomodoro_last_display_second:
+                self.pomodoro_last_display_second = display_second
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
         if self.settings_active:
             if (
                 self.settings_transition_active
@@ -6359,6 +11991,13 @@ class PersistentExpressionDisplay:
             self.refresh_always_on_top()
             return
         self.update_long_press(now)
+        if (
+            self.menu_active
+            and self.pointer_down
+            and self.app_pin_candidate_app_id is not None
+            and self.update_application_pin_hold(now)
+        ):
+            self.write_state()
         if (
             self.volume_mode
             and not self.pointer_down
@@ -6430,7 +12069,7 @@ class PersistentExpressionDisplay:
             or self.menu_active
             or now < self.status_visible_until
             or self.token_popup_visible
-            or self.camera_indicator_active()
+            or self.activity_indicator_mode() is not None
             or (self.camera_view_active and not self.gallery_active)
             or self.gallery_page_transition_active
             or now < self.camera_capture_flash_until
@@ -6438,6 +12077,10 @@ class PersistentExpressionDisplay:
             or now < self.camera_capture_error_until
             or now < self.gallery_notice_until
             or self.speech_bubble_opacity(now) > 0.0
+            or (
+                self.music_lyrics_overlay_active(now)
+                and self.music_player.status == "playing"
+            )
         )
         if (
             refresh_driven_scene
@@ -6454,7 +12097,24 @@ class PersistentExpressionDisplay:
             self.camera_frame_future.cancel()
         if self.camera_capture_future is not None:
             self.camera_capture_future.cancel()
+        if self.video_call_frame_future is not None:
+            self.video_call_frame_future.cancel()
+        if self.video_call_status_future is not None:
+            self.video_call_status_future.cancel()
+        if self.performance_future is not None:
+            self.performance_future.cancel()
+        if self.music_scan_future is not None:
+            self.music_scan_future.cancel()
+        if self.music_artwork_future is not None:
+            self.music_artwork_future.cancel()
+        if self.music_lyrics_fetch_future is not None:
+            self.music_lyrics_fetch_future.cancel()
+        self.music_player.shutdown()
         self.camera_executor.shutdown(wait=False, cancel_futures=True)
+        self.video_call_executor.shutdown(wait=False, cancel_futures=True)
+        self.performance_executor.shutdown(wait=False, cancel_futures=True)
+        self.music_executor.shutdown(wait=False, cancel_futures=True)
+        self.lyrics_executor.shutdown(wait=False, cancel_futures=True)
         self.status_executor.shutdown(wait=False, cancel_futures=True)
         self.control_executor.shutdown(wait=False, cancel_futures=True)
         self.balance_executor.shutdown(wait=False, cancel_futures=True)
@@ -6482,6 +12142,12 @@ def run_self_test() -> dict:
     if width <= 0 or height <= 0:
         raise ValueError("target_size must contain positive dimensions")
     status = SystemStatus()
+    performance = PerformanceMonitor()
+    music = MusicPlayer(Path("/tmp/riverbank-music-self-test"))
+    pomodoro = PomodoroTimer(
+        Path(os.environ.get("TMPDIR", "/tmp"))
+        / f"riverbank-pomodoro-self-test-{os.getpid()}.json"
+    )
     return {
         "ok": True,
         "renderer": "modular-v1",
@@ -6489,6 +12155,14 @@ def run_self_test() -> dict:
         "expression_count": len(config["expressions"]),
         "animation_module": Animation.__module__,
         "status_module": SystemStatus.__module__,
+        "performance_module": performance.__class__.__module__,
+        "music_module": music.__class__.__module__,
+        "pomodoro_module": PomodoroTimer.__module__,
+        "pomodoro_defaults": {
+            "focus_seconds": pomodoro.focus_seconds,
+            "short_break_seconds": pomodoro.short_break_seconds,
+            "long_break_seconds": pomodoro.long_break_seconds,
+        },
         "version": status.read_app_version(),
     }
 
@@ -6545,6 +12219,11 @@ def main() -> int:
                         else:
                             display.close_radial_menu()
                         display.menu_active = preview_active
+                        display.set_radial_menu_context(
+                            str(request.get("level", "main")),
+                            bool(request.get("pin_mode", False)),
+                            animate=False,
+                        )
                         preview_now = time.monotonic()
                         display.menu_opened_at = preview_now if preview_active else 0.0
                         display.menu_last_interaction_at = (
@@ -6615,6 +12294,28 @@ def main() -> int:
                             if display.menu_active and isinstance(selected, int) and 0 <= selected < 6
                             else None
                         )
+                        display.reset_application_pin_gesture()
+                        preview_pin_progress = max(
+                            0.0,
+                            min(float(request.get("pin_drag_progress", 0.0)), 1.0),
+                        )
+                        if (
+                            display.menu_level == "applications"
+                            and display.menu_selected is not None
+                            and preview_pin_progress > 0.0
+                        ):
+                            preview_item = display.radial_menu[display.menu_selected]
+                            preview_action = (
+                                preview_item.get("action")
+                                if isinstance(preview_item.get("action"), dict)
+                                else {}
+                            )
+                            if str(preview_action.get("type", "")) == "launch_app":
+                                display.app_pin_candidate_app_id = str(
+                                    preview_action.get("app_id", "")
+                                ).strip() or None
+                                display.app_pin_drag_progress = preview_pin_progress
+                                display.app_pin_drag_ready = preview_pin_progress >= 0.985
                         display.request_system_status_refresh(time.monotonic())
                         preview_token_popup = bool(
                             preview_active
@@ -6664,6 +12365,281 @@ def main() -> int:
                             display.close_settings()
                         display.needs_redraw = True
                         display.write_state()
+                    elif request.get("command") == "performance_view":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.prepare_voice_application_switch("performance")
+                            display.open_performance()
+                            section = str(request.get("section", "")).strip()
+                            if section == "system":
+                                display.performance_section = "system"
+                                display.performance_health_scroll_offset = (
+                                    display.clamp_performance_health_scroll(
+                                        float(request.get("scroll_offset", 0.0) or 0.0)
+                                    )
+                                )
+                                display.performance_health_scroll_start_offset = (
+                                    display.performance_health_scroll_offset
+                                )
+                                display.performance_transition_target = (
+                                    display.render_performance_surface()
+                                )
+                        else:
+                            display.close_performance(
+                                animated=bool(request.get("animated", True))
+                            )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "music_view":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.prepare_voice_application_switch("music")
+                            display.open_music()
+                        else:
+                            display.close_music(
+                                animated=bool(request.get("animated", True))
+                            )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "music_control":
+                        action = str(request.get("action", "")).strip().lower()
+                        action_map = {
+                            "play": "toggle",
+                            "pause": "toggle",
+                            "toggle": "toggle",
+                            "previous": "previous",
+                            "next": "next",
+                            "refresh": "refresh",
+                            "mode": "mode",
+                            "lyrics": "lyrics",
+                            "center": "center",
+                        }
+                        if action == "set_mode":
+                            if not display.set_music_playback_mode(
+                                str(request.get("mode", ""))
+                            ):
+                                raise ValueError(
+                                    "unsupported music playback mode: "
+                                    f"{request.get('mode')}"
+                                )
+                        elif action == "set_lyrics":
+                            display.set_music_lyrics_enabled(
+                                bool(request.get("enabled", True))
+                            )
+                        elif action not in action_map:
+                            raise ValueError(f"unsupported music action: {action}")
+                        elif action == "play" and not display.music_player.tracks:
+                            display.music_autoplay_pending = True
+                            display.request_music_scan()
+                        elif action == "play" and display.music_player.status == "playing":
+                            pass
+                        elif action == "pause" and display.music_player.status != "playing":
+                            display.music_autoplay_pending = False
+                            pass
+                        else:
+                            display.handle_music_target(action_map[action])
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "music_volume_preview":
+                        preview_active = bool(request.get("active", True))
+                        preview_now = time.monotonic()
+                        display.music_volume_dragging = False
+                        display.music_volume_interaction_started_at = 0.0
+                        display.music_volume_expand_from = (
+                            1.0 if preview_active else 0.0
+                        )
+                        display.music_volume_last_interaction_at = (
+                            preview_now if preview_active else 0.0
+                        )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "pomodoro_completion_preview":
+                        preview_active = bool(request.get("active", True))
+                        preview_now = time.monotonic()
+                        if preview_active:
+                            completed_phase = str(
+                                request.get("phase", "focus")
+                            ).strip()
+                            if completed_phase not in {
+                                "focus",
+                                "short_break",
+                                "long_break",
+                            }:
+                                raise ValueError(
+                                    "unsupported completion phase: "
+                                    f"{completed_phase}"
+                                )
+                            display.start_pomodoro_completion_alert(
+                                completed_phase,
+                                preview_now,
+                            )
+                            if str(request.get("seek", "start")) == "peak":
+                                peak_now = time.monotonic()
+                                display.pomodoro_completion_alert_started_at = (
+                                    peak_now
+                                    - display.pomodoro_completion_alert_rise_seconds
+                                    - 0.01
+                                )
+                                display.update_pomodoro_completion_alert(peak_now)
+                        else:
+                            display.pomodoro_completion_alert_active = False
+                            display.pomodoro_completion_alert_started_at = 0.0
+                            display.pomodoro_completion_alert_phase = None
+                            display.pomodoro_completion_alert_pulse = 0
+                            display.pomodoro_completion_alert_intensity = 0.0
+                            display.pomodoro_completion_alert_lit = False
+                            display.pomodoro_completion_alert_on_surface = None
+                            display.pomodoro_completion_alert_off_surface = None
+                            display.note_screensaver_activity(preview_now)
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "pomodoro_view":
+                        preview_active = bool(request.get("active", True))
+                        page = str(request.get("page", "timer")).strip().lower()
+                        statistics_page = max(
+                            0,
+                            min(int(request.get("statistics_page", 0)), 1),
+                        )
+                        if page not in {"timer", "statistics"}:
+                            raise ValueError(
+                                f"unsupported pomodoro page: {page}"
+                            )
+                        if preview_active:
+                            display.prepare_voice_application_switch("pomodoro")
+                            if not display.pomodoro_active:
+                                display.open_pomodoro()
+                            if bool(request.get("animated", True)):
+                                if (
+                                    page == "statistics"
+                                    and not display.pomodoro_statistics_active
+                                ):
+                                    display.open_pomodoro_statistics()
+                                elif (
+                                    page == "timer"
+                                    and display.pomodoro_statistics_active
+                                ):
+                                    display.close_pomodoro_statistics()
+                            else:
+                                display.pomodoro_active = True
+                                display.pomodoro_statistics_active = (
+                                    page == "statistics"
+                                )
+                                display.pomodoro_statistics_page = (
+                                    statistics_page
+                                    if page == "statistics"
+                                    else 0
+                                )
+                                display.pomodoro_transition_active = False
+                                display.pomodoro_transition_source = None
+                                display.pomodoro_transition_target = None
+                                display.pomodoro_transition_exits_page = False
+                        else:
+                            display.close_pomodoro(
+                                animated=bool(request.get("animated", True))
+                            )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "pomodoro_action":
+                        action = str(request.get("action", "toggle"))
+                        requested_seconds = max(
+                            60,
+                            min(int(request.get("seconds", 25 * 60)), 180 * 60),
+                        )
+                        handlers = {
+                            "toggle": lambda: display.pomodoro.toggle(),
+                            "start": lambda: display.pomodoro.start(),
+                            "pause": lambda: display.pomodoro.pause(),
+                            "reset": lambda: display.pomodoro.reset_phase(),
+                            "reset_cycle": lambda: display.pomodoro.reset_cycle(),
+                            "skip": lambda: display.pomodoro.skip(),
+                            "start_custom": lambda: display.pomodoro.start_focus_duration(
+                                requested_seconds
+                            ),
+                            "set_custom": lambda: display.pomodoro.set_focus_duration(
+                                requested_seconds
+                            ),
+                        }
+                        handler = handlers.get(action)
+                        if handler is None:
+                            raise ValueError(
+                                f"unsupported pomodoro action: {action}"
+                            )
+                        handler()
+                        if action in {"skip", "reset_cycle"}:
+                            display.pomodoro_phase_changed_at = time.monotonic()
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "pomodoro_duration_preview":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.close_radial_menu()
+                            if not display.pomodoro_active:
+                                display.open_pomodoro()
+                            requested_minutes = max(
+                                display.pomodoro_duration_min_minutes,
+                                min(
+                                    int(request.get("minutes", 25)),
+                                    display.pomodoro_duration_max_minutes,
+                                ),
+                            )
+                            step = display.pomodoro_duration_step_minutes
+                            display.pomodoro_duration_selected_minutes = max(
+                                display.pomodoro_duration_min_minutes,
+                                min(
+                                    round(requested_minutes / step) * step,
+                                    display.pomodoro_duration_max_minutes,
+                                ),
+                            )
+                            selected_index = (
+                                display.pomodoro_duration_selected_minutes
+                                - display.pomodoro_duration_min_minutes
+                            ) // step
+                            selectable_count = (
+                                (
+                                    display.pomodoro_duration_max_minutes
+                                    - display.pomodoro_duration_min_minutes
+                                )
+                                // step
+                                + 1
+                            )
+                            display.pomodoro_duration_pointer_clockwise = (
+                                selected_index * math.tau / selectable_count
+                            )
+                            display.pomodoro_active = True
+                            display.pomodoro_statistics_active = False
+                            display.pomodoro_statistics_page = 0
+                            display.pomodoro_transition_active = False
+                            display.pomodoro_duration_adjust_active = True
+                            display.pomodoro_duration_dial_moved = False
+                            display.pomodoro_duration_adjust_started_at = (
+                                time.monotonic()
+                                - display.pomodoro_duration_adjust_seconds
+                            )
+                            display.pomodoro_pointer_target = None
+                        else:
+                            display.pomodoro_duration_adjust_active = False
+                            display.pomodoro_duration_dial_moved = False
+                            display.pomodoro_duration_adjust_started_at = 0.0
+                            display.pomodoro_pointer_target = None
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "video_call_view":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.set_video_call_view(
+                                True,
+                                request_service=bool(
+                                    request.get("request_service", False)
+                                ),
+                            )
+                        elif display.video_call_active:
+                            display.close_video_call_to_application_menu(
+                                hangup=bool(request.get("hangup", False))
+                            )
+                        else:
+                            display.complete_application_menu_return(
+                                time.monotonic()
+                            )
                     elif request.get("command") == "camera_view":
                         display.set_camera_view(bool(request.get("active", True)))
                     elif request.get("command") == "camera_capture":

@@ -10,7 +10,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", "build", "__pycache__", ".venv", "venv"}
+SKIP_DIRS = {
+    ".git",
+    ".build",
+    "build",
+    "dist",
+    "DerivedData",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+}
 BANNED_SUFFIXES = {
     ".db", ".sqlite", ".sqlite3", ".hef", ".onnx", ".pt", ".pth",
     ".safetensors", ".wav", ".mp3", ".gif", ".so",

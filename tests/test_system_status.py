@@ -31,6 +31,7 @@ def sample_snapshot() -> SystemStatusSnapshot:
         health_healthy_count=24,
         health_total_count=24,
         app_version="v0.6.0 beta",
+        health_checks=(("test", "测试项目", True, ""),),
     )
 
 
@@ -40,6 +41,9 @@ def main() -> None:
     assert status.apply_snapshot(snapshot, 10.0)
     assert not status.apply_snapshot(snapshot, 11.0)
     assert status.as_dict()["camera_active_sources"] == ["unit-test"]
+    assert status.as_dict()["health_checks"] == [
+        {"id": "test", "name": "测试项目", "healthy": True, "detail": ""}
+    ]
     assert status.snapshot_values()[0] == 73
 
     with tempfile.TemporaryDirectory() as directory:
@@ -48,6 +52,7 @@ def main() -> None:
         old_leases = module.ACTIVE_VISION_LEASE_DIR
         old_version = module.VERSION_PATH
         old_legacy_version = module.LEGACY_VERSION_PATH
+        old_health = module.HEALTH_STATUS_PATH
         try:
             module.VOICE_STATE_PATH = root / "voice.json"
             module.ACTIVE_VISION_LEASE_DIR = root / "leases"
@@ -78,11 +83,31 @@ def main() -> None:
             module.LEGACY_VERSION_PATH = root / "legacy-VERSION"
             module.VERSION_PATH.write_text("v1.2.3 stable\n", encoding="utf-8")
             assert SystemStatus.read_app_version() == "v1.2.3 stable"
+
+            module.HEALTH_STATUS_PATH = root / "health.json"
+            module.HEALTH_STATUS_PATH.write_text(
+                json.dumps(
+                    {
+                        "checks": [
+                            {"id": "ok", "name": "正常项目", "healthy": True, "detail": "active"},
+                            {"id": "bad", "name": "异常项目", "healthy": False, "detail": "size mismatch"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            assert SystemStatus.read_health_summary() == (1, 2)
+            assert SystemStatus.read_health_checks() == (
+                ("ok", "正常项目", True, ""),
+                ("bad", "异常项目", False, "size mismatch"),
+            )
         finally:
             module.VOICE_STATE_PATH = old_voice
             module.ACTIVE_VISION_LEASE_DIR = old_leases
             module.VERSION_PATH = old_version
             module.LEGACY_VERSION_PATH = old_legacy_version
+            module.HEALTH_STATUS_PATH = old_health
     print("system status module: regression checks passed")
 
 

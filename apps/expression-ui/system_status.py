@@ -53,6 +53,7 @@ class SystemStatusSnapshot:
     health_healthy_count: int
     health_total_count: int
     app_version: str
+    health_checks: tuple[tuple[str, str, bool, str], ...]
 
 
 class SystemStatus:
@@ -78,6 +79,7 @@ class SystemStatus:
         self.health_healthy_count = 0
         self.health_total_count = 0
         self.app_version = DEFAULT_APP_VERSION
+        self.health_checks: tuple[tuple[str, str, bool, str], ...] = ()
 
     @staticmethod
     def read_wifi_quality() -> int:
@@ -291,21 +293,35 @@ class SystemStatus:
         return hostname, os_name, kernel_version, uptime_seconds
 
     @staticmethod
-    def read_health_summary() -> tuple[int, int]:
+    def read_health_checks() -> tuple[tuple[str, str, bool, str], ...]:
         try:
             payload = json.loads(HEALTH_STATUS_PATH.read_text(encoding="utf-8"))
             checks = payload.get("checks")
             if not isinstance(checks, list):
-                return 0, 0
-            total = len(checks)
-            healthy = sum(
-                1
-                for record in checks
-                if isinstance(record, dict) and bool(record.get("healthy"))
-            )
-            return healthy, total
+                return ()
+            records: list[tuple[str, str, bool, str]] = []
+            for record in checks:
+                if not isinstance(record, dict):
+                    continue
+                check_id = str(record.get("id") or "unknown")
+                name = str(record.get("name") or check_id)
+                healthy = bool(record.get("healthy"))
+                detail = record.get("detail", "")
+                if not isinstance(detail, str):
+                    detail = json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+                # Healthy rows only need their state. Preserve a concise reason for
+                # failed rows so the round-screen detail page stays informative
+                # without copying large service payloads into every UI state write.
+                detail = "" if healthy else detail.strip().replace("\n", " ")[:240]
+                records.append((check_id, name, healthy, detail))
+            return tuple(records)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return 0, 0
+            return ()
+
+    @classmethod
+    def read_health_summary(cls) -> tuple[int, int]:
+        checks = cls.read_health_checks()
+        return sum(1 for _check_id, _name, healthy, _detail in checks if healthy), len(checks)
 
     @staticmethod
     def read_app_version() -> str:
@@ -366,6 +382,7 @@ class SystemStatus:
             health_healthy_count=self.health_healthy_count,
             health_total_count=self.health_total_count,
             app_version=self.app_version,
+            health_checks=self.health_checks,
         )
 
     def snapshot_values(self) -> tuple:
@@ -379,7 +396,11 @@ class SystemStatus:
         wifi_ssid, wifi_ipv4 = cls.read_wifi_details()
         bluetooth_powered, bluetooth_devices = cls.read_bluetooth_details()
         hostname, os_name, kernel_version, uptime_seconds = cls.read_platform_details()
-        health_healthy_count, health_total_count = cls.read_health_summary()
+        health_checks = cls.read_health_checks()
+        health_total_count = len(health_checks)
+        health_healthy_count = sum(
+            1 for _check_id, _name, healthy, _detail in health_checks if healthy
+        )
         return SystemStatusSnapshot(
             wifi_quality=wifi_quality,
             wifi_enabled=cls.read_wifi_enabled(),
@@ -399,6 +420,7 @@ class SystemStatus:
             health_healthy_count=health_healthy_count,
             health_total_count=health_total_count,
             app_version=cls.read_app_version(),
+            health_checks=health_checks,
         )
 
     def apply_snapshot(
@@ -416,10 +438,19 @@ class SystemStatus:
 
     def as_dict(self) -> dict:
         snapshot = self.snapshot()
-        return {
-            field: list(value) if isinstance(value, tuple) else value
-            for field, value in (
-                (name, getattr(snapshot, name))
-                for name in snapshot.__dataclass_fields__
-            )
-        }
+        result: dict = {}
+        for field in snapshot.__dataclass_fields__:
+            value = getattr(snapshot, field)
+            if field == "health_checks":
+                result[field] = [
+                    {
+                        "id": check_id,
+                        "name": name,
+                        "healthy": healthy,
+                        "detail": detail,
+                    }
+                    for check_id, name, healthy, detail in value
+                ]
+            else:
+                result[field] = list(value) if isinstance(value, tuple) else value
+        return result
