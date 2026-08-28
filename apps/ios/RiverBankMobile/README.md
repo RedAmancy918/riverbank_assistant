@@ -12,6 +12,8 @@ SwiftUI iOS 客户端，支持与 `riverbank-tech` 进行双向 WebRTC 音视频
 
 版本显示为 `v0.20.0 beta`。App Store 的 `CFBundleShortVersionString` 保持三段数字，beta 通道在界面中单独标记。
 
+仓库保存 Swift 源码、Asset Catalog、`project.yml` 和共享 Xcode 工程，不保存本机 `DerivedData`、开发证书、Provisioning Profile、`.app`、`.ipa` 或 `.xcarchive`。克隆后需要选择自己的 Apple Development Team；若要分发给其他设备，应通过 TestFlight、App Store 或签名后的独立 Release 流程，而不是提交本机编译目录。
+
 ## 连接
 
 默认地址是：

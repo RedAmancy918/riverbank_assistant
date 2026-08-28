@@ -128,8 +128,10 @@ curl -fsS http://127.0.0.1:19733/state
 
 为 `apps/video-call/` 创建独立 Python 3.11 虚拟环境并安装 `requirements.txt`，生成至少 16 字符的随机配对令牌到 `~/.config/riverbank-video-call/token`，权限设为仅设备用户可读。创建 `/home/geo/.hermes/profiles/daily/workspace/reports` 并保持 `geo` 可写。安装并启用 `riverbank-video-call.service` 与 `riverbank-task-worker.service`；systemd 的 `StateDirectory=riverbank-tasks` 会创建持久化队列目录。先访问 `http://127.0.0.1:19734/healthz`，确认 `reports_available` 与 `tasks` 都为 `true`，再运行 `video_call_smoke.py` 完成一次静音双向回环验证，并提交一项短任务验证报告归档。
 
-Windows 端进入 `apps/video-call/windows-client/`，在 PowerShell 运行 `build.ps1` 生成安装版与便携版；Apple Silicon Mac 使用 `npm run dist:mac`。客户端默认通过 Tailscale MagicDNS 主机名 `http://riverbank-tech:19734` 连接；也可以手动填写树莓派的局域网或 Tailscale IP。报告下载使用系统保存窗口，服务端不接收文件写入。不要把 19734 映射到公网，Tailscale 使用 ACL 限制可访问设备。
+macOS 与 Windows 共用 `apps/video-call/windows-client/` 中的 Electron 源码；目录名只是历史命名。Windows 在 PowerShell 运行 `build.ps1` 生成安装版与便携版，Apple Silicon Mac 运行 `npm run dist:mac` 生成 DMG 与 ZIP。客户端默认通过 Tailscale MagicDNS 主机名 `http://riverbank-tech:19734` 连接；也可以手动填写树莓派的局域网或 Tailscale IP。报告下载使用系统保存窗口，服务端不接收文件写入。不要把 19734 映射到公网，Tailscale 使用 ACL 限制可访问设备。
 
 iOS 端进入 `apps/ios/RiverBankMobile/` 运行 `xcodegen generate`，用 Xcode 选择自己的 Apple Development Team 后安装到 iPhone。App 使用 RiverBank 3×3 图标，配对令牌只写入 iOS Keychain；默认服务器为 `https://riverbank-tech.tail0acdab.ts.net/assistant`。设备需要安装并登录同一 tailnet 的 Tailscale。树莓派使用 `sudo tailscale serve --bg --set-path /assistant 19734` 增加 HTTPS 路由，不替换根路径的论文站。
+
+上述三端的安装包均为本机构建产物：Windows EXE、macOS DMG/ZIP、iOS APP/IPA/XCArchive 和签名描述文件不会进入 Git。需要共享二进制时使用 GitHub Release 或正式商店分发，并记录版本、目标架构、签名状态和 SHA-256。
 
 终端工具可直接运行 `apps/video-call/riverbank_task.py`：先执行 `configure --server https://riverbank-tech.tail0acdab.ts.net/assistant --token TOKEN`，再用 `submit --wait '任务描述'`、`list`、`status TASK_ID`、`answer TASK_ID '补充内容'`、`cancel TASK_ID` 和 `download --task TASK_ID`。配置文件权限在 Unix 上自动设为 0600；CI 可改用 `RIVERBANK_SERVER_URL` 与 `RIVERBANK_PAIRING_TOKEN` 环境变量。

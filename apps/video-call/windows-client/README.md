@@ -1,5 +1,7 @@
 # RiverBank Call 桌面客户端
 
+这里是 macOS 与 Windows 共用的 Electron 桌面客户端源码。目录名 `windows-client` 是早期命名，macOS 构建并不是另一份未上传的工程。
+
 ## 开发运行
 
 1. 安装 Node.js 20 或更新版本。
@@ -32,3 +34,7 @@ npm run dist:mac
 ```
 
 `dist` 会生成 Apple Silicon 的 DMG 和 ZIP。应用图标使用 RiverBank 3×3 方块标识，应用包带摄像头、麦克风和本地网络权限说明，并使用本机 ad-hoc 签名；当前 beta 未做 Apple Developer ID 签名与公证，复制到其他 Mac 后首次启动可能需要右键选择“打开”。
+
+## 源码仓库与安装包
+
+Git 仓库包含两端共享的 `main.js`、`preload.js`、`renderer.js`、界面样式、图标、`package-lock.json` 和平台构建脚本。`dist/` 中生成的 Windows EXE、macOS DMG/ZIP 和 blockmap 不进入源码仓库。正式对外提供安装包时，建议上传至 GitHub Release，并同时发布 SHA-256；当前 beta 未签名或公证的构建只适合受信任设备测试。

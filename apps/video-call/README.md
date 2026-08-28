@@ -11,6 +11,16 @@
 - 安全：所有客户端必须提供至少 16 字符的配对令牌
 - 报告库：只读取 Daily workspace 下的 `reports/`，不提供上传、编辑或任意文件浏览
 
+## 客户端源码
+
+| 平台 | 源码位置 | 本机构建产物 |
+|---|---|---|
+| iOS | `apps/ios/RiverBankMobile/` | `.app`、`.ipa`、`.xcarchive` |
+| macOS | `apps/video-call/windows-client/` | `.dmg`、`.zip` |
+| Windows | `apps/video-call/windows-client/` | 安装版和便携版 `.exe` |
+
+macOS 与 Windows 使用同一套 Electron 源码。`windows-client` 是早期沿用的目录名，并不表示只有 Windows 版本。仓库只保存源码、锁定依赖、图标和构建脚本；`dist/`、Xcode `DerivedData/`、签名文件及平台安装包均被忽略。需要分发时，应由对应平台重新构建，或把校验过的二进制作为 GitHub Release 附件发布。
+
 ## 本地控制
 
 ```bash

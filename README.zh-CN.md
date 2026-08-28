@@ -58,7 +58,7 @@ apps/
   listengo-mic/      麦克风阵列控制口、唤醒与声源方向服务
   paper-radar/       论文采集、Hermes 编辑规则、渲染和网页
   release-manager/   整机版本封存与发布完整性验证
-  video-call/        树莓派 WebRTC 端点、圆屏控制和 Windows 客户端
+  video-call/        树莓派 WebRTC 端点、圆屏控制和 macOS/Windows 桌面客户端
   ios/               SwiftUI iPhone 客户端：视频通话、后台任务与报告
 config/
   systemd/           可参数化的服务单元；optional/ 为代理和专有 VPN 示例
@@ -97,6 +97,13 @@ scripts/             配置渲染、安装和发布检查工具
 | 可选本地代理 | `127.0.0.1:15732` | 只在启用 optional/proxy 时使用 |
 
 外部访问建议使用 Tailscale ACL 或带认证的 HTTPS 反向代理，不建议路由器直接做公网端口映射。
+
+## 客户端源码与构建产物
+
+- iOS 源码和可再生成的 Xcode 工程位于 `apps/ios/RiverBankMobile/`；
+- macOS 与 Windows 共用 Electron 源码，位于历史命名的 `apps/video-call/windows-client/`；该目录并不表示只支持 Windows；
+- macOS 的 DMG/ZIP、Windows 的 EXE，以及 iOS 的 APP/IPA 都属于本机构建产物，不提交到 Git；
+- `dist/`、`DerivedData/`、`*.ipa`、`*.xcarchive` 和签名描述文件已加入忽略规则。发布二进制时应通过独立 Release 附件提供，并附带版本号与 SHA-256，而不是把安装包直接放进源码历史。
 
 ## 许可证
 

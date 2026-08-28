@@ -5,7 +5,9 @@
 RiverBank Edge is a Raspberry Pi 5 edge-assistant stack that combines a round
 touch display, a persistent camera hub, local wake-word audio, Hermes Agent,
 Hailo-8 face tracking, a daily embodied-AI paper radar, and extensible health
-monitoring.
+monitoring. The repository also contains the SwiftUI iOS client and the shared
+Electron desktop client for macOS and Windows. Generated APP/IPA, DMG/ZIP and
+EXE packages are intentionally excluded from source control.
 
 This repository is a sanitized snapshot of the working implementation. Secrets,
 user profiles, logs, photos, recordings, model weights, third-party expression
