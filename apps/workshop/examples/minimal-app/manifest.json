@@ -1,0 +1,40 @@
+{
+  "apiVersion": "riverbank.workshop/v1",
+  "kind": "RiverBankApp",
+  "metadata": {
+    "id": "local.example.myapp",
+    "name": "我的应用",
+    "version": "0.1.0",
+    "description": "RiverBank 工坊通用应用模板。",
+    "vendor": "Local Developer"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "declarative-v1",
+      "entrypoint": "app/main.json",
+      "protocol": "riverbank.app-host/v1"
+    },
+    "permissions": [
+      {
+        "capability": "ui.surface",
+        "reason": "在圆屏显示应用自己的受控界面。",
+        "constraints": {}
+      }
+    ],
+    "resources": {
+      "cpuPercent": 5,
+      "memoryMB": 64,
+      "storageMB": 32,
+      "maxProcesses": 1
+    },
+    "lifecycle": {
+      "autostart": false,
+      "startTimeoutSeconds": 10,
+      "stopTimeoutSeconds": 5
+    },
+    "ui": {
+      "menuLabel": "应用",
+      "glyph": "应"
+    }
+  }
+}

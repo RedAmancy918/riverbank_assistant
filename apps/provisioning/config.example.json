@@ -1,0 +1,20 @@
+{
+  "user": "@RIVERBANK_USER@",
+  "home": "@RIVERBANK_HOME@",
+  "runtime_dir": "/run/riverbank-provisioning",
+  "state_path": "/run/riverbank-provisioning/status.json",
+  "device_config_path": "/etc/riverbank/device.json",
+  "hermes_env_path": "@RIVERBANK_HOME@/.hermes/.env",
+  "port": 19735,
+  "captive_port": 80,
+  "check_interval_seconds": 15,
+  "offline_grace_seconds": 60,
+  "probe_timeout_seconds": 3,
+  "probe_urls": [
+    "https://www.baidu.com/",
+    "https://connectivitycheck.gstatic.com/generate_204",
+    "https://www.cloudflare.com/cdn-cgi/trace"
+  ],
+  "hotspot_prefix": "RiverBank-Setup",
+  "hotspot_connection": "riverbank-provisioning"
+}

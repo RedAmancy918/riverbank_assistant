@@ -89,7 +89,7 @@ class ApplicationMenuModel:
             item["action"] = action
             self.applications.append(item)
             seen.add(app_id)
-        self.applications = self.applications[:4]
+        self.applications = self.applications[:5]
         self.pinned_app_id: str | None = None
         self.load()
 
@@ -145,6 +145,12 @@ class ApplicationMenuModel:
             return False
         return True
 
+    def unpin(self, app_id: str) -> bool:
+        """Remove the desktop pin only when the selected app owns the slot."""
+        if not app_id or self.pinned_app_id != app_id:
+            return False
+        return self.clear_pin()
+
     def main_items(self) -> list[dict]:
         items = [dict(item) for item in self.main_template]
         for index, item in enumerate(items):
@@ -172,30 +178,17 @@ class ApplicationMenuModel:
         return items
 
     def application_items(self, pin_mode: bool = False) -> list[dict]:
-        """Return app sectors plus clear/back controls.
+        """Return up to five app sectors plus the shared back control.
 
         ``pin_mode`` is accepted for protocol compatibility. Pinning is now a
         continuous outward gesture on an application sector, so it no longer
-        changes the second-level menu.
+        changes the second-level menu. The same gesture unpins an application
+        when that application already owns the desktop slot.
         """
         items = [dict(item) for item in self.applications]
-        while len(items) < 4:
+        while len(items) < 5:
             empty = dict(EMPTY_ITEM)
             empty["id"] = f"app_empty_{len(items)}"
-            empty["action"] = dict(EMPTY_ITEM["action"])
-            items.append(empty)
-        if self.pinned_app_id:
-            items.append(
-                {
-                    "id": "app_pin_clear",
-                    "label": "清空",
-                    "glyph": "清",
-                    "action": {"type": "clear_app_pin"},
-                }
-            )
-        else:
-            empty = dict(EMPTY_ITEM)
-            empty["id"] = "app_pin_clear_empty"
             empty["action"] = dict(EMPTY_ITEM["action"])
             items.append(empty)
         items.append(

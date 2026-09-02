@@ -3,9 +3,11 @@ Description=RiverBank local hands-free Hermes voice surface
 After=network-online.target listengo-mic.service hermes-gateway.service
 Wants=network-online.target
 Requires=listengo-mic.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@

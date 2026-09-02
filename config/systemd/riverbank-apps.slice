@@ -1,0 +1,14 @@
+[Unit]
+Description=RiverBank interactive and automation workload budget
+
+[Slice]
+CPUAccounting=true
+MemoryAccounting=true
+CPUQuota=320%
+CPUQuotaPeriodSec=1s
+MemoryHigh=70%
+MemoryMax=82%
+TasksMax=2048
+
+[Install]
+WantedBy=slices.target

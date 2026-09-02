@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://riverbank-tech.local/schemas/riverbank-app-host-v1.schema.json",
+  "title": "RiverBank Application Host Protocol v1",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/response"},
+    {"$ref": "#/$defs/event"}
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["protocol", "type", "id"],
+      "properties": {
+        "protocol": {"const": "riverbank.app-host/v1"},
+        "type": {"enum": ["request", "response", "event"]},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "request": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol", "type", "id", "method", "params"],
+          "properties": {
+            "protocol": {"const": "riverbank.app-host/v1"},
+            "type": {"const": "request"},
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "method": {"type": "string", "minLength": 1, "maxLength": 96},
+            "params": {"type": "object"}
+          }
+        }
+      ]
+    },
+    "response": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol", "type", "id"],
+          "properties": {
+            "protocol": {"const": "riverbank.app-host/v1"},
+            "type": {"const": "response"},
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "result": {"type": "object"},
+            "error": {
+              "type": "object",
+              "required": ["code", "message"],
+              "properties": {
+                "code": {"type": "string"},
+                "message": {"type": "string"},
+                "retryable": {"type": "boolean"}
+              }
+            }
+          },
+          "oneOf": [
+            {"required": ["result"], "not": {"required": ["error"]}},
+            {"required": ["error"], "not": {"required": ["result"]}}
+          ]
+        }
+      ]
+    },
+    "event": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol", "type", "id", "event", "data"],
+          "properties": {
+            "protocol": {"const": "riverbank.app-host/v1"},
+            "type": {"const": "event"},
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "event": {"type": "string", "minLength": 1, "maxLength": 96},
+            "data": {"type": "object"}
+          }
+        }
+      ]
+    }
+  }
+}

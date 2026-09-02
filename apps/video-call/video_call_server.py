@@ -33,6 +33,15 @@ from aiortc import (
 )
 from aiortc.contrib.media import MediaPlayer
 
+from attachment_store import (
+    DEFAULT_ATTACHMENT_ROOT,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    MAX_MESSAGE_ATTACHMENT_BYTES,
+    AttachmentStore,
+    AttachmentValidationError,
+)
+from chat_store import DEFAULT_CHAT_DB, ChatStore
 from report_library import DEFAULT_REPORTS_DIR, REPORT_EXTENSIONS, ReportLibrary
 from task_store import TaskStore
 
@@ -391,6 +400,8 @@ class RiverBankVideoCallServer:
         video_height: int,
         reports_dir: Path = DEFAULT_REPORTS_DIR,
         task_db: Path = DEFAULT_TASK_DB,
+        chat_db: Path = DEFAULT_CHAT_DB,
+        attachment_root: Path = DEFAULT_ATTACHMENT_ROOT,
     ) -> None:
         if len(token) < 16:
             raise ValueError("pairing token must contain at least 16 characters")
@@ -403,6 +414,8 @@ class RiverBankVideoCallServer:
         self.video_height = video_height
         self.report_library = ReportLibrary(reports_dir)
         self.task_store = TaskStore(task_db)
+        self.chat_store = ChatStore(chat_db)
+        self.attachment_store = AttachmentStore(attachment_root)
         self.started_at = time.time()
         self.waiting = False
         self.session: CallSession | None = None
@@ -460,6 +473,12 @@ class RiverBankVideoCallServer:
                 "available": True,
                 "persistent": True,
                 "counts": self.task_store.counts(),
+            },
+            "chat": {
+                "available": True,
+                "persistent": True,
+                "attachments": True,
+                "conversation_count": len(self.chat_store.list_conversations(limit=200)),
             },
             "last_error": self.last_error,
             "updated_at": time.time(),
@@ -621,14 +640,17 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         response.headers["Access-Control-Allow-Headers"] = (
             "Authorization, Content-Type, Idempotency-Key"
         )
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         response.headers["Access-Control-Expose-Headers"] = (
             "Content-Disposition, Content-Length, Content-Type"
         )
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    app = web.Application(middlewares=[middleware], client_max_size=2 * 1024 * 1024)
+    app = web.Application(
+        middlewares=[middleware],
+        client_max_size=32 * 1024 * 1024,
+    )
 
     async def healthz(_request: web.Request) -> web.Response:
         state = server.state()
@@ -644,6 +666,14 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 "reports_available": server.report_library.root.is_dir(),
                 "tasks": True,
                 "task_counts": await asyncio.to_thread(server.task_store.counts),
+                "chat": True,
+                "chat_attachments": True,
+                "chat_conversation_count": len(
+                    await asyncio.to_thread(
+                        server.chat_store.list_conversations,
+                        limit=200,
+                    )
+                ),
             }
         )
 
@@ -833,6 +863,225 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
             raise web.HTTPNotFound(text="task not found")
         return web.json_response({"schema": "riverbank.task/v1", "task": record})
 
+    async def chat_conversations(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        try:
+            limit = int(request.query.get("limit", "100"))
+            records = await asyncio.to_thread(
+                server.chat_store.list_conversations,
+                limit=limit,
+                include_internal=request.query.get("include_internal", "") == "1",
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response(
+            {
+                "schema": "riverbank.chat-conversations/v1",
+                "count": len(records),
+                "conversations": records,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def create_chat_conversation(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("JSON object required")
+            conversation = await asyncio.to_thread(
+                server.chat_store.create_conversation,
+                title=payload.get("title", ""),
+                source=payload.get("source", "api"),
+                device_name=payload.get("device_name", ""),
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response(
+            {"schema": "riverbank.chat-conversation/v1", "conversation": conversation},
+            status=201,
+        )
+
+    async def delete_chat_conversation(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        conversation_id = request.match_info["conversation_id"]
+        try:
+            messages = await asyncio.to_thread(
+                server.chat_store.list_messages,
+                conversation_id,
+            )
+            if any(item["state"] in {"queued", "running"} for item in messages):
+                raise web.HTTPConflict(text="stop the active response before deleting")
+            deleted = await asyncio.to_thread(
+                server.chat_store.delete_conversation,
+                conversation_id,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if not deleted:
+            raise web.HTTPNotFound(text="conversation not found")
+        await asyncio.to_thread(
+            server.attachment_store.delete_conversation,
+            conversation_id,
+        )
+        return web.json_response({"ok": True, "deleted": conversation_id})
+
+    async def chat_messages(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        conversation_id = request.match_info["conversation_id"]
+        try:
+            conversation = await asyncio.to_thread(
+                server.chat_store.get_conversation,
+                conversation_id,
+            )
+            if conversation is None:
+                raise web.HTTPNotFound(text="conversation not found")
+            records = await asyncio.to_thread(
+                server.chat_store.list_messages,
+                conversation_id,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response(
+            {
+                "schema": "riverbank.chat-messages/v1",
+                "conversation": conversation,
+                "count": len(records),
+                "messages": records,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def create_chat_message(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        conversation_id = request.match_info["conversation_id"]
+        saved_attachments: list[dict[str, Any]] = []
+        try:
+            if request.content_type.startswith("multipart/"):
+                reader = await request.multipart()
+                content = ""
+                total_bytes = 0
+                image_count = 0
+                async for part in reader:
+                    if part.name == "content":
+                        content = await part.text()
+                        continue
+                    if part.name not in {"file", "files"} or not part.filename:
+                        await part.read(decode=False)
+                        continue
+                    if len(saved_attachments) >= MAX_ATTACHMENTS_PER_MESSAGE:
+                        raise AttachmentValidationError("单条消息最多上传 4 个附件")
+                    payload_bytes = bytearray()
+                    while True:
+                        chunk = await part.read_chunk(size=256 * 1024)
+                        if not chunk:
+                            break
+                        payload_bytes.extend(chunk)
+                        total_bytes += len(chunk)
+                        if len(payload_bytes) > MAX_ATTACHMENT_BYTES:
+                            raise AttachmentValidationError("单个附件不能超过 15 MB")
+                        if total_bytes > MAX_MESSAGE_ATTACHMENT_BYTES:
+                            raise AttachmentValidationError("单条消息附件总计不能超过 30 MB")
+                    attachment = await asyncio.to_thread(
+                        server.attachment_store.save,
+                        conversation_id,
+                        part.filename,
+                        bytes(payload_bytes),
+                    )
+                    saved_attachments.append(attachment)
+                    if attachment["kind"] == "image":
+                        image_count += 1
+                        if image_count > 1:
+                            raise AttachmentValidationError("单条消息最多上传 1 张图片")
+            else:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("JSON object required")
+                content = payload.get("content")
+            user_message, assistant_message = await asyncio.to_thread(
+                server.chat_store.create_turn,
+                conversation_id,
+                content=content,
+                attachments=saved_attachments,
+            )
+        except KeyError:
+            await asyncio.to_thread(
+                server.attachment_store.delete_records,
+                saved_attachments,
+            )
+            raise web.HTTPNotFound(text="conversation not found")
+        except RuntimeError as exc:
+            await asyncio.to_thread(
+                server.attachment_store.delete_records,
+                saved_attachments,
+            )
+            raise web.HTTPConflict(text=str(exc))
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            await asyncio.to_thread(
+                server.attachment_store.delete_records,
+                saved_attachments,
+            )
+            raise web.HTTPBadRequest(text=str(exc))
+        return web.json_response(
+            {
+                "schema": "riverbank.chat-turn/v1",
+                "user_message": user_message,
+                "assistant_message": assistant_message,
+            },
+            status=202,
+        )
+
+    async def chat_attachment(request: web.Request) -> web.StreamResponse:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        try:
+            attachment = await asyncio.to_thread(
+                server.chat_store.get_attachment,
+                request.match_info["conversation_id"],
+                request.match_info["attachment_id"],
+                include_private=True,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if attachment is None:
+            raise web.HTTPNotFound(text="attachment not found")
+        try:
+            path = await asyncio.to_thread(
+                server.attachment_store.resolve,
+                attachment["storage_path"],
+            )
+        except FileNotFoundError:
+            raise web.HTTPNotFound(text="attachment file not found")
+        response = web.FileResponse(path)
+        response.content_type = str(attachment["media_type"])
+        disposition = "inline" if attachment["kind"] == "image" else "attachment"
+        response.headers["Content-Disposition"] = (
+            f"{disposition}; filename*=UTF-8''{quote(str(attachment['original_name']))}"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    async def cancel_chat_message(request: web.Request) -> web.Response:
+        if not server.authorized(request):
+            raise web.HTTPUnauthorized(text="pairing token required")
+        try:
+            message = await asyncio.to_thread(
+                server.chat_store.request_cancel,
+                request.match_info["message_id"],
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if message is None:
+            raise web.HTTPNotFound(text="message not found")
+        return web.json_response(
+            {"schema": "riverbank.chat-message/v1", "message": message}
+        )
+
     async def on_shutdown(_app: web.Application) -> None:
         await server.shutdown()
 
@@ -850,6 +1099,25 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
     app.router.add_get("/api/v1/tasks/{task_id}", task_detail)
     app.router.add_post("/api/v1/tasks/{task_id}/answer", answer_task)
     app.router.add_post("/api/v1/tasks/{task_id}/cancel", cancel_task)
+    app.router.add_get("/api/v1/chats", chat_conversations)
+    app.router.add_post("/api/v1/chats", create_chat_conversation)
+    app.router.add_delete(
+        "/api/v1/chats/{conversation_id}", delete_chat_conversation
+    )
+    app.router.add_get(
+        "/api/v1/chats/{conversation_id}/messages", chat_messages
+    )
+    app.router.add_post(
+        "/api/v1/chats/{conversation_id}/messages", create_chat_message
+    )
+    app.router.add_get(
+        "/api/v1/chats/{conversation_id}/attachments/{attachment_id}",
+        chat_attachment,
+    )
+    app.router.add_post(
+        "/api/v1/chats/{conversation_id}/messages/{message_id}/cancel",
+        cancel_chat_message,
+    )
     app.on_shutdown.append(on_shutdown)
     return app
 
@@ -899,6 +1167,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_TASK_DB,
     )
+    parser.add_argument(
+        "--chat-db",
+        type=Path,
+        default=DEFAULT_CHAT_DB,
+    )
+    parser.add_argument(
+        "--attachment-root",
+        type=Path,
+        default=DEFAULT_ATTACHMENT_ROOT,
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     return parser
@@ -926,6 +1204,10 @@ def main() -> int:
                     "scope": "LAN-or-tailnet",
                     "reports_dir": str(args.reports_dir),
                     "task_db": str(args.task_db),
+                    "chat_db": str(args.chat_db),
+                    "chat": True,
+                    "attachment_root": str(args.attachment_root),
+                    "chat_attachments": True,
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -943,6 +1225,8 @@ def main() -> int:
         video_height=max(180, min(args.video_height, 720)),
         reports_dir=args.reports_dir,
         task_db=args.task_db,
+        chat_db=args.chat_db,
+        attachment_root=args.attachment_root,
     )
     app = create_app(server)
     web.run_app(

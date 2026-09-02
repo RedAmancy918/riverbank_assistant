@@ -1,0 +1,28 @@
+{
+  "user": "@RIVERBANK_USER@",
+  "home": "@RIVERBANK_HOME@",
+  "hermes_bin": "@RIVERBANK_HOME@/.local/bin/hermes",
+  "timezone": "Asia/Shanghai",
+  "paper_job_name": "具身智讯日报",
+  "paper_report_path": "@RIVERBANK_REPO@/apps/paper-radar/data/generated/latest-report.json",
+  "paper_jobs_path": "@RIVERBANK_HOME@/.hermes/cron/jobs.json",
+  "paper_executions_path": "@RIVERBANK_HOME@/.hermes/cron/executions.db",
+  "report_expected_after": "08:45",
+  "command_timeout_seconds": 25,
+  "settle_seconds": 0.35,
+  "display_service": "expression-display.service",
+  "services": [
+    "camera-hub.service",
+    "listengo-mic.service",
+    "hermes-gateway.service",
+    "hermes-voice.service",
+    "hermes-expression-bridge.service",
+    "riverbank-face-tracker.service",
+    "paper-radar-web.service",
+    "riverbank-video-call.service",
+    "riverbank-task-worker.service",
+    "riverbank-chat-worker.service",
+    "riverbank-health-monitor.service",
+    "expression-display.service"
+  ]
+}

@@ -33,7 +33,13 @@ APPS = [
         "label": "番茄",
         "glyph": "茄",
         "action": {"type": "launch_app", "app_id": "pomodoro"},
-    }
+    },
+    {
+        "id": "workshop",
+        "label": "工坊",
+        "glyph": "坊",
+        "action": {"type": "launch_app", "app_id": "workshop"},
+    },
 ]
 
 
@@ -65,12 +71,21 @@ class ApplicationMenuTests(unittest.TestCase):
             normal = model.application_items(False)
             self.assertEqual(len(normal), 6)
             self.assertEqual(normal[0]["id"], "pomodoro")
+            self.assertEqual(normal[1]["id"], "workshop")
             self.assertEqual(normal[4]["label"], "")
             self.assertEqual(normal[5]["label"], "返回")
             self.assertTrue(model.pin("pomodoro"))
             pinned = model.application_items(True)
-            self.assertEqual(pinned[4]["label"], "清空")
-            self.assertEqual(pinned[4]["action"]["type"], "clear_app_pin")
+            self.assertEqual(pinned, normal)
+
+    def test_unpin_only_accepts_the_currently_pinned_application(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = self.make_model(directory)
+            self.assertTrue(model.pin("pomodoro"))
+            self.assertFalse(model.unpin("workshop"))
+            self.assertEqual(model.pinned_app_id, "pomodoro")
+            self.assertTrue(model.unpin("pomodoro"))
+            self.assertIsNone(model.pinned_app_id)
 
     def test_invalid_application_cannot_be_pinned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

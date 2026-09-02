@@ -1,0 +1,42 @@
+{
+  "protocol": "riverbank.app-host/v1",
+  "identity": "bound-by-unix-peer-credentials",
+  "transport": "length-prefixed-json-over-private-unix-socket",
+  "methods": {
+    "ui.present": "ui.surface",
+    "ui.dismiss": "ui.surface",
+    "storage.get": "storage.app",
+    "storage.put": "storage.app",
+    "storage.list": "storage.app",
+    "storage.delete": "storage.app",
+    "events.subscribe": "events.subscribe",
+    "events.unsubscribe": "events.subscribe",
+    "notifications.show": "notifications.local",
+    "camera.snapshot": "camera.snapshot",
+    "camera.stream.open": "camera.stream",
+    "camera.stream.close": "camera.stream",
+    "microphone.stream.open": "microphone.stream",
+    "microphone.stream.close": "microphone.stream",
+    "speaker.play": "speaker.playback",
+    "speaker.stop": "speaker.playback",
+    "vision.detect": "vision.inference",
+    "motor.move": "motor.pan_tilt",
+    "motor.stop": "motor.pan_tilt",
+    "assistant.query": "assistant.query",
+    "tasks.create": "tasks.submit",
+    "tasks.status": "tasks.submit",
+    "reports.list": "reports.read",
+    "reports.read": "reports.read",
+    "network.fetch": "network.outbound"
+  },
+  "neverExposed": [
+    "credentials.*",
+    "filesystem.host.*",
+    "kernel.*",
+    "packages.*",
+    "process.*",
+    "service.*",
+    "shell.*",
+    "system.*"
+  ]
+}

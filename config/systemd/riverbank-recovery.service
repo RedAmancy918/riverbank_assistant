@@ -1,0 +1,32 @@
+[Unit]
+Description=RiverBank allow-listed service recovery controller
+After=local-fs.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=@RIVERBANK_USER@
+UMask=0007
+RuntimeDirectory=riverbank-recovery
+RuntimeDirectoryMode=0770
+StateDirectory=riverbank-recovery
+StateDirectoryMode=0750
+ExecStartPre=/usr/bin/python3 @RIVERBANK_REPO@/apps/recovery/recovery_manager.py --config /etc/riverbank/recovery.json --validate-config
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/recovery/recovery_manager.py --config /etc/riverbank/recovery.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/riverbank-recovery /var/lib/riverbank-recovery @RIVERBANK_HOME@/.hermes
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

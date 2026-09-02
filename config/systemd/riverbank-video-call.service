@@ -1,9 +1,12 @@
 [Unit]
 Description=RiverBank LAN and Tailscale WebRTC video call endpoint
 After=network-online.target camera-hub.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 Wants=network-online.target camera-hub.service
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=geo
 Group=geo

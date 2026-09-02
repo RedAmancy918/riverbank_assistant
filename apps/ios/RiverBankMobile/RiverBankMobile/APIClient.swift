@@ -166,4 +166,62 @@ struct APIClient: Sendable {
         try FileManager.default.moveItem(at: temporary, to: destination)
         return destination
     }
+
+    func listChats(limit: Int = 100) async throws -> ChatConversationListEnvelope {
+        try await decode(
+            ChatConversationListEnvelope.self,
+            request: request("api/v1/chats?limit=\(limit)")
+        )
+    }
+
+    func createChat(title: String = "") async throws -> ChatConversation {
+        let payload: [String: String] = [
+            "title": title,
+            "source": "ios",
+            "device_name": "iPhone"
+        ]
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        return try await decode(
+            ChatConversationEnvelope.self,
+            request: request("api/v1/chats", method: "POST", body: body)
+        ).conversation
+    }
+
+    func deleteChat(id: String) async throws {
+        _ = try await decode(
+            DeleteChatEnvelope.self,
+            request: request("api/v1/chats/\(id)", method: "DELETE")
+        )
+    }
+
+    func chatMessages(conversationID: String) async throws -> ChatMessagesEnvelope {
+        try await decode(
+            ChatMessagesEnvelope.self,
+            request: request("api/v1/chats/\(conversationID)/messages")
+        )
+    }
+
+    func sendChatMessage(conversationID: String, content: String) async throws -> ChatTurnEnvelope {
+        let body = try JSONSerialization.data(withJSONObject: ["content": content])
+        return try await decode(
+            ChatTurnEnvelope.self,
+            request: request(
+                "api/v1/chats/\(conversationID)/messages",
+                method: "POST",
+                body: body
+            )
+        )
+    }
+
+    func cancelChatMessage(conversationID: String, messageID: String) async throws -> ChatMessage {
+        let body = try JSONSerialization.data(withJSONObject: [:])
+        return try await decode(
+            ChatMessageEnvelope.self,
+            request: request(
+                "api/v1/chats/\(conversationID)/messages/\(messageID)/cancel",
+                method: "POST",
+                body: body
+            )
+        ).message
+    }
 }

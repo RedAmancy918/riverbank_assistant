@@ -10,15 +10,20 @@
 | GIF 解码、抠色与视口缓存 | `apps/expression-ui/animation_assets.py` |
 | 番茄钟阶段、每日统计、截止时间、重启恢复和持久化 | `apps/expression-ui/pomodoro.py`；语音解析在 `pomodoro_voice.py`；视觉、统计页与触摸在 `expression_display_persistent.py` |
 | 两级应用菜单、主菜单固定槽与固定状态 | `apps/expression-ui/app_menu.py`；交互和过场动画在 `expression_display_persistent.py`；状态位于 `RIVERBANK_DATA/ui/app-pin.json` |
+| 工坊语音生成、审批、声明式运行与包协议 | `apps/workshop/`；语音路由在 `daily_voice_assistant.py`，圆屏审核在 `expression_display_persistent.py`，正式契约为 `docs/WORKSHOP_PROTOCOL.zh-CN.md`；注册表默认位于 `RIVERBANK_DATA/workshop/registry.json` |
 | Wi-Fi、蓝牙、音量、Token、视觉隐私与版本快照 | `apps/expression-ui/system_status.py` |
+| SYSTEM 一键恢复、服务白名单与日报缺口补跑 | `apps/recovery/recovery_manager.py`；UI 客户端为 `apps/expression-ui/recovery_client.py`；配置为 `/etc/riverbank/recovery.json` |
+| 断网检测、临时热点、二维码与手机配置页 | `apps/provisioning/provisioning_service.py`；配置为 `/etc/riverbank/provisioning.json` |
+| 整机 CPU/内存保底 | `config/systemd/riverbank-apps.slice`；应用服务通过 `Slice=riverbank-apps.slice` 加入 |
 | 允许本机 `netdev` 组切换 Wi-Fi 的最小权限规则 | `system/polkit/60-riverbank-wifi.rules` |
 | 语音 VAD、本地 ASR、Hermes、TTS 和多轮追问 | `apps/expression-ui/daily_voice_assistant.py` |
+| 小灰的产品身份与 Daily 自我认知 | `/home/geo/.hermes/profiles/daily/SOUL.md`、`profile.yaml`；文字 Chat 与语音入口分别在 `chat_worker.py`、`daily_voice_assistant.py` 强制保持一致 |
 | 语音端到端 P50/P95 耗时统计 | `apps/expression-ui/voice_latency.py` |
 | 语音表情结构化事件与顺序校验 | `apps/expression-ui/expression_events.py`、`hermes_expression_bridge.py` |
 | DeepSeek 回复情绪标签、流式截获与本地回退 | `apps/expression-ui/response_emotions.py` |
 | 开机 Wayland 接力 | `apps/expression-ui/boot_handoff.py` |
 | 麦克风串口协议和唤醒事件 | `apps/listengo-mic/listengo_daemon.py` |
-| Hailo 人脸追踪 | `apps/face-tracker/face_tracker.py` |
+| Hailo 单一所有者协调器与人脸 Worker | `apps/face-tracker/face_tracker_supervisor.py`、`face_tracker.py` |
 | Hailo 推理租约与控制命令 | `apps/face-tracker/vision_leases.py`、`face_trackerctl.py` |
 | WebRTC、报告库、后台任务 API/Worker、CLI 和配对接口 | `apps/video-call/video_call_server.py`、`report_library.py`、`task_store.py`、`task_worker.py`、`riverbank_task.py`；iOS 客户端在 `apps/ios/RiverBankMobile/`，macOS / Windows 客户端在 `apps/video-call/windows-client/`；圆屏适配在 `video_call_client.py` |
 | 自检类型、失败阈值和弹窗 | `apps/health-monitor/health_monitor.py` 与 `config.example.json` |
@@ -36,8 +41,12 @@
 /run/hermes-voice-control/
 /run/riverbank-expression/
 /run/riverbank-face-tracker/
+/run/riverbank-workshop/status.json
+/run/riverbank-workshop/runtime.json
 /var/lib/riverbank-health-monitor/status.json
 /var/lib/riverbank-tasks/tasks.db
+${RIVERBANK_DATA}/workshop/proposals.json
+${RIVERBANK_DATA}/workshop/audit.jsonl
 ${RIVERBANK_DATA}/pomodoro/state.json
 ```
 
@@ -66,9 +75,11 @@ ${RIVERBANK_DATA}/pomodoro/state.json
 - 音乐应用由 `apps/expression-ui/music_player.py` 负责本地媒体扫描、FFprobe 元数据、专辑封面选择/提取、同名 LRC 解析、LRCLIB 自动匹配和 VLC 子进程，`expression_display_persistent.py` 负责圆屏页面、过场、封面解码、歌词滚动、边缘式系统音量组件和触摸；默认音乐库为 `/mnt/nvme64/Music`，支持 MP3/FLAC/WAV/M4A/AAC/OGG/OPUS；封面优先匹配同名 JPG/JPEG/PNG/WEBP，其次匹配目录 cover/folder/front/album，最后从音频提取内嵌图并缓存到 `RIVERBANK_DATA/ui/music-artwork`；无封面占位图必须使用蓝色粗体双音符：顶部为略带弧度的宽横梁，两根宽音符杆连接饱满椭圆音符头，并以 4× 超采样绘制；中央点击必须在封面和屏幕水平轴上的无框歌词之间平滑交叉渐变，歌词模式不得残留封面圆环或与曲名重叠，上一句/当前句/下一句必须纵向滚动，坏封面不得重复解码或阻塞渲染；播放时封面外围圆环必须保持静态，不绘制绕环运动点；播放进程必须采用 VLC RC 原生暂停/继续控制并将本地文件缓存限制为约 100 ms，避免用 `SIGSTOP` 后让 PipeWire 缓冲继续出声；RC 管道异常时才允许回退进程信号，控制调用耗时写入状态快照；播放器右侧音量组件必须始终可见：闲置时只显示一条细弧和当前位置点，触摸后以约 220 ms 展开为宽滑轨，松手约 800 ms 后自动收回，顶部映射 100%、底部映射 0% 并通过 `wpctl` 控制默认系统音频输出；两种最终图层按音量缓存，全部使用 4× 抗锯齿，左下不得保留独立音量按钮，也不得覆盖中央进度条或运输控制；歌曲开始播放、手动切歌或自动续播成功时必须立即读取同名 `.lrc`，本地缺失才在独立单线程执行器中调用 LRCLIB `/api/get`，404 后间隔约 300 ms 再调用 `/api/search`；不得依赖进入歌词页或等待手动操作；请求必须携带客户端 User-Agent、按标题/歌手/专辑/时长评分、只接受可靠的同步歌词，同一曲每次服务运行最多联网一次，429 不重试；匹配成功后将 `.lrc` 原子保存到音乐文件旁，联网失败不得阻塞播放或渲染；界面不得保留手动歌词搜索按钮；音乐页“词”按钮只切换表情主页歌词叠层并将状态持久化，播放器内部歌词与自动搜索始终可用；表情页歌词必须为约 50 px、无框无底板的当前句单行，左右边界按该文字带在圆屏中的安全弦宽计算，短句居中，长句水平滚动且暂停时冻结；播放器与表情页歌词带的左右边缘都必须通过透明度渐变自然消失；扫描必须异步，空库、坏文件、坏 LRC 或歌词源故障不得阻塞表情服务；播放模式保存在 `RIVERBANK_DATA/ui/music-preferences.json`，语音气泡和其他应用必须覆盖歌词层；离开音乐页后允许继续播放，渲染服务关闭时必须停止子进程；
 - 视频通话必须通过 Camera Hub 与 PipeWire 共享流工作，禁止直接打开 USB 摄像头或独占 ALSA。非本机请求必须携带配对令牌，远端画面快照只能从 loopback 读取；圆屏的“通话”页面与语音“打开视频通话/挂断”均使用同一服务。发布前运行 `apps/video-call/video_call_smoke.py`，确认双向音视频轨、圆屏远端帧和挂断清理全部通过；
 - 后台任务必须先持久化再返回 201；重复 Idempotency-Key 返回原任务。Worker 重启后 running 任务回到 queued，客户端断线不得取消；waiting_input 只接受一次明确补充，完成任务必须关联报告库中的 Markdown。取消 queued/waiting_input 应立即生效，取消 running 必须终止对应 Hermes 子进程组。回归运行 `tests/test_task_store.py`、`tests/test_task_worker.py`，并通过 `/api/v1/tasks` 做一次真实端到端归档；
+- 多端 Chat 必须使用独立 `chat.db` 和 `riverbank-chat-worker.service`，不得与 `tasks.db` 或长任务 Worker 共用执行循环；Worker 必须显式绑定 Daily profile，普通 Chat 工具集不得包含任意文件写入或系统管理。客户端活动生成期间轮询消息增量，停止按钮设置取消位并由 Worker 终止 Hermes 子进程；删除活动会话必须返回冲突。回归运行 `tests/test_chat_store.py`，并通过 `/api/v1/chats` 完成创建、两轮上下文、停止与删除测试；
 - 四个应用都接入 Daily 本地快速路由，不能依赖 Hermes 工具选择：番茄钟支持打开、创建、开始、暂停、继续、重置和跳过；性能支持打开与关闭；音乐支持打开/关闭页面、播放、暂停、上一首、下一首、列表循环、单曲循环、乱序播放和主页歌词开关；通话支持打开与挂断。音乐播放期间再次唤醒后说“下一首”必须直接发送 `music_control next`；首次播放时若曲库仍为空，渲染器应保留待播放标记并在异步扫描完成后自动播放。普通“继续”和讨论论文中的“下一首”不得被本地路由误拦截；
 - 播放模式固定为 `list_loop`、`single_repeat`、`shuffle` 三种，右上模式按钮单击按“列表循环 → 单曲循环 → 乱序播放”切换，长按约 750 ms 手动刷新音乐库；进入音乐页也必须异步扫描。自然播完与手动运输控制遵循当前模式，乱序不得立即重复当前曲；播放模式保存在 `RIVERBANK_DATA/ui/music-preferences.json`，服务重启后恢复。
-- 主菜单“应用”进入二级环形应用菜单；选中应用后沿原方向继续向外滑，外弧必须展开为“固定到首页菜单”；手指必须实际进入该外弧命中区域、保持满行程约 0.35 秒并在其上松手才固定，未命中外弧、快速滑过或立即松手仍应打开应用，回拖需取消；二级菜单只能通过“返回”扇区返回主菜单，禁止左向右滑动返回，以免截获右侧应用的选择手势；层级切换使用约 220 ms 缓存交叉淡化；
+- 主菜单“应用”进入二级环形应用菜单；选中应用后沿原方向继续向外滑：未固定的应用显示“固定到桌面”，当前已固定的应用显示“取消固定”。手指必须实际进入该外弧命中区域、保持满行程约 0.35 秒并在其上松手才确认，未命中外弧、快速滑过或立即松手仍应打开应用，回拖需取消；不再保留单独的“清空”扇区；二级菜单只能通过“返回”扇区返回主菜单，禁止左向右滑动返回，以免截获右侧应用的选择手势；层级切换使用约 220 ms 缓存交叉淡化；
+- 工坊外部包默认必须通过 `.rbapp` 完整性和 Ed25519 信任检查；本地开发包只有人工显式使用 `--allow-unsigned-local` 才可注册，而且仍保持 `installed_disabled`。语音创建必须先进入提案队列，由有限声明式验证器反推权限，经设备签名复检后在圆屏显示完整权限；批准集合必须与展示集合完全一致，才能启用。v0.24.2 beta 只验证“本地圆屏物理在场”，没有验证发起者、设备所有者或超级开发者身份；维护和客服不得把它描述成账户级所有者审批。目标角色模型是普通请求者只提交，设备所有者通过 PIN/可信手机批准具体应用，平台开发者只在签名版本中发布 capability 和硬边界；远程客户端在该身份链完成前不得直接 approve。运行器只接受 `declarative-v1`，`python-sandbox-v1` 保持禁用；退出页面或视觉租约到期必须停止应用和隐私指示。任何新 capability、声明式节点、Host 方法或审核身份机制都必须同时更新 `workshop_contract.py`、`workshop_declarative.py`、`host-api-methods.json`、JSON Schema、中文协议和威胁测试；不得先在运行时添加隐藏接口。回归至少运行 `python3 apps/workshop/workshopctl.py self-test` 与 `python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v`；
 - 重启滑块回拖可撤销，到端点抬手才执行；
 - 主页状态栏重启图标必须使用顶部开口圆弧加独立竖线的标准电源符号，所有端点为圆帽并随状态胶囊切线方向整体旋转；不得使用循环箭头图标。
 - 摄像头被主动调用时，表情桌面和展开状态栏继续使用既有右上角隐私灯位置；相机、相册、音乐、番茄钟、性能和设置页必须统一显示在圆屏顶部中轴，不得遮挡返回、模式或统计按钮；Camera Hub 常驻本身不得点亮。
@@ -81,7 +92,7 @@ ${RIVERBANK_DATA}/pomodoro/state.json
 - DeepSeek 回复的情绪标签不得进入气泡或扬声器；标签应在首段 TTS 前切换表情，未知标签必须降级为 `thinking`；
 - Hermes 推理、Qwen 视觉或扬声器播放期间再次说出唤醒词，旧轮次应立即停止，播放新的唤醒回应并重新录音；
 - Paper Radar 候选/精选/焦点/产业数量上限保持不变。
-- 无视觉租约时 Hailo 管线保持暂停；申请租约后恢复推理，到期或释放后再次暂停。
+- 无视觉租约时只能保留不打开设备的协调器，不得存在 Hailo 推理子进程；申请人脸租约后启动 SCRFD Worker，到期或释放后完整终止 Worker。工坊 YOLO 只能在同一协调器取得外部预约后启动，且与人脸 Worker 不得并存。
 - `expression_display_persistent.py --self-test`、结构化表情事件、人脸追踪双态及发布完整性检查全部通过。
 
 ## 流式语音参数与延迟
@@ -116,7 +127,7 @@ Daily 的 `file` 工具只在用户明确要求时用于查看、分类、建目
 
 ## 按需 Hailo 与发布完整性
 
-人脸追踪服务保留模型和进程，只在有效 TTL 租约期间运行推理：
+人脸追踪的轻量协调器保持常驻，但自身不打开 Hailo。SCRFD 与工坊 YOLO 都以隔离子进程按需运行；模型切换必须等旧子进程完整退出，避免 GStreamer 元素在 `NULL` 状态下仍持有 VDevice。两类视觉任务通过带 TTL 的互斥预约共享唯一的 Hailo；调用方异常退出后，预约会自动过期并恢复可用。首次重新加载模型会有短暂启动延迟：
 
 ```bash
 python3 apps/face-tracker/face_trackerctl.py status
@@ -128,7 +139,7 @@ python3 apps/face-tracker/face_trackerctl.py release LEASE_ID
 
 ```bash
 sudo python3 apps/release-manager/release_manager.py seal \
-  --version v0.20.0 --channel beta --notes "release summary"
+  --version v0.24.5 --channel beta --notes "release summary"
 python3 apps/release-manager/release_manager.py verify --json
 ```
 

@@ -66,6 +66,20 @@
       "equals": true
     },
     {
+      "id": "chat-worker",
+      "name": "Hermes Daily 连续对话 Worker",
+      "type": "systemd_service",
+      "target": "riverbank-chat-worker.service"
+    },
+    {
+      "id": "chat-api",
+      "name": "移动端与桌面端 Chat 会话 API",
+      "type": "http_json",
+      "target": "http://127.0.0.1:19734/healthz",
+      "json_path": "chat",
+      "equals": true
+    },
+    {
       "id": "hermes-gateway",
       "name": "Hermes 网关",
       "type": "systemd_service",
@@ -91,6 +105,18 @@
       "name": "小屏表情播放服务",
       "type": "systemd_service",
       "target": "expression-display.service"
+    },
+    {
+      "id": "recovery-controller",
+      "name": "SYSTEM 一键恢复控制器",
+      "type": "systemd_service",
+      "target": "riverbank-recovery.service"
+    },
+    {
+      "id": "offline-provisioning",
+      "name": "离线扫码配网服务",
+      "type": "systemd_service",
+      "target": "riverbank-provisioning.service"
     },
     {
       "id": "expression-display-architecture",
@@ -227,6 +253,36 @@
         "/usr/bin/python3",
         "@RIVERBANK_REPO@/apps/health-monitor/face_tracker_health.py"
       ]
+    },
+    {
+      "id": "workshop-contract",
+      "name": "工坊能力边界与接口协议",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/workshop/workshopctl.py",
+        "self-test"
+      ],
+      "interval_seconds": 300,
+      "timeout_seconds": 15
+    },
+    {
+      "id": "workshop-service",
+      "name": "工坊语音生成、审批与声明式运行服务",
+      "type": "systemd_service",
+      "target": "riverbank-workshop.service"
+    },
+    {
+      "id": "workshop-runtime",
+      "name": "工坊受控运行时与提案队列",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/workshop/workshopctl.py",
+        "service-health"
+      ],
+      "interval_seconds": 60,
+      "timeout_seconds": 10
     },
     {
       "id": "system-release-integrity",

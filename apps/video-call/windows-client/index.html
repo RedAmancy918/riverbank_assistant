@@ -11,7 +11,28 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <section class="login-view" id="loginView">
+      <form class="login-card" id="loginForm">
+        <img class="login-mark" src="assets/riverbank-mark.svg" alt="RiverBank" />
+        <div class="login-heading">
+          <p>RIVERBANK DEVICE ACCESS</p>
+          <h1>连接小灰</h1>
+          <span>输入 Edge Host 和配对令牌，连接你的 RiverBank Edge 节点。</span>
+        </div>
+        <label class="login-field">
+          <span>RiverBank Edge Host</span>
+          <input id="serverUrl" value="http://riverbank-tech:19734" spellcheck="false" autocomplete="url" />
+        </label>
+        <label class="login-field">
+          <span>配对令牌</span>
+          <input id="pairingToken" type="password" autocomplete="current-password" />
+        </label>
+        <button class="login-button" id="loginButton" type="submit">进入 RiverBank</button>
+        <p class="login-message" id="loginMessage">等待连接</p>
+      </form>
+    </section>
+
+    <main class="shell hidden" id="appShell">
       <header class="topbar">
         <div class="brand">
           <img src="assets/riverbank-mark.svg" alt="RiverBank" />
@@ -20,14 +41,20 @@
             <p>实时通话与任务报告</p>
           </div>
         </div>
-        <div class="connection-pill" id="connectionPill" data-state="idle">
-          <span class="status-dot"></span>
-          <span id="connectionLabel">未连接</span>
+        <div class="topbar-actions">
+          <div class="connection-pill" id="connectionPill" data-state="idle">
+            <span class="status-dot"></span>
+            <span id="connectionLabel">未通话</span>
+          </div>
+          <button class="logout-button" id="logoutButton" type="button">登出</button>
         </div>
       </header>
 
       <nav class="workspace-tabs" aria-label="应用功能">
-        <button class="workspace-tab active" id="callTab" type="button" data-view="call">
+        <button class="workspace-tab active" id="chatTab" type="button" data-view="chat">
+          Chat
+        </button>
+        <button class="workspace-tab" id="callTab" type="button" data-view="call">
           视频通话
         </button>
         <button class="workspace-tab" id="reportsTab" type="button" data-view="reports">
@@ -35,13 +62,52 @@
         </button>
       </nav>
 
-      <section class="app-view" id="callView">
+      <section class="app-view" id="chatView">
+        <div class="chat-layout">
+          <aside class="chat-sidebar">
+            <button class="new-chat-button" id="newChatButton" type="button">
+              <span>＋</span> 新对话
+            </button>
+            <div class="chat-history" id="chatHistory"></div>
+          </aside>
+          <section class="chat-main">
+            <header class="chat-header">
+              <div>
+                <h2 id="chatTitle">RiverBank</h2>
+                <p>Daily Assistant · 连续对话</p>
+              </div>
+            </header>
+            <div class="chat-messages" id="chatMessages">
+              <div class="chat-welcome" id="chatWelcome">
+                <img src="assets/riverbank-mark.svg" alt="RiverBank" />
+                <h2>有什么可以帮你？</h2>
+                <p>直接提问或讨论想法；复杂工作可以交给后台任务继续执行。</p>
+              </div>
+            </div>
+            <form class="chat-composer" id="chatComposer">
+              <div class="chat-attachment-tray hidden" id="chatAttachmentTray"></div>
+              <input
+                id="chatAttachmentInput"
+                type="file"
+                hidden
+                multiple
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.md,.markdown,.txt,.csv,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv"
+              />
+              <button class="chat-attach-button" id="chatAttach" type="button" aria-label="添加附件" title="添加附件">＋</button>
+              <textarea id="chatInput" rows="1" placeholder="询问任何问题"></textarea>
+              <button id="chatSend" type="submit" aria-label="发送">↑</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section class="app-view hidden" id="callView">
         <section class="stage">
           <video id="remoteVideo" autoplay playsinline></video>
           <div class="empty-state" id="emptyState">
             <div class="empty-orbit"><span></span></div>
             <h2>等待连接 RiverBank</h2>
-            <p>输入树莓派地址与配对令牌后开始通话</p>
+            <p>登录 RiverBank Edge 节点后开始通话</p>
           </div>
           <div class="remote-label" id="remoteLabel">RIVERBANK</div>
           <div class="local-preview">
@@ -62,19 +128,29 @@
             <span class="icon">像</span><span>关闭画面</span>
           </button>
         </section>
+        <section class="settings-grid call-device-settings">
+          <label class="media-setting">
+            <span>摄像头</span>
+            <select id="cameraSelect"></select>
+          </label>
+          <label class="media-setting">
+            <span>麦克风</span>
+            <select id="microphoneSelect"></select>
+          </label>
+        </section>
       </section>
 
       <section class="app-view hidden" id="reportsView">
         <div class="reports-toolbar">
           <div>
             <h2>任务报告</h2>
-            <p>来自树莓派 Daily Assistant 的只读归档</p>
+            <p>来自 RiverBank Edge 的 Daily Assistant 只读归档</p>
           </div>
           <button id="refreshReports" type="button">刷新报告</button>
         </div>
         <div class="reports-layout">
           <aside class="report-list-panel">
-            <div class="report-list-status" id="reportListStatus">等待连接树莓派</div>
+            <div class="report-list-status" id="reportListStatus">等待连接 RiverBank Edge</div>
             <div class="report-list" id="reportList"></div>
           </aside>
           <article class="report-preview-panel">
@@ -95,25 +171,6 @@
             </div>
           </article>
         </div>
-      </section>
-
-      <section class="settings-grid">
-        <label class="connection-setting">
-          <span>树莓派地址</span>
-          <input id="serverUrl" value="http://riverbank-tech:19734" spellcheck="false" />
-        </label>
-        <label class="connection-setting">
-          <span>配对令牌</span>
-          <input id="pairingToken" type="password" autocomplete="off" />
-        </label>
-        <label class="media-setting">
-          <span>摄像头</span>
-          <select id="cameraSelect"></select>
-        </label>
-        <label class="media-setting">
-          <span>麦克风</span>
-          <select id="microphoneSelect"></select>
-        </label>
       </section>
 
       <footer>

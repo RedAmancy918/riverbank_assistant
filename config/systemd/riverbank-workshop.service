@@ -1,0 +1,56 @@
+[Unit]
+Description=RiverBank trusted user-application Workshop
+After=network-online.target camera-hub.service expression-display.service riverbank-face-tracker.service
+Wants=network-online.target camera-hub.service expression-display.service riverbank-face-tracker.service
+RequiresMountsFor=@RIVERBANK_DATA@
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Slice=riverbank-apps.slice
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+SupplementaryGroups=audio video render
+WorkingDirectory=@RIVERBANK_REPO@/apps/workshop
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_HOME=@RIVERBANK_HOME@"
+Environment="RIVERBANK_WORKSHOP_DATA=@RIVERBANK_DATA@/workshop"
+Environment="RIVERBANK_WORKSHOP_SIGNING_KEY=/var/lib/riverbank-workshop/device-signing-private.pem"
+Environment="RIVERBANK_WORKSHOP_SIGNING_KEY_ID=riverbank-local-device-v1"
+Environment="RIVERBANK_BACKGROUND_TASK_TOKEN_FILE=@RIVERBANK_HOME@/.config/riverbank-video-call/token"
+Environment="RIVERBANK_REPORTS_DIR=@RIVERBANK_HOME@/.hermes/profiles/daily/workspace/reports"
+Environment="RIVERBANK_HAILO_YOLO_PYTHON=@RIVERBANK_HAILO_VENV@/bin/python"
+Environment="RIVERBANK_HAILO_YOLO_SCRIPT=@RIVERBANK_DATA@/ai/apps/hailo-rpi5-examples/hailo_yolo_camera.py"
+Environment="RIVERBANK_HAILO_YOLO_MODEL=@RIVERBANK_DATA@/ai/models/yolo/yolov11x_hailo8_v2.14.hef"
+Environment="RIVERBANK_HAILO_YOLO_OUTPUT=@RIVERBANK_DATA@/ai/output/workshop-yolo"
+Environment="PATH=@RIVERBANK_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="http_proxy=http://127.0.0.1:15732"
+Environment="https_proxy=http://127.0.0.1:15732"
+Environment="no_proxy=127.0.0.1,localhost,riverbank-tech"
+RuntimeDirectory=riverbank-workshop
+RuntimeDirectoryMode=0750
+StateDirectory=riverbank-workshop
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/workshop/workshop_service.py --data-root @RIVERBANK_DATA@/workshop
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@RIVERBANK_DATA@/workshop @RIVERBANK_DATA@/ai/output/workshop-yolo @RIVERBANK_HOME@/.hermes
+DevicePolicy=closed
+DeviceAllow=/dev/hailo0 rw
+MemoryHigh=2G
+MemoryMax=3G
+CPUQuota=300%
+TasksMax=256
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

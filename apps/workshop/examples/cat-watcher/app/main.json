@@ -1,0 +1,27 @@
+{
+  "schema": "riverbank.declarative-app/v1",
+  "title": "小猫观察员",
+  "pipeline": [
+    {
+      "source": "camera.stream",
+      "leaseSeconds": 30,
+      "privacyIndicator": true
+    },
+    {
+      "operator": "vision.detect",
+      "model": "host.default-object-detector",
+      "classes": ["cat"],
+      "minimumConfidence": 0.55,
+      "maximumFps": 8
+    },
+    {
+      "sink": "ui.present",
+      "view": "cat-counter"
+    }
+  ],
+  "safety": {
+    "runOnlyInForeground": true,
+    "stopOnUserExit": true,
+    "retainImages": false
+  }
+}

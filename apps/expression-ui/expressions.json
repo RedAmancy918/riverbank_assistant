@@ -2,6 +2,7 @@
   "output": "DSI-2",
   "display_refresh_hz": "auto",
   "animation_fps_cap": 120,
+  "expression_animation_fps": 60,
   "boot_animation_enabled": true,
   "boot_logo_path": "assets/branding/RiverBankco.png",
   "boot_min_seconds": 4.0,
@@ -37,6 +38,7 @@
   "music_library_dir": "/mnt/nvme64/Music",
   "music_player_command": "/usr/bin/cvlc",
   "music_transition_seconds": 0.28,
+  "workshop_transition_seconds": 0.28,
   "video_call_base_url": "http://127.0.0.1:19734",
   "video_call_view_fps": 20,
   "camera_snapshot_url": "http://127.0.0.1:19733/snapshot",
@@ -116,6 +118,12 @@
       "label": "通话",
       "glyph": "话",
       "action": {"type": "launch_app", "app_id": "video_call"}
+    },
+    {
+      "id": "workshop",
+      "label": "工坊",
+      "glyph": "坊",
+      "action": {"type": "launch_app", "app_id": "workshop"}
     }
   ],
   "expressions": {

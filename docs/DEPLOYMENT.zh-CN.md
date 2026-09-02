@@ -22,6 +22,7 @@ mkdir -p apps/paper-radar/data/{generated,candidates,special-focus}
 mkdir -p apps/paper-radar/{reports,public}
 python3 -m venv apps/paper-radar/.venv
 apps/paper-radar/.venv/bin/pip install -r apps/paper-radar/requirements.txt
+sudo apt-get install python3-qrcode
 ```
 
 圆屏 UI 的依赖可装入系统 Python 或专用虚拟环境；若 Daily Voice 需要直接导入 Hermes 模块，则应把 `apps/expression-ui/requirements.txt` 安装到 Hermes 使用的同一虚拟环境。
@@ -55,7 +56,7 @@ sudo scripts/install.sh --generated build/generated
 sudo scripts/install.sh --generated build/generated --apply
 ```
 
-安装器会复制核心 systemd 单元、健康监控配置、Plymouth 主题和 udev 规则，但不会安装 Hermes、Hailo、ViewTurbo、模型权重或 API 密钥。可选代理/VPN 单元不会自动启用。
+安装器会复制核心 systemd 单元、健康监控配置、Plymouth 主题和 udev 规则，并在首次安装时为工坊创建不可导出的设备 Ed25519 私钥及对应的本机信任公钥。已有私钥或公钥只存在一侧时安装器会停止，不会静默重建身份。安装器不会安装 Hermes、Hailo、ViewTurbo、模型权重或 API 密钥；可选代理/VPN 单元不会自动启用。
 
 若要启用圆屏设置页的 Wi-Fi 开关，确认运行用户属于 `netdev` 组后安装最小 Polkit 规则：
 
@@ -74,11 +75,14 @@ sudo systemctl enable --now listengo-mic.service
 sudo systemctl enable --now expression-display.service
 sudo systemctl enable --now riverbank-health-monitor.service
 sudo systemctl enable --now paper-radar-web.service
+sudo systemctl enable --now riverbank-recovery.service
+sudo systemctl enable --now riverbank-provisioning.service
+sudo systemctl enable --now riverbank-workshop.service
 ```
 
 只有在 Hermes 与 Hailo 依赖已经独立验证后，再启用相应服务。
 
-Hailo 人脸追踪采用租约控制；服务启动不等于持续推理。可用下面的命令验证空闲、激活和自动到期三个状态：
+Hailo 采用单一所有者协调器与进程隔离的租约控制；服务启动不等于已加载模型。空闲时应只看到协调器，申请租约后才出现 SCRFD Worker，到期后 Worker 必须完整退出。可用下面的命令验证空闲、激活和自动到期三个状态：
 
 ```bash
 python3 apps/face-tracker/face_trackerctl.py status
@@ -117,12 +121,17 @@ Camera Hub 默认只监听 `127.0.0.1:19733`，不应直接暴露到局域网或
 ```bash
 scripts/validate-release.sh
 python3 apps/expression-ui/expression_display_persistent.py --self-test
+python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v
+python3 apps/workshop/workshopctl.py service-health
 systemctl --failed
 curl -fsS http://127.0.0.1:19732/healthz
 curl -fsS http://127.0.0.1:19733/state
+curl -fsS http://127.0.0.1:19735/api/status
 ```
 
-再分别验证唤醒、扬声器、触摸、相机、拍照、相册、屏保、重启确认、Hailo 状态和第二天 08:00 的日报生成。
+再分别验证唤醒、扬声器、触摸、相机、拍照、相册、屏保、重启确认、Hailo 状态和第二天 08:00 的日报生成。工坊需要额外说一次明确的“创建一个简单计数应用”，确认系统只生成提案、圆屏显示完整权限且未批准前不能运行；测试完成后可拒绝该提案。
+
+还应在维护窗口验证一次断网恢复：网络正常时 19735 仅返回 `inactive`；断网超过配置宽限期后圆屏应显示二维码，完全无默认路由时还应出现唯一的 `RiverBank-Setup-*` 热点。不要在无人值守设备上直接做破坏性断网测试。SYSTEM 页点击“恢复全部服务”后，恢复状态应在数秒内变为 `complete`；若日报日期落后，`riverbank-paper-catchup.service` 或其延迟 timer 应进入 active，且重复点击不得产生第二个日报执行。
 
 ## 8. 可选视频通话
 

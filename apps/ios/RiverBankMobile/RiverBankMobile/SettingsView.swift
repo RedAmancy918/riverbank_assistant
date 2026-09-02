@@ -19,7 +19,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("RiverBank Assistant")
                                 .font(.title3.bold())
-                            Text("v0.20.0 beta")
+                            Text("v0.24.2 beta")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                             Text("灰度流动科技有限公司")

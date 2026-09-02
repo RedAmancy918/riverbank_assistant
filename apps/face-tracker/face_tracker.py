@@ -96,9 +96,15 @@ def track_id(detection: object) -> int | None:
 class FaceState(app_callback_class):
     def __init__(self) -> None:
         super().__init__()
+        self.force_inference = os.environ.get("RIVERBANK_FACE_FORCE_INFERENCE") == "1"
+        self.disable_control = os.environ.get("RIVERBANK_FACE_DISABLE_CONTROL") == "1"
         self.lock = threading.Lock()
         self.state_write_lock = threading.Lock()
         self.leases = VisionLeaseManager()
+        self.external_reservations = VisionLeaseManager(
+            minimum_ttl_seconds=1.0,
+            maximum_ttl_seconds=30.0,
+        )
         self.started_monotonic = time.monotonic()
         self.last_frame_monotonic = 0.0
         self.last_target_monotonic = 0.0
@@ -137,6 +143,7 @@ class FaceState(app_callback_class):
 
     def inference_state(self) -> dict:
         lease_state = self.leases.snapshot()
+        external_state = self.external_reservations.snapshot()
         with self.lock:
             requested = self.pipeline_requested
             pipeline_active = self.pipeline_active
@@ -146,10 +153,13 @@ class FaceState(app_callback_class):
             "mode": "lease-controlled",
             "requested": requested,
             "active": pipeline_active,
-            "pipeline_state": "playing" if pipeline_active else "paused",
+            "pipeline_state": "playing" if pipeline_active else "unloaded",
             "lease_count": lease_state["lease_count"],
             "leases": lease_state["leases"],
             "next_expiry_seconds": lease_state["next_expiry_seconds"],
+            "external_reserved": external_state["active"],
+            "external_reservation_count": external_state["lease_count"],
+            "external_reservations": external_state["leases"],
             "request_changed_at": request_changed_at,
             "last_transition_at": transition_at,
         }
@@ -169,7 +179,7 @@ class FaceState(app_callback_class):
             )
 
     def reconcile_inference(self, *, force: bool = False) -> None:
-        desired = self.leases.active()
+        desired = self.inference_desired()
         with self.lock:
             changed = force or desired != self.pipeline_requested
             if desired != self.pipeline_requested:
@@ -185,6 +195,11 @@ class FaceState(app_callback_class):
             self.last_indicator_heartbeat = time.monotonic()
         self.write_runtime_state()
 
+    def inference_desired(self) -> bool:
+        return self.force_inference or (
+            self.leases.active() and not self.external_reservations.active()
+        )
+
     def write_runtime_state(self) -> None:
         payload = self.snapshot()
         with self.state_write_lock:
@@ -194,10 +209,11 @@ class FaceState(app_callback_class):
     def maintain(self) -> None:
         while self.running:
             expired = self.leases.expire()
-            if expired:
+            external_expired = self.external_reservations.expire()
+            if expired or external_expired:
                 self.reconcile_inference()
             else:
-                desired = self.leases.active()
+                desired = self.inference_desired()
                 with self.lock:
                     requested = self.pipeline_requested
                 if desired != requested:
@@ -205,7 +221,7 @@ class FaceState(app_callback_class):
                 elif time.monotonic() - self.last_runtime_write_monotonic >= 1.0:
                     self.write_runtime_state()
             now = time.monotonic()
-            if self.leases.active() and (
+            if self.inference_desired() and (
                 now - self.last_indicator_heartbeat >= VISION_HEARTBEAT_SECONDS
             ):
                 publish_vision_activity(True)
@@ -356,6 +372,12 @@ class FaceState(app_callback_class):
             if command == "status":
                 return self.snapshot()
             if command == "acquire":
+                if self.external_reservations.active():
+                    return {
+                        "ok": False,
+                        "error": "Hailo device is reserved by another trusted vision workload",
+                        "state": self.snapshot(),
+                    }
                 lease = self.leases.acquire(
                     str(request.get("source", "unknown")),
                     request.get("ttl_seconds", 30.0),
@@ -386,9 +408,53 @@ class FaceState(app_callback_class):
                     "error": None if released else "lease not found or expired",
                     "state": self.snapshot(),
                 }
+            if command == "reserve_external":
+                if self.leases.active():
+                    return {
+                        "ok": False,
+                        "error": "face tracker currently has an active lease",
+                        "state": self.snapshot(),
+                    }
+                reservation = self.external_reservations.acquire(
+                    str(request.get("source", "external-vision")),
+                    request.get("ttl_seconds", 8.0),
+                )
+                self.reconcile_inference()
+                return {
+                    "ok": True,
+                    "reservation": reservation,
+                    "state": self.snapshot(),
+                }
+            if command == "renew_external":
+                reservation_id = str(request.get("reservation_id", "")).strip()
+                if not reservation_id:
+                    raise ValueError("reservation_id is required")
+                reservation = self.external_reservations.renew(
+                    reservation_id,
+                    request.get("ttl_seconds", 8.0),
+                )
+                if reservation is None:
+                    return {"ok": False, "error": "external reservation not found or expired"}
+                self.reconcile_inference()
+                return {"ok": True, "reservation": reservation, "state": self.snapshot()}
+            if command == "release_external":
+                reservation_id = str(request.get("reservation_id", "")).strip()
+                if not reservation_id:
+                    raise ValueError("reservation_id is required")
+                released = self.external_reservations.release(reservation_id)
+                self.reconcile_inference()
+                return {
+                    "ok": released,
+                    "released": released,
+                    "error": None if released else "external reservation not found or expired",
+                    "state": self.snapshot(),
+                }
             return {
                 "ok": False,
-                "error": "supported commands: status, acquire, renew, release",
+                "error": (
+                    "supported commands: status, acquire, renew, release, "
+                    "reserve_external, renew_external, release_external"
+                ),
             }
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
@@ -427,12 +493,13 @@ class FaceState(app_callback_class):
 
     def start_server(self) -> None:
         self.write_runtime_state()
-        self.server_thread = threading.Thread(
-            target=self.serve,
-            name="face-tracker-control",
-            daemon=True,
-        )
-        self.server_thread.start()
+        if not self.disable_control:
+            self.server_thread = threading.Thread(
+                target=self.serve,
+                name="face-tracker-control",
+                daemon=True,
+            )
+            self.server_thread.start()
         self.maintenance_thread = threading.Thread(
             target=self.maintain,
             name="face-tracker-lease-maintenance",
@@ -450,7 +517,7 @@ class FaceState(app_callback_class):
 
 
 def callback(pad: Gst.Pad, info: Gst.PadProbeInfo, state: FaceState):
-    if not state.leases.active():
+    if not state.inference_desired():
         return Gst.PadProbeReturn.OK
     buffer = info.get_buffer()
     if buffer is None:
@@ -502,13 +569,13 @@ class FaceTrackerApp(GStreamerApp):
         GLib.idle_add(self.apply_inference_state, bool(active))
 
     def apply_inference_state(self, active: bool) -> bool:
-        target = Gst.State.PLAYING if active else Gst.State.PAUSED
+        target = Gst.State.PLAYING if active else Gst.State.NULL
         result = self.pipeline.set_state(target)
         success = result != Gst.StateChangeReturn.FAILURE
         self.user_data.pipeline_state_changed(active, success)
         print(
             "Hailo inference transition "
-            f"target={'playing' if active else 'paused'} "
+            f"target={'playing' if active else 'unloaded'} "
             f"result={getattr(result, 'value_nick', str(result))}",
             flush=True,
         )

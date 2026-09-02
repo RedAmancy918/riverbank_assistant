@@ -3,9 +3,11 @@ Description=RiverBank Hermes voice-to-expression bridge
 After=expression-display.service hermes-voice.service
 Requires=expression-display.service
 Wants=hermes-voice.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@

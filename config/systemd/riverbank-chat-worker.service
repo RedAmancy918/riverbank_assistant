@@ -1,0 +1,34 @@
+[Unit]
+Description=RiverBank persistent Hermes chat worker
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+Wants=network-online.target
+
+[Service]
+Slice=riverbank-apps.slice
+Type=simple
+User=geo
+Group=geo
+WorkingDirectory=/home/geo/video-call
+Environment="HOME=/home/geo"
+Environment="HERMES_HOME=/home/geo/.hermes/profiles/daily"
+Environment="PYTHONUNBUFFERED=1"
+Environment="http_proxy=http://127.0.0.1:15732"
+Environment="https_proxy=http://127.0.0.1:15732"
+Environment="no_proxy=127.0.0.1,localhost,riverbank-tech"
+ExecStart=/home/geo/video-call/.venv/bin/python /home/geo/video-call/chat_worker.py --db /var/lib/riverbank-tasks/chat.db --workspace /home/geo/.hermes/profiles/daily/workspace
+Restart=on-failure
+RestartSec=4
+KillMode=control-group
+TimeoutStopSec=12
+StateDirectory=riverbank-tasks
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/var/lib/riverbank-tasks /home/geo/.hermes
+
+[Install]
+WantedBy=multi-user.target

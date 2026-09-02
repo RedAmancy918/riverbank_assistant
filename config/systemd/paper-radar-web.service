@@ -1,9 +1,12 @@
 [Unit]
 Description=Embodied Intelligence Daily web application
-After=network-online.target
+After=network-online.target riverbank-video-call.service riverbank-chat-worker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 Wants=network-online.target
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@
@@ -15,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@RIVERBANK_REPO@/apps/paper-radar/data/special-focus
+ReadWritePaths=@RIVERBANK_REPO@/apps/paper-radar/data/special-focus @RIVERBANK_REPO@/apps/paper-radar/data/paper-qa
 StandardOutput=journal
 StandardError=journal
 

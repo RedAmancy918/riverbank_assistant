@@ -8,13 +8,40 @@
   <link rel="stylesheet" href="/assets/site.css">
   <script defer src="/assets/site.js"></script>
 </head>
+{% macro paper_deep_notes(paper, label) -%}
+<details class="deep-notes" data-paper-details>
+  <summary>{{ label }}</summary>
+  {% if paper.method or paper.results or paper.limitations %}
+  <div class="deep-grid">
+    {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
+    {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
+    {% if paper.limitations %}<section><h4>局限与价值</h4><p>{{ paper.limitations }}</p></section>{% endif %}
+  </div>
+  {% endif %}
+  <section class="paper-chat" data-paper-chat data-paper-id="{{ paper.qa_id }}" data-report-date="{{ report.date }}">
+    <header class="paper-chat-header">
+      <div><span>ASK THIS PAPER</span><h4>继续询问这篇文章</h4></div>
+      <p class="paper-chat-status" data-paper-chat-status>展开后读取历史对话</p>
+    </header>
+    <div class="paper-chat-messages" data-paper-chat-messages aria-live="polite">
+      <p class="paper-chat-empty">可以询问方法细节、实验设置、消融结果或局限性。</p>
+    </div>
+    <form class="paper-chat-form" data-paper-chat-form>
+      <label class="sr-only" for="paper-chat-{{ paper.qa_id }}">询问这篇文章</label>
+      <textarea id="paper-chat-{{ paper.qa_id }}" data-paper-chat-input rows="2" maxlength="4000" placeholder="例如：论文的训练目标与基线方法有什么不同？" required></textarea>
+      <button type="submit" data-paper-chat-send>发送</button>
+    </form>
+    <p class="paper-chat-note">回答优先使用当天全文阅读缓存；阅读缓存每日替换，对话记录持续保留。</p>
+  </section>
+</details>
+{%- endmacro %}
 <body>
   <a class="skip-link" href="#content">跳到正文</a>
   <div class="reading-progress" aria-hidden="true"><span></span></div>
   <main class="shell" id="content">
     <header class="site-header">
       <a class="brand" href="/" aria-label="具身智讯首页">
-        <span class="brand-mark">EI</span>
+        {% include "_brand_mark.html" %}
         <span><strong>具身智讯</strong><small>Embodied Intelligence Daily</small></span>
       </a>
       <nav class="site-nav" aria-label="主要导航">
@@ -103,16 +130,7 @@
               <span>核心创新</span>
               <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
             </div>
-            {% if paper.method or paper.results or paper.limitations %}
-            <details class="deep-notes">
-              <summary>展开方法、实验与判断</summary>
-              <div class="deep-grid">
-                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
-                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
-                {% if paper.limitations %}<section><h4>局限与价值</h4><p>{{ paper.limitations }}</p></section>{% endif %}
-              </div>
-            </details>
-            {% endif %}
+            {{ paper_deep_notes(paper, "展开方法、实验与判断") }}
           </div>
           <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
         </article>
@@ -148,16 +166,7 @@
               <span>核心创新</span>
               <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
             </div>
-            {% if paper.method or paper.results or paper.limitations %}
-            <details class="deep-notes">
-              <summary>展开方法、实验与判断</summary>
-              <div class="deep-grid">
-                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
-                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
-                {% if paper.limitations %}<section><h4>局限与价值</h4><p>{{ paper.limitations }}</p></section>{% endif %}
-              </div>
-            </details>
-            {% endif %}
+            {{ paper_deep_notes(paper, "展开方法、实验与判断") }}
           </div>
           <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
         </article>
@@ -193,16 +202,7 @@
               <ol>{% for innovation in paper.innovations %}<li>{{ innovation }}</li>{% endfor %}</ol>
             </div>
             <aside class="inference-note"><strong>潜在机器人影响</strong><p>{{ paper.robotics_outlook }}</p></aside>
-            {% if paper.method or paper.results or paper.limitations %}
-            <details class="deep-notes">
-              <summary>展开方法、实验与局限</summary>
-              <div class="deep-grid">
-                {% if paper.method %}<section><h4>方法</h4><p>{{ paper.method }}</p></section>{% endif %}
-                {% if paper.results %}<section><h4>实验结果</h4><p>{{ paper.results }}</p></section>{% endif %}
-                {% if paper.limitations %}<section><h4>局限</h4><p>{{ paper.limitations }}</p></section>{% endif %}
-              </div>
-            </details>
-            {% endif %}
+            {{ paper_deep_notes(paper, "展开方法、实验与局限") }}
           </div>
           <a class="read-more" href="{{ paper.url }}" target="_blank" rel="noreferrer">原文 ↗</a>
         </article>

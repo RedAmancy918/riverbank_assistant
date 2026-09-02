@@ -57,6 +57,28 @@ ipcMain.handle('download-report', async (_event, request) => {
   return { canceled: false, path: result.filePath, size: bytes.length };
 });
 
+ipcMain.handle('download-attachment', async (_event, request) => {
+  const target = new URL(String(request?.url || ''));
+  if (!['http:', 'https:'].includes(target.protocol)) throw new Error('不支持的下载地址');
+  const token = String(request?.token || '').trim();
+  if (token.length < 16) throw new Error('配对令牌无效');
+  const filename = safeDownloadName(request?.filename || 'RiverBank-attachment');
+  const response = await net.fetch(target.toString(), {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!response.ok) throw new Error((await response.text()) || `下载失败：${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > 32 * 1024 * 1024) throw new Error('附件超过 32 MB 下载限制');
+  const result = await dialog.showSaveDialog({
+    title: '保存 RiverBank 附件',
+    defaultPath: path.join(app.getPath('downloads'), filename),
+    buttonLabel: '保存'
+  });
+  if (result.canceled || !result.filePath) return { canceled: true };
+  await fs.writeFile(result.filePath, bytes, { flag: 'w' });
+  return { canceled: false, path: result.filePath, size: bytes.length };
+});
+
 ipcMain.handle('open-external', async (_event, value) => {
   const target = new URL(String(value || ''));
   if (!['http:', 'https:'].includes(target.protocol)) throw new Error('不支持的链接地址');

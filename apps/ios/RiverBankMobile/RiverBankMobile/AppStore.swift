@@ -4,6 +4,9 @@ import Foundation
 final class AppStore: ObservableObject {
     @Published var tasks: [RemoteTask] = []
     @Published var reports: [ReportRecord] = []
+    @Published var chats: [ChatConversation] = []
+    @Published var chatMessages: [ChatMessage] = []
+    @Published var activeChatID: String?
     @Published var server: String
     @Published var token: String
     @Published var errorMessage = ""
@@ -12,11 +15,13 @@ final class AppStore: ObservableObject {
 
     private let serverKey = "riverbank.server"
     private let tokenAccount = "pairing-token"
+    private let activeChatKey = "riverbank.active-chat"
 
     init() {
         server = UserDefaults.standard.string(forKey: serverKey)
             ?? "https://riverbank-tech.tail0acdab.ts.net/assistant"
         token = KeychainStore.read(tokenAccount)
+        activeChatID = UserDefaults.standard.string(forKey: activeChatKey)
     }
 
     private var client: APIClient {
@@ -101,5 +106,95 @@ final class AppStore: ObservableObject {
 
     func download(report: ReportRecord) async throws -> URL {
         try await client.download(report: report)
+    }
+
+    func refreshChats(showLoading: Bool = false) async {
+        if showLoading { isLoading = true }
+        defer { if showLoading { isLoading = false } }
+        do {
+            chats = try await client.listChats().conversations
+            if let activeChatID,
+               !chats.contains(where: { $0.id == activeChatID }) {
+                self.activeChatID = nil
+                chatMessages = []
+                UserDefaults.standard.removeObject(forKey: activeChatKey)
+            }
+            errorMessage = ""
+        } catch {
+            guard !error.isRiverBankCancellation else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func newChat() async throws -> ChatConversation {
+        let conversation = try await client.createChat()
+        chats.insert(conversation, at: 0)
+        activeChatID = conversation.id
+        chatMessages = []
+        UserDefaults.standard.set(conversation.id, forKey: activeChatKey)
+        return conversation
+    }
+
+    func selectChat(_ conversation: ChatConversation) async {
+        activeChatID = conversation.id
+        UserDefaults.standard.set(conversation.id, forKey: activeChatKey)
+        await refreshChatMessages()
+    }
+
+    func refreshChatMessages() async {
+        guard let activeChatID else {
+            chatMessages = []
+            return
+        }
+        do {
+            let envelope = try await client.chatMessages(conversationID: activeChatID)
+            chatMessages = envelope.messages
+            if let index = chats.firstIndex(where: { $0.id == envelope.conversation.id }) {
+                chats[index] = envelope.conversation
+            }
+            errorMessage = ""
+        } catch {
+            guard !error.isRiverBankCancellation else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendChat(_ content: String) async throws {
+        let conversationID: String
+        if let activeChatID {
+            conversationID = activeChatID
+        } else {
+            conversationID = (try await newChat()).id
+        }
+        let turn = try await client.sendChatMessage(
+            conversationID: conversationID,
+            content: content
+        )
+        chatMessages.append(turn.userMessage)
+        chatMessages.append(turn.assistantMessage)
+        await refreshChats()
+    }
+
+    func stopChatResponse() async throws {
+        guard let activeChatID,
+              let message = chatMessages.last(where: { $0.isAssistant && $0.isActive }) else {
+            return
+        }
+        _ = try await client.cancelChatMessage(
+            conversationID: activeChatID,
+            messageID: message.id
+        )
+        await refreshChatMessages()
+    }
+
+    func deleteChat(_ conversation: ChatConversation) async throws {
+        try await client.deleteChat(id: conversation.id)
+        chats.removeAll { $0.id == conversation.id }
+        if activeChatID == conversation.id {
+            activeChatID = nil
+            chatMessages = []
+            UserDefaults.standard.removeObject(forKey: activeChatKey)
+        }
     }
 }

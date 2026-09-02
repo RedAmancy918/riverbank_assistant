@@ -1,7 +1,7 @@
 # RiverBank 语音表情事件协议
 
 当前协议版本：`riverbank.expression.event/v1`
-系统版本：`v0.20.0 beta`
+系统版本：`v0.24.2 beta`
 
 ## 目标
 

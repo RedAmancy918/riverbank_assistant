@@ -18,9 +18,11 @@
 		7B4B5FF44F7C6C0EF29E43D0 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F448171F4D688EA9C913460 /* KeychainStore.swift */; };
 		9104C68D182343E82AEF08A9 /* TaskViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D0B5323AD6E7CEA17DE3BB /* TaskViews.swift */; };
 		9537B2F3F384CB68A7A398E9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CEE9E66D516BE14B262072 /* SettingsView.swift */; };
+		BB90346E8836701CEEE70DEC /* ChatViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00718CBA6082DC570C4E32B9 /* ChatViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		00718CBA6082DC570C4E32B9 /* ChatViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViews.swift; sourceTree = "<group>"; };
 		17CCCE92FD4A18F64ED25E81 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		33C66096FEBA7C84B7F22542 /* RiverBankMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RiverBankMobileApp.swift; sourceTree = "<group>"; };
 		362E3493F65B4BCDF5A935D2 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -59,6 +61,7 @@
 				362E3493F65B4BCDF5A935D2 /* APIClient.swift */,
 				17CCCE92FD4A18F64ED25E81 /* AppStore.swift */,
 				E813DE862FC8F9F90242D0F2 /* Assets.xcassets */,
+				00718CBA6082DC570C4E32B9 /* ChatViews.swift */,
 				382DCF8A536FD57D39A0186D /* ContentView.swift */,
 				F214E161483CF7C2EA467515 /* Info.plist */,
 				8F448171F4D688EA9C913460 /* KeychainStore.swift */,
@@ -144,6 +147,7 @@
 			files = (
 				653809884BA575B90F5D8DF6 /* APIClient.swift in Sources */,
 				255FBA5CF420FDEAD8086D3F /* AppStore.swift in Sources */,
+				BB90346E8836701CEEE70DEC /* ChatViews.swift in Sources */,
 				0BB21ED842A620805D360EFC /* ContentView.swift in Sources */,
 				7B4B5FF44F7C6C0EF29E43D0 /* KeychainStore.swift in Sources */,
 				4C1FA5D1F559EA92BE47B989 /* Models.swift in Sources */,
@@ -211,7 +215,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.20.0;
+				MARKETING_VERSION = 0.24.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -289,7 +293,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.20.0;
+				MARKETING_VERSION = 0.24.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

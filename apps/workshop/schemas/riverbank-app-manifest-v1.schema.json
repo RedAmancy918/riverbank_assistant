@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://riverbank-tech.local/schemas/riverbank-app-manifest-v1.schema.json",
+  "title": "RiverBank Workshop Application Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "riverbank.workshop/v1"},
+    "kind": {"const": "RiverBankApp"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "description"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$",
+          "maxLength": 80
+        },
+        "name": {"type": "string", "minLength": 1, "maxLength": 40},
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "description": {"type": "string", "maxLength": 240},
+        "vendor": {"type": "string", "minLength": 1, "maxLength": 80}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime", "permissions"],
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "entrypoint", "protocol"],
+          "properties": {
+            "kind": {"enum": ["declarative-v1", "python-sandbox-v1"]},
+            "entrypoint": {"type": "string", "pattern": "^app/[^.][^/]*(?:/[^.][^/]*)*$"},
+            "protocol": {"const": "riverbank.app-host/v1"}
+          }
+        },
+        "permissions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["capability", "reason"],
+            "properties": {
+              "capability": {"type": "string", "minLength": 1, "maxLength": 80},
+              "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+              "constraints": {"type": "object"}
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpuPercent": {"type": "integer", "minimum": 1, "maximum": 50},
+            "memoryMB": {"type": "integer", "minimum": 16, "maximum": 512},
+            "storageMB": {"type": "integer", "minimum": 1, "maximum": 2048},
+            "maxProcesses": {"type": "integer", "minimum": 1, "maximum": 8}
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "autostart": {"type": "boolean"},
+            "startTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 30},
+            "stopTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 15}
+          }
+        },
+        "ui": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "menuLabel": {"type": "string", "minLength": 1, "maxLength": 6},
+            "glyph": {"type": "string", "minLength": 1, "maxLength": 2}
+          }
+        }
+      }
+    }
+  }
+}

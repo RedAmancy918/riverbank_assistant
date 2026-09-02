@@ -258,8 +258,20 @@
     },
     {
       "name": "NVIDIA Robotics",
-      "url": "https://developer.nvidia.com/blog/blog/tag/humanoid-robots/",
+      "url": "https://developer.nvidia.com/blog/category/robotics/",
+      "additional_urls": [
+        "https://developer.nvidia.com/blog/blog/tag/humanoid-robots/"
+      ],
       "focus": "GR00T、Cosmos、Isaac Lab 与机器人学习基础设施"
+    },
+    {
+      "name": "Hugging Face / Pollen Robotics / LeRobot",
+      "url": "https://huggingface.co/blog?tag=lerobot",
+      "additional_urls": [
+        "https://pollen-robotics.com/",
+        "https://github.com/huggingface/lerobot/releases"
+      ],
+      "focus": "Microduck、Reachy、LeRobot、开源机器人本体、强化学习与 sim-to-real、VLA/世界模型策略、机器人数据集、仿真评测、部署工具和开源生态"
     },
     {
       "name": "Figure",
@@ -360,6 +372,69 @@
       "name": "DYNA Robotics",
       "url": "https://www.dyna.co/",
       "focus": "DYNA 机器人基础模型、开放世界灵巧操作、自我改进数据闭环与商业级长时间自主运行"
+    },
+    {
+      "name": "Boston Dynamics",
+      "url": "https://bostondynamics.com/blog/",
+      "additional_urls": [
+        "https://bostondynamics.com/news/"
+      ],
+      "focus": "Atlas、Spot 与 Stretch 的强化学习、视觉基础模型、Gemini Robotics、全身控制、感知系统和工业部署"
+    },
+    {
+      "name": "Agility Robotics",
+      "url": "https://www.agilityrobotics.com/resources",
+      "additional_urls": [
+        "https://www.agilityrobotics.com/latest-press"
+      ],
+      "focus": "Digit 的 Physical AI、学习型全身控制、示教与仿真训练、端侧推理、安全和规模化部署"
+    },
+    {
+      "name": "Apptronik",
+      "url": "https://apptronik.com/company/press-releases",
+      "focus": "Apollo 人形机器人、Robot Park 数据闭环、Google DeepMind 合作、训练基础设施和真实工业部署"
+    },
+    {
+      "name": "Sanctuary AI",
+      "url": "https://sanctuary.ai/news/?cat=blog-post",
+      "additional_urls": [
+        "https://sanctuary.ai/news/?cat=press-release"
+      ],
+      "focus": "Phoenix、通用 Physical AI、灵巧手与触觉、强化学习、Isaac Lab sim-to-real 和工业任务验证"
+    },
+    {
+      "name": "FieldAI",
+      "url": "https://www.fieldai.com/news",
+      "focus": "Field Foundation Models、风险感知自治、跨本体泛化、真实复杂环境部署、仿真与机器人数据闭环"
+    },
+    {
+      "name": "Intrinsic",
+      "url": "https://www.intrinsic.ai/blog",
+      "focus": "工业 Physical AI、Intrinsic Vision Model、机器人技能与编排、Flowstate、开放工具链和柔性制造部署"
+    },
+    {
+      "name": "Amazon Science / Amazon Robotics",
+      "url": "https://www.amazon.science/research-areas/robotics",
+      "additional_urls": [
+        "https://www.amazon.science/news"
+      ],
+      "focus": "生产级 VLA、机器人操作与触觉、移动机器人、多机器人基础模型、仿真、故障理解和大规模部署"
+    },
+    {
+      "name": "Robotics and AI Institute",
+      "url": "https://rai-inst.com/",
+      "additional_urls": [
+        "https://rai-inst.com/research/"
+      ],
+      "focus": "灵巧操作、学习控制、物理交互基础模型、机器人数据采集、语义导航和可复现研究成果"
+    },
+    {
+      "name": "Toyota Research Institute",
+      "url": "https://www.tri.global/news",
+      "additional_urls": [
+        "https://www.tri.global/our-work/robotics"
+      ],
+      "focus": "Large Behavior Models、Unified World Models、移动操作、机器人数据规模化、生成式训练和人形机器人研究"
     }
   ]
 }

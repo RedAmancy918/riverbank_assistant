@@ -32,6 +32,10 @@ ATOM = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schema
 USER_AGENT = "paper-radar/1.0 (research digest)"
 
 
+class NetworkUnavailableError(RuntimeError):
+    """The host cannot currently reach arXiv; stop multiplying identical retries."""
+
+
 def load_config() -> dict[str, Any]:
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
@@ -57,7 +61,8 @@ def fetch_feed(query: str, max_results: int = 75) -> list[dict[str, Any]]:
     )
     request = urllib.request.Request(f"{ARXIV_API}?{params}", headers={"User-Agent": USER_AGENT})
     last_error: Exception | None = None
-    retry_delays = (15, 30, 60)
+    http_retry_delays = (15, 30, 60)
+    network_retry_delays = (5, 15, 30)
     for attempt in range(4):
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
@@ -65,19 +70,23 @@ def fetch_feed(query: str, max_results: int = 75) -> list[dict[str, Any]]:
             return parse_feed(payload)
         except urllib.error.HTTPError as exc:
             last_error = exc
-            if attempt >= len(retry_delays):
+            if attempt >= len(http_retry_delays):
                 break
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             try:
-                delay = max(retry_delays[attempt], int(retry_after or 0))
+                delay = max(http_retry_delays[attempt], int(retry_after or 0))
             except ValueError:
-                delay = retry_delays[attempt]
+                delay = http_retry_delays[attempt]
             time.sleep(delay)
-        except Exception as exc:  # network errors are retried and surfaced in the manifest
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
-            if attempt >= len(retry_delays):
+            if attempt >= len(network_retry_delays):
                 break
-            time.sleep(retry_delays[attempt])
+            time.sleep(network_retry_delays[attempt])
+        except Exception as exc:
+            raise RuntimeError(f"arXiv request failed: {exc}") from exc
+    if isinstance(last_error, (urllib.error.URLError, TimeoutError, OSError)):
+        raise NetworkUnavailableError(f"arXiv network unavailable: {last_error}")
     raise RuntimeError(f"arXiv request failed after retries: {last_error}")
 
 
@@ -325,6 +334,7 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
         for stream in config["retrieval_streams"]
         for query in stream["queries"]
     ]
+    consecutive_network_failures = 0
     for index, (stream_id, stream_label, query) in enumerate(stream_queries):
         try:
             for record in fetch_feed(query, int(config.get("max_results_per_query", 75))):
@@ -336,6 +346,16 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
                 elif stream_id not in existing["retrieval_streams"]:
                     existing["retrieval_streams"].append(stream_id)
                     existing["retrieval_stream_labels"].append(stream_label)
+            consecutive_network_failures = 0
+        except NetworkUnavailableError as exc:
+            consecutive_network_failures += 1
+            errors.append(f"{stream_id} query {index + 1}: {exc}")
+            if consecutive_network_failures >= 2:
+                remaining = len(stream_queries) - index - 1
+                errors.append(
+                    f"network circuit breaker opened; skipped {remaining} remaining queries"
+                )
+                break
         except Exception as exc:
             errors.append(f"{stream_id} query {index + 1}: {exc}")
         if index < len(stream_queries) - 1:

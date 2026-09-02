@@ -1,5 +1,11 @@
 const remoteVideo = document.getElementById('remoteVideo');
 const localVideo = document.getElementById('localVideo');
+const loginView = document.getElementById('loginView');
+const loginForm = document.getElementById('loginForm');
+const loginButton = document.getElementById('loginButton');
+const loginMessage = document.getElementById('loginMessage');
+const appShell = document.getElementById('appShell');
+const logoutButton = document.getElementById('logoutButton');
 const emptyState = document.getElementById('emptyState');
 const connectionPill = document.getElementById('connectionPill');
 const connectionLabel = document.getElementById('connectionLabel');
@@ -13,10 +19,22 @@ const microphoneSelect = document.getElementById('microphoneSelect');
 const refreshDevices = document.getElementById('refreshDevices');
 const message = document.getElementById('message');
 const networkStats = document.getElementById('networkStats');
+const chatTab = document.getElementById('chatTab');
 const callTab = document.getElementById('callTab');
 const reportsTab = document.getElementById('reportsTab');
+const chatView = document.getElementById('chatView');
 const callView = document.getElementById('callView');
 const reportsView = document.getElementById('reportsView');
+const newChatButton = document.getElementById('newChatButton');
+const chatHistory = document.getElementById('chatHistory');
+const chatTitle = document.getElementById('chatTitle');
+const chatMessages = document.getElementById('chatMessages');
+const chatComposer = document.getElementById('chatComposer');
+const chatInput = document.getElementById('chatInput');
+const chatSend = document.getElementById('chatSend');
+const chatAttach = document.getElementById('chatAttach');
+const chatAttachmentInput = document.getElementById('chatAttachmentInput');
+const chatAttachmentTray = document.getElementById('chatAttachmentTray');
 const reportCount = document.getElementById('reportCount');
 const refreshReports = document.getElementById('refreshReports');
 const reportListStatus = document.getElementById('reportListStatus');
@@ -34,11 +52,28 @@ let remoteStream = null;
 let sessionId = null;
 let statsTimer = null;
 let previousStats = new Map();
-let currentView = 'call';
+let currentView = 'chat';
 let reports = [];
 let selectedReport = null;
 let reportsLoading = false;
 let reportRequestId = 0;
+let chats = [];
+let activeChatId = localStorage.getItem('riverbank.activeChatId') || '';
+let currentChatMessages = [];
+let chatLoading = false;
+let chatPollTimer = null;
+let authenticated = false;
+let devicesInitialized = false;
+let pendingChatAttachments = [];
+const attachmentObjectUrls = new Map();
+
+const CHAT_ATTACHMENT_EXTENSIONS = new Set([
+  'jpg', 'jpeg', 'png', 'webp', 'pdf', 'md', 'markdown', 'txt', 'csv'
+]);
+const CHAT_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp']);
+const MAX_CHAT_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 30 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS = 4;
 
 function endpoint(path) {
   return `${serverUrl.value.trim().replace(/\/$/, '')}${path}`;
@@ -68,8 +103,8 @@ function setState(state, label) {
 function saveSettings() {
   localStorage.setItem('riverbank.serverUrl', serverUrl.value.trim());
   localStorage.setItem('riverbank.pairingToken', pairingToken.value.trim());
-  localStorage.setItem('riverbank.cameraId', cameraSelect.value);
-  localStorage.setItem('riverbank.microphoneId', microphoneSelect.value);
+  if (cameraSelect.value) localStorage.setItem('riverbank.cameraId', cameraSelect.value);
+  if (microphoneSelect.value) localStorage.setItem('riverbank.microphoneId', microphoneSelect.value);
 }
 
 function restoreSettings() {
@@ -77,29 +112,123 @@ function restoreSettings() {
   pairingToken.value = localStorage.getItem('riverbank.pairingToken') || '';
 }
 
-async function enumerateDevices() {
-  try {
-    const permissionProbe = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    permissionProbe.getTracks().forEach((track) => track.stop());
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const previousCamera = localStorage.getItem('riverbank.cameraId') || cameraSelect.value;
-    const previousMicrophone = localStorage.getItem('riverbank.microphoneId') || microphoneSelect.value;
-    cameraSelect.replaceChildren();
-    microphoneSelect.replaceChildren();
-    devices.filter((item) => item.kind === 'videoinput').forEach((device, index) => {
-      const option = new Option(device.label || `摄像头 ${index + 1}`, device.deviceId);
-      cameraSelect.add(option);
-    });
-    devices.filter((item) => item.kind === 'audioinput').forEach((device, index) => {
-      const option = new Option(device.label || `麦克风 ${index + 1}`, device.deviceId);
-      microphoneSelect.add(option);
-    });
-    if ([...cameraSelect.options].some((item) => item.value === previousCamera)) cameraSelect.value = previousCamera;
-    if ([...microphoneSelect.options].some((item) => item.value === previousMicrophone)) microphoneSelect.value = previousMicrophone;
-    message.textContent = '音视频设备已就绪';
-  } catch (error) {
-    message.textContent = `设备访问失败：${error.message}`;
+async function enumerateDevices({ reportStatus = true } = {}) {
+  const previousCamera = localStorage.getItem('riverbank.cameraId') || cameraSelect.value;
+  const previousMicrophone = localStorage.getItem('riverbank.microphoneId') || microphoneSelect.value;
+  const permissionErrors = [];
+  const probeTracks = [];
+  for (const kind of ['audio', 'video']) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: kind === 'audio',
+        video: kind === 'video'
+      });
+      probeTracks.push(...stream.getTracks());
+    } catch (error) {
+      permissionErrors.push({ kind, error });
+    }
   }
+  probeTracks.forEach((track) => track.stop());
+
+  let devices = [];
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (error) {
+    permissionErrors.push({ kind: 'all', error });
+  }
+  const cameras = devices.filter((item) => item.kind === 'videoinput');
+  const microphones = devices.filter((item) => item.kind === 'audioinput');
+  cameraSelect.replaceChildren();
+  microphoneSelect.replaceChildren();
+  cameras.forEach((device, index) => {
+    cameraSelect.add(new Option(device.label || `摄像头 ${index + 1}`, device.deviceId));
+  });
+  microphones.forEach((device, index) => {
+    microphoneSelect.add(new Option(device.label || `麦克风 ${index + 1}`, device.deviceId));
+  });
+  if ([...cameraSelect.options].some((item) => item.value === previousCamera)) cameraSelect.value = previousCamera;
+  if ([...microphoneSelect.options].some((item) => item.value === previousMicrophone)) microphoneSelect.value = previousMicrophone;
+  devicesInitialized = true;
+
+  if (!reportStatus || currentView !== 'call') return { cameras, microphones };
+  const missing = [];
+  if (!cameras.length) missing.push('摄像头');
+  if (!microphones.length) missing.push('麦克风');
+  if (missing.length) {
+    message.textContent = `本机未找到${missing.join('和')}；Chat 功能不受影响`;
+  } else if (permissionErrors.length) {
+    message.textContent = '音视频设备已找到，但部分权限未开放';
+  } else {
+    message.textContent = '音视频设备已就绪';
+  }
+  return { cameras, microphones };
+}
+
+async function login() {
+  const address = serverUrl.value.trim().replace(/\/$/, '');
+  const token = pairingToken.value.trim();
+  let target;
+  try {
+    target = new URL(address);
+  } catch (_error) {
+    throw new Error('请输入正确的 RiverBank Edge Host');
+  }
+  if (!['http:', 'https:'].includes(target.protocol)) throw new Error('地址必须使用 HTTP 或 HTTPS');
+  if (token.length < 16) throw new Error('请输入至少 16 字符的配对令牌');
+
+  serverUrl.value = address;
+  loginButton.disabled = true;
+  loginMessage.classList.remove('error');
+  loginMessage.textContent = '正在验证设备…';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 9000);
+  try {
+    const response = await fetch(endpoint('/api/v1/status'), {
+      headers: reportHeaders(),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      if (response.status === 401) throw new Error('配对令牌不正确');
+      throw new Error((await response.text()) || `设备返回 ${response.status}`);
+    }
+    await response.json();
+    saveSettings();
+    authenticated = true;
+    loginView.classList.add('hidden');
+    appShell.classList.remove('hidden');
+    loginMessage.textContent = '连接成功';
+    message.textContent = '已连接 RiverBank';
+    setState('idle', '未通话');
+    setView('chat');
+  } catch (error) {
+    const detail = error.name === 'AbortError' ? '连接超时，请检查 Edge Host 和网络' : error.message;
+    loginMessage.classList.add('error');
+    loginMessage.textContent = detail;
+    throw new Error(detail);
+  } finally {
+    clearTimeout(timeout);
+    loginButton.disabled = false;
+  }
+}
+
+async function logout() {
+  if (peerConnection) await hangup();
+  authenticated = false;
+  clearTimeout(chatPollTimer);
+  chatPollTimer = null;
+  clearPendingChatAttachments();
+  clearAttachmentObjectUrls();
+  chats = [];
+  currentChatMessages = [];
+  reports = [];
+  selectedReport = null;
+  localStorage.removeItem('riverbank.pairingToken');
+  pairingToken.value = '';
+  appShell.classList.add('hidden');
+  loginView.classList.remove('hidden');
+  loginMessage.classList.remove('error');
+  loginMessage.textContent = '已安全登出';
+  pairingToken.focus();
 }
 
 function waitForIceGathering(pc, timeoutMs = 8000) {
@@ -121,6 +250,10 @@ async function startCall() {
   const token = pairingToken.value.trim();
   if (token.length < 16) throw new Error('请输入至少 16 字符的配对令牌');
   saveSettings();
+  if (!devicesInitialized) await enumerateDevices({ reportStatus: true });
+  if (!cameraSelect.options.length || !microphoneSelect.options.length) {
+    throw new Error('本机缺少可用的摄像头或麦克风');
+  }
   setState('connecting', '连接中');
   message.textContent = '正在打开本机摄像头与麦克风…';
   localStream = await navigator.mediaDevices.getUserMedia({
@@ -358,14 +491,451 @@ function formatFileSize(bytes) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function activeChat() {
+  return chats.find((item) => item.id === activeChatId) || null;
+}
+
+function chatIsResponding() {
+  return currentChatMessages.some((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.state));
+}
+
+function fileExtension(name) {
+  const match = /\.([^.]+)$/.exec(String(name || '').toLowerCase());
+  return match ? match[1] : '';
+}
+
+function clearPendingChatAttachments() {
+  pendingChatAttachments.forEach((item) => {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+  });
+  pendingChatAttachments = [];
+  chatAttachmentInput.value = '';
+  renderPendingChatAttachments();
+  updateChatComposer();
+}
+
+function clearAttachmentObjectUrls() {
+  attachmentObjectUrls.forEach((value) => URL.revokeObjectURL(value));
+  attachmentObjectUrls.clear();
+}
+
+function renderPendingChatAttachments() {
+  chatAttachmentTray.replaceChildren();
+  chatAttachmentTray.classList.toggle('hidden', pendingChatAttachments.length === 0);
+  pendingChatAttachments.forEach((item, index) => {
+    const card = document.createElement('div');
+    card.className = 'chat-pending-attachment';
+    if (item.previewUrl) {
+      const preview = document.createElement('img');
+      preview.src = item.previewUrl;
+      preview.alt = '';
+      card.append(preview);
+    } else {
+      const mark = document.createElement('span');
+      mark.className = 'chat-pending-file-mark';
+      mark.textContent = fileExtension(item.file.name).toUpperCase().slice(0, 4) || 'FILE';
+      card.append(mark);
+    }
+    const name = document.createElement('span');
+    name.className = 'chat-pending-name';
+    name.textContent = item.file.name;
+    name.title = `${item.file.name} · ${formatFileSize(item.file.size)}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chat-pending-remove';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `移除 ${item.file.name}`);
+    remove.addEventListener('click', () => {
+      const [removed] = pendingChatAttachments.splice(index, 1);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      renderPendingChatAttachments();
+      updateChatComposer();
+    });
+    card.append(name, remove);
+    chatAttachmentTray.append(card);
+  });
+}
+
+function addPendingChatAttachments(files) {
+  const candidates = Array.from(files || []);
+  for (const file of candidates) {
+    if (pendingChatAttachments.length >= MAX_CHAT_ATTACHMENTS) {
+      message.textContent = '单条消息最多上传 4 个附件';
+      break;
+    }
+    const extension = fileExtension(file.name);
+    if (!CHAT_ATTACHMENT_EXTENSIONS.has(extension)) {
+      message.textContent = `不支持 ${file.name}；请选择图片、PDF、Markdown、TXT 或 CSV`;
+      continue;
+    }
+    if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+      message.textContent = `${file.name} 为空或超过 15 MB`;
+      continue;
+    }
+    const nextTotal = pendingChatAttachments.reduce((sum, item) => sum + item.file.size, 0) + file.size;
+    if (nextTotal > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+      message.textContent = '单条消息的附件总计不能超过 30 MB';
+      continue;
+    }
+    if (
+      CHAT_IMAGE_EXTENSIONS.has(extension)
+      && pendingChatAttachments.some((item) => CHAT_IMAGE_EXTENSIONS.has(fileExtension(item.file.name)))
+    ) {
+      message.textContent = '单条消息最多上传 1 张图片';
+      continue;
+    }
+    pendingChatAttachments.push({
+      file,
+      previewUrl: CHAT_IMAGE_EXTENSIONS.has(extension) ? URL.createObjectURL(file) : ''
+    });
+  }
+  chatAttachmentInput.value = '';
+  renderPendingChatAttachments();
+  updateChatComposer();
+}
+
+function updateChatComposer() {
+  const responding = chatIsResponding();
+  chatSend.textContent = responding ? '■' : '↑';
+  chatSend.classList.toggle('stop', responding);
+  chatSend.disabled = !responding && !chatInput.value.trim() && !pendingChatAttachments.length;
+  chatAttach.disabled = responding;
+  chatSend.setAttribute('aria-label', responding ? '停止生成' : '发送');
+}
+
+function attachmentEndpoint(attachment) {
+  const conversationId = attachment.conversation_id || activeChatId;
+  return endpoint(
+    `/api/v1/chats/${encodeURIComponent(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`
+  );
+}
+
+async function hydrateAttachmentImage(image, attachment) {
+  try {
+    let objectUrl = attachmentObjectUrls.get(attachment.id);
+    if (!objectUrl) {
+      const response = await fetch(attachmentEndpoint(attachment), { headers: reportHeaders() });
+      if (!response.ok) throw new Error(`附件读取失败：${response.status}`);
+      objectUrl = URL.createObjectURL(await response.blob());
+      attachmentObjectUrls.set(attachment.id, objectUrl);
+    }
+    image.src = objectUrl;
+  } catch (_error) {
+    image.alt = '图片加载失败';
+  }
+}
+
+async function downloadChatAttachment(attachment) {
+  if (!window.riverbankDesktop?.downloadAttachment) return;
+  try {
+    const result = await window.riverbankDesktop.downloadAttachment({
+      url: attachmentEndpoint(attachment),
+      token: pairingToken.value.trim(),
+      filename: attachment.original_name
+    });
+    if (!result.canceled) message.textContent = `附件已保存：${result.path}`;
+  } catch (error) {
+    message.textContent = `附件下载失败：${error.message}`;
+  }
+}
+
+function renderMessageAttachments(attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return null;
+  const list = document.createElement('div');
+  list.className = 'chat-message-attachments';
+  attachments.forEach((attachment) => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'chat-message-attachment';
+    card.title = `保存 ${attachment.original_name}`;
+    card.addEventListener('click', () => downloadChatAttachment(attachment));
+    if (attachment.kind === 'image') {
+      card.classList.add('chat-attachment-thumb');
+      const preview = document.createElement('img');
+      preview.alt = attachment.original_name || '上传的图片';
+      hydrateAttachmentImage(preview, attachment);
+      card.append(preview);
+    } else {
+      const mark = document.createElement('span');
+      mark.className = 'chat-file-mark';
+      mark.textContent = fileExtension(attachment.original_name).toUpperCase().slice(0, 4) || 'FILE';
+      const info = document.createElement('span');
+      info.className = 'chat-file-info';
+      const name = document.createElement('strong');
+      name.textContent = attachment.original_name || '附件';
+      const size = document.createElement('span');
+      size.textContent = formatFileSize(attachment.size_bytes);
+      info.append(name, size);
+      card.append(mark, info);
+    }
+    list.append(card);
+  });
+  return list;
+}
+
+function renderChatHistory() {
+  chatHistory.replaceChildren();
+  if (!chats.length) {
+    const empty = document.createElement('p');
+    empty.className = 'chat-history-empty';
+    empty.textContent = '还没有对话';
+    chatHistory.append(empty);
+    return;
+  }
+  chats.forEach((chat) => {
+    const row = document.createElement('div');
+    row.className = 'chat-history-row';
+    row.classList.toggle('active', chat.id === activeChatId);
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'chat-history-open';
+    const title = document.createElement('strong');
+    title.textContent = chat.title || '新对话';
+    const preview = document.createElement('span');
+    preview.textContent = chat.preview || '开始一段对话';
+    open.append(title, preview);
+    open.addEventListener('click', () => selectChat(chat.id));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chat-history-delete';
+    remove.textContent = '×';
+    remove.title = '删除对话';
+    remove.addEventListener('click', () => deleteChat(chat.id));
+    row.append(open, remove);
+    chatHistory.append(row);
+  });
+}
+
+function renderChatMessages() {
+  chatMessages.replaceChildren();
+  const chat = activeChat();
+  chatTitle.textContent = chat?.title || 'RiverBank';
+  if (!currentChatMessages.length) {
+    const welcome = document.createElement('div');
+    welcome.className = 'chat-welcome';
+    welcome.innerHTML = '<img src="assets/riverbank-mark.svg" alt="RiverBank"><h2>有什么可以帮你？</h2><p>直接提问或讨论想法；复杂工作可以交给后台任务继续执行。</p>';
+    chatMessages.append(welcome);
+  } else {
+    currentChatMessages.forEach((item, itemIndex) => {
+      const row = document.createElement('article');
+      row.className = `chat-message ${item.role === 'user' ? 'user' : 'assistant'}`;
+      if (item.role === 'assistant') {
+        const mark = document.createElement('img');
+        mark.src = 'assets/riverbank-mark.svg';
+        mark.alt = 'RiverBank';
+        row.append(mark);
+      }
+      const content = document.createElement('div');
+      content.className = 'chat-message-content';
+      const attachments = renderMessageAttachments(item.attachments);
+      if (attachments) content.append(attachments);
+      const messageBody = document.createElement('div');
+      messageBody.className = 'chat-message-body';
+      let showMessageBody = true;
+      if (item.content) {
+        messageBody.innerHTML = renderMarkdown(item.content);
+      } else if (item.role === 'user') {
+        showMessageBody = false;
+      } else if (['queued', 'running'].includes(item.state)) {
+        messageBody.innerHTML = '<span class="chat-thinking"><i></i><i></i><i></i></span>';
+      } else if (item.state === 'cancelled') {
+        messageBody.innerHTML = '<span class="chat-muted">已停止生成</span>';
+      } else {
+        messageBody.innerHTML = `<span class="chat-error">${escapeHtml(item.error || '回答失败')}</span>`;
+      }
+      if (showMessageBody) content.append(messageBody);
+      if (item.role === 'assistant' && ['failed', 'cancelled'].includes(item.state)) {
+        const previousUser = currentChatMessages
+          .slice(0, itemIndex)
+          .reverse()
+          .find((candidate) => candidate.role === 'user');
+        if (previousUser?.content && !previousUser.attachments?.length) {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'chat-retry';
+          retry.textContent = '重试';
+          retry.addEventListener('click', () => {
+            retryChatMessage(previousUser.content).catch((error) => {
+              message.textContent = `重试失败：${error.message}`;
+            });
+          });
+          content.append(retry);
+        }
+      }
+      row.append(content);
+      chatMessages.append(row);
+    });
+  }
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  updateChatComposer();
+}
+
+async function loadChats({ silent = false } = {}) {
+  if (chatLoading) return;
+  if (pairingToken.value.trim().length < 16) {
+    if (!silent) message.textContent = 'Chat 需要 RiverBank Edge Host 和配对令牌';
+    return;
+  }
+  chatLoading = true;
+  try {
+    const response = await fetch(endpoint('/api/v1/chats?limit=100'), { headers: reportHeaders() });
+    if (!response.ok) throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+    const payload = await response.json();
+    chats = Array.isArray(payload.conversations) ? payload.conversations : [];
+    if (activeChatId && !chats.some((item) => item.id === activeChatId)) activeChatId = '';
+    if (!activeChatId && chats.length) activeChatId = chats[0].id;
+    if (activeChatId) localStorage.setItem('riverbank.activeChatId', activeChatId);
+    renderChatHistory();
+    if (activeChatId) await loadChatMessages({ silent: true });
+    else renderChatMessages();
+    if (!silent) message.textContent = 'Chat 已连接';
+  } catch (error) {
+    if (!silent) message.textContent = `Chat 连接失败：${error.message}`;
+  } finally {
+    chatLoading = false;
+  }
+}
+
+async function createChat() {
+  const response = await fetch(endpoint('/api/v1/chats'), {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify({ title: '', source: 'desktop', device_name: navigator.platform || 'Desktop' })
+  });
+  if (!response.ok) throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+  const payload = await response.json();
+  const chat = payload.conversation;
+  chats.unshift(chat);
+  activeChatId = chat.id;
+  currentChatMessages = [];
+  localStorage.setItem('riverbank.activeChatId', activeChatId);
+  renderChatHistory();
+  renderChatMessages();
+  chatInput.focus();
+  return chat;
+}
+
+async function selectChat(chatId) {
+  if (chatIsResponding() && chatId !== activeChatId) return;
+  if (chatId !== activeChatId) clearPendingChatAttachments();
+  activeChatId = chatId;
+  localStorage.setItem('riverbank.activeChatId', chatId);
+  renderChatHistory();
+  await loadChatMessages();
+}
+
+async function loadChatMessages({ silent = false } = {}) {
+  if (!activeChatId) return;
+  try {
+    const response = await fetch(endpoint(`/api/v1/chats/${encodeURIComponent(activeChatId)}/messages`), {
+      headers: reportHeaders()
+    });
+    if (!response.ok) throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+    const payload = await response.json();
+    currentChatMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const index = chats.findIndex((item) => item.id === payload.conversation.id);
+    if (index >= 0) chats[index] = { ...chats[index], ...payload.conversation };
+    renderChatHistory();
+    renderChatMessages();
+    scheduleChatPoll();
+  } catch (error) {
+    if (!silent) message.textContent = `读取对话失败：${error.message}`;
+  }
+}
+
+function scheduleChatPoll() {
+  clearTimeout(chatPollTimer);
+  chatPollTimer = null;
+  if (!chatIsResponding() || currentView !== 'chat') return;
+  chatPollTimer = setTimeout(() => loadChatMessages({ silent: true }), 550);
+}
+
+async function sendChatMessage() {
+  const content = chatInput.value.trim();
+  if ((!content && !pendingChatAttachments.length) || chatIsResponding()) return;
+  if (!activeChatId) await createChat();
+  const form = new FormData();
+  form.append('content', content);
+  pendingChatAttachments.forEach((item) => form.append('files', item.file, item.file.name));
+  const response = await fetch(endpoint(`/api/v1/chats/${encodeURIComponent(activeChatId)}/messages`), {
+    method: 'POST',
+    headers: reportHeaders(),
+    body: form
+  });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+  }
+  const payload = await response.json();
+  chatInput.value = '';
+  clearPendingChatAttachments();
+  resizeChatInput();
+  currentChatMessages.push(payload.user_message, payload.assistant_message);
+  renderChatMessages();
+  await loadChats({ silent: true });
+  scheduleChatPoll();
+}
+
+async function retryChatMessage(content) {
+  if (chatIsResponding()) return;
+  chatInput.value = content;
+  resizeChatInput();
+  await sendChatMessage();
+}
+
+async function stopChatResponse() {
+  const assistant = [...currentChatMessages].reverse().find((item) => item.role === 'assistant' && ['queued', 'running'].includes(item.state));
+  if (!assistant || !activeChatId) return;
+  const response = await fetch(
+    endpoint(`/api/v1/chats/${encodeURIComponent(activeChatId)}/messages/${encodeURIComponent(assistant.id)}/cancel`),
+    { method: 'POST', headers: headers(), body: '{}' }
+  );
+  if (!response.ok) throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+  scheduleChatPoll();
+}
+
+async function deleteChat(chatId) {
+  if (chatId === activeChatId && chatIsResponding()) {
+    message.textContent = '请先停止当前回答再删除对话';
+    return;
+  }
+  const response = await fetch(endpoint(`/api/v1/chats/${encodeURIComponent(chatId)}`), {
+    method: 'DELETE', headers: reportHeaders()
+  });
+  if (!response.ok) throw new Error((await response.text()) || `服务器返回 ${response.status}`);
+  chats = chats.filter((item) => item.id !== chatId);
+  if (activeChatId === chatId) {
+    activeChatId = chats[0]?.id || '';
+    currentChatMessages = [];
+    if (activeChatId) localStorage.setItem('riverbank.activeChatId', activeChatId);
+    else localStorage.removeItem('riverbank.activeChatId');
+  }
+  renderChatHistory();
+  if (activeChatId) await loadChatMessages(); else renderChatMessages();
+}
+
+function resizeChatInput() {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = `${Math.min(chatInput.scrollHeight, 150)}px`;
+  updateChatComposer();
+}
+
 function setView(view) {
-  currentView = view === 'reports' ? 'reports' : 'call';
+  if (!authenticated) return;
+  currentView = ['chat', 'call', 'reports'].includes(view) ? view : 'chat';
   document.body.dataset.view = currentView;
+  chatTab.classList.toggle('active', currentView === 'chat');
   callTab.classList.toggle('active', currentView === 'call');
   reportsTab.classList.toggle('active', currentView === 'reports');
+  chatView.classList.toggle('hidden', currentView !== 'chat');
   callView.classList.toggle('hidden', currentView !== 'call');
   reportsView.classList.toggle('hidden', currentView !== 'reports');
   if (currentView === 'reports') loadReports().catch(() => {});
+  if (currentView === 'chat') loadChats().catch(() => {});
+  if (currentView === 'call' && !devicesInitialized) {
+    enumerateDevices({ reportStatus: true }).catch((error) => {
+      message.textContent = `设备检测失败：${error.message}`;
+    });
+  }
 }
 
 function reportHeaders() {
@@ -378,7 +948,7 @@ function renderReportList() {
   if (!reports.length) {
     const empty = document.createElement('div');
     empty.className = 'report-list-empty';
-    empty.textContent = '还没有任务报告。通过树莓派语音助手生成后，会自动出现在这里。';
+    empty.textContent = '还没有任务报告。通过 RiverBank Edge 语音助手生成后，会自动出现在这里。';
     reportList.append(empty);
     return;
   }
@@ -407,13 +977,13 @@ async function loadReports({ silent = false } = {}) {
   const token = pairingToken.value.trim();
   if (token.length < 16) {
     reportListStatus.textContent = '请先填写配对令牌';
-    if (!silent) message.textContent = '报告库需要树莓派地址和配对令牌';
+    if (!silent) message.textContent = '报告库需要 RiverBank Edge Host 和配对令牌';
     return;
   }
   saveSettings();
   reportsLoading = true;
   refreshReports.disabled = true;
-  if (!silent) reportListStatus.textContent = '正在读取树莓派报告…';
+  if (!silent) reportListStatus.textContent = '正在读取 RiverBank Edge 报告…';
   try {
     const response = await fetch(endpoint('/api/v1/reports?limit=300'), {
       headers: reportHeaders()
@@ -448,7 +1018,7 @@ async function openReport(report) {
   reportPreview.classList.remove('hidden');
   reportTitle.textContent = report.title || report.filename;
   reportMeta.textContent = '正在读取正文…';
-  reportContent.innerHTML = '<p>正在从树莓派读取报告…</p>';
+  reportContent.innerHTML = '<p>正在从 RiverBank Edge 读取报告…</p>';
   downloadReport.disabled = true;
   const requestId = ++reportRequestId;
   try {
@@ -486,8 +1056,29 @@ async function downloadSelectedReport() {
   }
 }
 
+chatTab.addEventListener('click', () => setView('chat'));
 callTab.addEventListener('click', () => setView('call'));
 reportsTab.addEventListener('click', () => setView('reports'));
+newChatButton.addEventListener('click', () => {
+  clearPendingChatAttachments();
+  createChat().catch((error) => {
+    message.textContent = `新建对话失败：${error.message}`;
+  });
+});
+chatAttach.addEventListener('click', () => chatAttachmentInput.click());
+chatAttachmentInput.addEventListener('change', () => addPendingChatAttachments(chatAttachmentInput.files));
+chatComposer.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const operation = chatIsResponding() ? stopChatResponse() : sendChatMessage();
+  operation.catch((error) => { message.textContent = `Chat 操作失败：${error.message}`; });
+});
+chatInput.addEventListener('input', resizeChatInput);
+chatInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    chatComposer.requestSubmit();
+  }
+});
 refreshReports.addEventListener('click', () => loadReports());
 downloadReport.addEventListener('click', downloadSelectedReport);
 reportContent.addEventListener('click', (event) => {
@@ -499,15 +1090,27 @@ reportContent.addEventListener('click', (event) => {
   });
 });
 serverUrl.addEventListener('change', () => {
+  if (!authenticated) return;
   saveSettings();
+  clearPendingChatAttachments();
+  clearAttachmentObjectUrls();
   reports = [];
   selectedReport = null;
+  chats = [];
+  activeChatId = '';
+  currentChatMessages = [];
   renderReportList();
+  renderChatHistory();
+  renderChatMessages();
   if (currentView === 'reports') loadReports();
+  if (currentView === 'chat') loadChats();
 });
 pairingToken.addEventListener('change', () => {
+  if (!authenticated) return;
   saveSettings();
+  clearAttachmentObjectUrls();
   if (currentView === 'reports') loadReports();
+  if (currentView === 'chat') loadChats();
 });
 
 connectButton.addEventListener('click', async () => {
@@ -526,12 +1129,24 @@ connectButton.addEventListener('click', async () => {
 muteButton.addEventListener('click', () => toggleTrack('audio', muteButton, '静音', '取消静音'));
 cameraButton.addEventListener('click', () => toggleTrack('video', cameraButton, '关闭画面', '打开画面'));
 refreshDevices.addEventListener('click', enumerateDevices);
-window.addEventListener('beforeunload', () => hangup());
+loginForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  login().catch(() => {});
+});
+logoutButton.addEventListener('click', () => logout().catch((error) => {
+  message.textContent = `登出失败：${error.message}`;
+}));
+window.addEventListener('beforeunload', () => {
+  clearPendingChatAttachments();
+  clearAttachmentObjectUrls();
+  hangup();
+});
 
 restoreSettings();
-setState('idle', '未连接');
-setView('call');
-enumerateDevices();
+setState('idle', '未通话');
+loginView.classList.remove('hidden');
+appShell.classList.add('hidden');
+serverUrl.focus();
 setInterval(() => {
   if (currentView === 'reports') loadReports({ silent: true });
 }, 15000);

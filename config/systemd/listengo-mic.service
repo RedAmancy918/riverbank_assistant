@@ -1,9 +1,11 @@
 [Unit]
 Description=RiverBank ListenGo microphone control and direction service
 After=sound.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@

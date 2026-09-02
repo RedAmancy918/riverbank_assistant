@@ -1,9 +1,12 @@
 [Unit]
 Description=RiverBank shared USB camera hub
 After=camera-usb-power.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 Requires=camera-usb-power.service
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@

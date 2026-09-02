@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from functools import partial
 from http import HTTPStatus
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from paper_chat_proxy import PaperChatError, PaperChatProxy
 from special_focus import (
     cancel_request,
     clear_unconsumed_requests,
@@ -25,7 +27,8 @@ from special_focus import (
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
 CONFIG_PATH = ROOT / "config" / "topics.json"
-MAX_REQUEST_BYTES = 4096
+MAX_REQUEST_BYTES = 8192
+PAPER_CHAT_PATH_RE = re.compile(r"^/api/paper-chat/([a-f0-9]{20})$")
 
 
 def load_timezone() -> str:
@@ -42,6 +45,10 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
 
     def api_path(self) -> str:
         return urlsplit(self.path).path.rstrip("/") or "/"
+
+    def paper_chat_id(self) -> str:
+        match = PAPER_CHAT_PATH_RE.fullmatch(self.api_path())
+        return match.group(1) if match else ""
 
     def send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         body = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
@@ -83,6 +90,15 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
         if self.api_path() == "/healthz":
             self.send_json(HTTPStatus.OK, {"ok": True, "service": "paper-radar"})
             return
+        paper_id = self.paper_chat_id()
+        if paper_id:
+            try:
+                payload = self.server.paper_chat.history(paper_id)  # type: ignore[attr-defined]
+            except PaperChatError as exc:
+                self.send_error_json(HTTPStatus(exc.status), str(exc))
+                return
+            self.send_json(HTTPStatus.OK, payload)
+            return
         if self.api_path() == "/api/special-focus":
             try:
                 state = queue_status(self.server.timezone_name)  # type: ignore[attr-defined]
@@ -104,14 +120,36 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
+        if self.paper_chat_id():
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         super().do_HEAD()
 
     def do_POST(self) -> None:
-        if self.api_path() != "/api/special-focus":
+        paper_id = self.paper_chat_id()
+        is_special_focus = self.api_path() == "/api/special-focus"
+        if not paper_id and not is_special_focus:
             self.send_error_json(HTTPStatus.NOT_FOUND, "接口不存在")
             return
         if not self.same_origin_request():
             self.send_error_json(HTTPStatus.FORBIDDEN, "拒绝跨站请求")
+            return
+        if paper_id:
+            try:
+                payload = self.read_json_body()
+                result = self.server.paper_chat.enqueue(  # type: ignore[attr-defined]
+                    paper_id,
+                    payload.get("content"),
+                )
+            except ValueError as exc:
+                self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except PaperChatError as exc:
+                self.send_error_json(HTTPStatus(exc.status), str(exc))
+                return
+            self.send_json(HTTPStatus.ACCEPTED, result)
             return
         try:
             payload = self.read_json_body()
@@ -224,8 +262,15 @@ class PaperRadarServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], handler: Any, timezone_name: str):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        handler: Any,
+        timezone_name: str,
+        paper_chat: PaperChatProxy,
+    ):
         self.timezone_name = timezone_name
+        self.paper_chat = paper_chat
         super().__init__(address, handler)
 
 
@@ -233,9 +278,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=19732)
+    parser.add_argument("--chat-backend", default="http://127.0.0.1:19734")
+    parser.add_argument(
+        "--chat-token-file",
+        type=Path,
+        default=Path("/home/geo/.config/riverbank-video-call/token"),
+    )
     args = parser.parse_args()
     handler = partial(PaperRadarHandler, directory=str(PUBLIC))
-    server = PaperRadarServer((args.host, args.port), handler, load_timezone())
+    paper_chat = PaperChatProxy(
+        backend_url=args.chat_backend,
+        token_file=args.chat_token_file,
+    )
+    server = PaperRadarServer(
+        (args.host, args.port),
+        handler,
+        load_timezone(),
+        paper_chat,
+    )
     print(
         f"Paper Radar listening on http://{args.host}:{args.port} "
         f"({server.timezone_name})",

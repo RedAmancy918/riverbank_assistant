@@ -1,11 +1,13 @@
 [Unit]
-Description=RiverBank Hailo SCRFD lease-controlled face tracker
+Description=RiverBank single-owner Hailo vision supervisor
 After=camera-hub.service hailort.service
 Requires=camera-hub.service hailort.service
 RequiresMountsFor=@RIVERBANK_DATA@
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+Slice=riverbank-apps.slice
 Type=simple
 User=@RIVERBANK_USER@
 Group=@RIVERBANK_USER@
@@ -21,7 +23,10 @@ Environment="HAILO_ENV_FILE=@RIVERBANK_DATA@/ai/apps/hailo-rpi5-examples/.env"
 Environment="RIVERBANK_FACE_MODEL=@RIVERBANK_DATA@/ai/models/face/scrfd_2.5g_hailo8_v2.14.hef"
 Environment="RIVERBANK_FACE_POSTPROCESS=@RIVERBANK_DATA@/ai/resources/so/libscrfd_v2_14.so"
 Environment="RIVERBANK_FACE_CONFIG=@RIVERBANK_DATA@/ai/models/face/scrfd_640.json"
-ExecStart=@RIVERBANK_HAILO_VENV@/bin/python @RIVERBANK_REPO@/apps/face-tracker/face_tracker.py --input http://127.0.0.1:19733/stream --hef-path @RIVERBANK_DATA@/ai/models/face/scrfd_2.5g_hailo8_v2.14.hef --arch hailo8 --disable-sync --frame-rate 30
+Environment="RIVERBANK_FACE_WORKER_PYTHON=@RIVERBANK_HAILO_VENV@/bin/python"
+Environment="RIVERBANK_FACE_WORKER_SCRIPT=@RIVERBANK_REPO@/apps/face-tracker/face_tracker.py"
+Environment="RIVERBANK_CAMERA_STREAM_URL=http://127.0.0.1:19733/stream"
+ExecStart=@RIVERBANK_HAILO_VENV@/bin/python @RIVERBANK_REPO@/apps/face-tracker/face_tracker_supervisor.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=20

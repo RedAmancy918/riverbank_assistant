@@ -40,6 +40,7 @@ from app_menu import (
 from system_status import ACTIVE_VISION_LEASE_DIR, HEALTH_STATUS_PATH, SystemStatus
 from pomodoro import PomodoroTimer, completion_flash_frame
 from performance_monitor import PerformanceMonitor, PerformanceSnapshot, format_bytes
+from recovery_client import request_recovery
 from music_player import (
     LyricLine,
     LyricsFetchResult,
@@ -60,6 +61,7 @@ from video_call_client import (
     fetch_status as fetch_video_call_status,
     hangup_call,
 )
+from workshop_client import approve_proposal, reject_proposal, request as workshop_request, stop_app as stop_workshop_app
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -84,6 +86,36 @@ RUNTIME_DIR = Path(os.environ.get("RIVERBANK_EXPRESSION_RUNTIME", "/run/riverban
 SOCKET_PATH = RUNTIME_DIR / "control.sock"
 STATE_PATH = RUNTIME_DIR / "state.json"
 REBOOT_REQUEST_PATH = RUNTIME_DIR / "reboot.request"
+RECOVERY_STATUS_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_RECOVERY_STATUS",
+        "/var/lib/riverbank-recovery/status.json",
+    )
+)
+PROVISIONING_STATUS_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_PROVISIONING_STATUS",
+        "/run/riverbank-provisioning/status.json",
+    )
+)
+WORKSHOP_REGISTRY_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_WORKSHOP_REGISTRY",
+        "/mnt/nvme64/riverbank-user/workshop/registry.json",
+    )
+)
+WORKSHOP_STATUS_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_WORKSHOP_STATUS",
+        "/run/riverbank-workshop/status.json",
+    )
+)
+WORKSHOP_RUNTIME_PATH = Path(
+    os.environ.get(
+        "RIVERBANK_WORKSHOP_RUNTIME",
+        "/run/riverbank-workshop/runtime.json",
+    )
+)
 MENU_EVENT_PATH = RUNTIME_DIR / "menu-selection.json"
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 # The service RuntimeDirectory is removed whenever this one service restarts.
@@ -225,6 +257,12 @@ DEFAULT_APPLICATION_MENU = (
         "label": "通话",
         "glyph": "话",
         "action": {"type": "launch_app", "app_id": "video_call"},
+    },
+    {
+        "id": "workshop",
+        "label": "工坊",
+        "glyph": "坊",
+        "action": {"type": "launch_app", "app_id": "workshop"},
     },
 )
 
@@ -712,7 +750,7 @@ class PersistentExpressionDisplay:
         self.radial_menu_content_cache: dict[tuple, object] = {}
         self.radial_menu_time_cache_text = ""
         self.app_pin_affordance_cache: dict[
-            tuple[int, int, bool], tuple[object, tuple[int, int]]
+            tuple[int, int, bool, bool], tuple[object, tuple[int, int]]
         ] = {}
         self.status_chrome_cache: dict[tuple, object] = {}
         self.status_meter_cache: dict[tuple[str, int], tuple[object, tuple[int, int]]] = {}
@@ -848,8 +886,10 @@ class PersistentExpressionDisplay:
         self.pomodoro_duration_original_seconds = self.pomodoro.duration_for()
         self.pomodoro_duration_dial_surface: object | None = None
         self.pomodoro_duration_adjust_base_surfaces: dict[str, object] = {}
-        self.pomodoro_duration_wave_cache: dict[tuple[str, int], object] = {}
-        self.pomodoro_duration_time_cache: dict[int, object] = {}
+        self.pomodoro_duration_wave_cache: OrderedDict[tuple[str, int], object] = OrderedDict()
+        self.pomodoro_duration_wave_cache_limit = 30
+        self.pomodoro_duration_time_cache: OrderedDict[int, object] = OrderedDict()
+        self.pomodoro_duration_time_cache_limit = 36
         self.performance_monitor = PerformanceMonitor()
         self.performance_snapshot = PerformanceSnapshot()
         self.performance_active = False
@@ -857,6 +897,13 @@ class PersistentExpressionDisplay:
         self.performance_health_scroll_offset = 0.0
         self.performance_health_scroll_start_offset = 0.0
         self.performance_pointer_target: str | None = None
+        self.recovery_future: Future[dict] | None = None
+        self.recovery_status: dict = {
+            "state": "idle",
+            "message": "恢复全部服务",
+        }
+        self.recovery_status_next_read_at = 0.0
+        self.recovery_button_cache: OrderedDict[tuple, object] = OrderedDict()
         self.performance_future: Future[PerformanceSnapshot] | None = None
         self.performance_next_update_at = 0.0
         self.performance_refresh_seconds = max(
@@ -877,6 +924,26 @@ class PersistentExpressionDisplay:
         self.performance_health_card_cache: dict[tuple[tuple[int, int], bool], object] = {}
         self.performance_health_content_cache_key: tuple | None = None
         self.performance_health_content_cache_surface: object | None = None
+        self.workshop_active = False
+        self.workshop_section: str | None = None
+        self.workshop_pointer_target: str | None = None
+        self.workshop_notice = ""
+        self.workshop_notice_until = 0.0
+        self.workshop_status: dict = {}
+        self.workshop_runtime_status: dict = {}
+        self.workshop_status_next_read_at = 0.0
+        self.workshop_action_future: Future[dict] | None = None
+        self.workshop_action_kind = ""
+        self.workshop_transition_active = False
+        self.workshop_transition_opening = True
+        self.workshop_transition_started_at = 0.0
+        self.workshop_transition_seconds = max(
+            0.16,
+            min(float(config.get("workshop_transition_seconds", 0.28)), 0.5),
+        )
+        self.workshop_transition_source: object | None = None
+        self.workshop_transition_target: object | None = None
+        self.workshop_transition_exits_page = False
         self.music_player = MusicPlayer(
             app_path(config.get("music_library_dir", "/mnt/nvme64/Music")),
             player_command=str(config.get("music_player_command", "/usr/bin/cvlc")),
@@ -1153,7 +1220,20 @@ class PersistentExpressionDisplay:
         self.wifi_toggle_target: bool | None = None
         self.wifi_toggle_error = ""
         self.wifi_toggle_notice_until = 0.0
-        self.cache_limit = int(float(config.get("cache_limit_mb", 512)) * 1024 * 1024)
+        self.provisioning_status: dict = {"active": False, "phase": "idle"}
+        self.provisioning_active = False
+        self.provisioning_qr_surface: object | None = None
+        self.provisioning_qr_path = ""
+        self.provisioning_qr_mtime_ns = 0
+        self.provisioning_next_read_at = 0.0
+        self.cache_limit = int(float(config.get("cache_limit_mb", 896)) * 1024 * 1024)
+        self.expression_animation_fps = max(
+            12.0,
+            min(
+                float(config.get("expression_animation_fps", 30.0)),
+                self.target_render_fps,
+            ),
+        )
         configured_preload = config.get("preload_states", DEFAULT_PRELOAD)
         self.preload_states = tuple(
             state for state in configured_preload if state in self.expressions
@@ -1686,7 +1766,7 @@ class PersistentExpressionDisplay:
             self.background_mode,
             self.chroma_soft_distance,
             self.display_scale,
-            self.target_render_fps,
+            self.expression_animation_fps,
         )
 
     def install_completed_decodes(self) -> None:
@@ -1738,6 +1818,19 @@ class PersistentExpressionDisplay:
             animation = self.cache.pop(victim)
             self.cache_bytes -= animation.memory_bytes
             log(f"animation evicted state={victim}")
+
+    @staticmethod
+    def release_unused_memory() -> None:
+        """Return freed supersampling/decode arenas to Linux when glibc supports it."""
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            trim = getattr(libc, "malloc_trim", None)
+            if trim is not None:
+                trim(0)
+        except (AttributeError, OSError):
+            pass
 
     def current_animation(self) -> Animation:
         animation = self.cache.get(self.state)
@@ -2390,6 +2483,8 @@ class PersistentExpressionDisplay:
             self.next_frame_at = self.frame_started_at + animation.durations[0]
             self.needs_redraw = True
         self.schedule_decode(state)
+        if changed:
+            self.evict_cache()
         self.write_state()
         log(
             f"expression={state} renderer=persistent cached={state in self.cache} "
@@ -3577,6 +3672,7 @@ class PersistentExpressionDisplay:
         key = (theme_key, int(pointer_step) % tick_count)
         cached = self.pomodoro_duration_wave_cache.get(key)
         if cached is not None:
+            self.pomodoro_duration_wave_cache.move_to_end(key)
             return cached
         native_size = 500
         center = native_size // 2
@@ -3641,6 +3737,9 @@ class PersistentExpressionDisplay:
             (native_size, native_size),
         )
         self.pomodoro_duration_wave_cache[key] = cached
+        self.pomodoro_duration_wave_cache.move_to_end(key)
+        while len(self.pomodoro_duration_wave_cache) > self.pomodoro_duration_wave_cache_limit:
+            self.pomodoro_duration_wave_cache.popitem(last=False)
         return cached
 
     def pomodoro_duration_time_surface(self, minutes: int) -> object:
@@ -3653,6 +3752,9 @@ class PersistentExpressionDisplay:
                 (242, 248, 249),
             )
             self.pomodoro_duration_time_cache[selected] = cached
+        self.pomodoro_duration_time_cache.move_to_end(selected)
+        while len(self.pomodoro_duration_time_cache) > self.pomodoro_duration_time_cache_limit:
+            self.pomodoro_duration_time_cache.popitem(last=False)
         return cached
 
     def pomodoro_duration_adjust_base(self, phase: str) -> object:
@@ -5188,7 +5290,112 @@ class PersistentExpressionDisplay:
         )
 
     def performance_health_viewport_rect(self) -> object:
-        return self.pygame.Rect(105, 178, 590, 448)
+        return self.pygame.Rect(105, 258, 590, 368)
+
+    def performance_recovery_rect(self) -> object:
+        return self.pygame.Rect(220, 164, 360, 66)
+
+    def performance_recovery_surface(self, pressed: bool = False) -> object:
+        state = str(self.recovery_status.get("state") or "idle")
+        key = (state, pressed)
+        cached = self.recovery_button_cache.get(key)
+        if cached is not None:
+            self.recovery_button_cache.move_to_end(key)
+            return cached
+        size = self.performance_recovery_rect().size
+        scale = UI_AA_SCALE
+        high = self.pygame.Surface(
+            (size[0] * scale, size[1] * scale),
+            self.pygame.SRCALPHA,
+        )
+        high.fill((0, 0, 0, 0))
+        if state == "running":
+            fill, border, text_color = (17, 67, 82, 250), (74, 211, 247, 235), (205, 244, 251)
+        elif state == "failed":
+            fill, border, text_color = (52, 31, 18, 250), (236, 148, 73, 235), (255, 209, 158)
+        elif state == "complete":
+            fill, border, text_color = (15, 55, 43, 250), (92, 237, 164, 225), (194, 248, 220)
+        else:
+            fill, border, text_color = (5, 28, 39, 250), (50, 154, 185, 210), (214, 240, 247)
+        if pressed:
+            fill = tuple(min(255, channel + 14) for channel in fill[:3]) + (fill[3],)
+        rect = high.get_rect()
+        self.pygame.draw.rect(high, fill, rect, border_radius=28 * scale)
+        self.pygame.draw.rect(
+            high,
+            border,
+            rect,
+            width=max(1, scale),
+            border_radius=28 * scale,
+        )
+        label = {
+            "running": "正在恢复…",
+            "failed": "再次尝试恢复",
+            "complete": "再次检查并恢复",
+        }.get(state, "恢复全部服务")
+        surface = self.pygame.transform.smoothscale(high, size)
+        rendered = self.font_medium.render(label, True, text_color)
+        surface.blit(
+            rendered,
+            rendered.get_rect(center=surface.get_rect().center),
+        )
+        self.recovery_button_cache[key] = surface
+        while len(self.recovery_button_cache) > 8:
+            self.recovery_button_cache.popitem(last=False)
+        return surface
+
+    def read_recovery_status(self, now: float | None = None, force: bool = False) -> bool:
+        current = time.monotonic() if now is None else now
+        if not force and current < self.recovery_status_next_read_at:
+            return False
+        self.recovery_status_next_read_at = current + (
+            0.5 if self.recovery_status.get("state") == "running" else 2.0
+        )
+        try:
+            payload = json.loads(RECOVERY_STATUS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("recovery status must be an object")
+        except (OSError, ValueError, json.JSONDecodeError):
+            payload = {"state": "idle", "message": "恢复全部服务"}
+        changed = payload != self.recovery_status
+        self.recovery_status = payload
+        return changed
+
+    def request_full_recovery(self) -> bool:
+        if self.recovery_future is not None:
+            return False
+        self.recovery_status = {"state": "running", "message": "正在恢复服务"}
+        self.recovery_status_next_read_at = time.monotonic() + 0.5
+        self.recovery_future = self.control_executor.submit(request_recovery)
+        self.needs_redraw = True
+        self.write_state()
+        log("full service recovery requested")
+        return True
+
+    def update_full_recovery(self, now: float) -> bool:
+        changed = False
+        if self.recovery_future is not None and self.recovery_future.done():
+            try:
+                response = self.recovery_future.result()
+                if not response.get("ok") and response.get("state") != "running":
+                    self.recovery_status = {
+                        "state": "failed",
+                        "message": str(response.get("error") or "恢复请求被拒绝"),
+                    }
+            except Exception as exc:
+                self.recovery_status = {
+                    "state": "failed",
+                    "message": f"恢复控制器不可用：{exc}",
+                }
+            self.recovery_future = None
+            self.recovery_status_next_read_at = 0.0
+            changed = True
+        if self.performance_active and self.performance_section == "system":
+            changed = self.read_recovery_status(now) or changed
+        if changed:
+            self.recovery_button_cache.clear()
+            self.needs_redraw = True
+        return changed
 
     def performance_health_content_height(self) -> int:
         count = len(self.performance_health_checks())
@@ -5365,6 +5572,15 @@ class PersistentExpressionDisplay:
             summary_color = (111, 177, 195)
         self.draw_centered_text(summary, self.font_status, summary_color, (400, 139))
 
+        recovery_rect = self.performance_recovery_rect()
+        recovery_pressed = (
+            self.pointer_down and self.performance_pointer_target == "recover"
+        )
+        self.screen.blit(
+            self.performance_recovery_surface(recovery_pressed),
+            recovery_rect.topleft,
+        )
+
         if not records:
             self.draw_centered_text(
                 "健康监控正在刷新…",
@@ -5490,6 +5706,11 @@ class PersistentExpressionDisplay:
         if math.dist(position, self.pomodoro_back_center()) <= 50:
             return "back"
         if (
+            self.performance_section == "system"
+            and self.performance_recovery_rect().collidepoint(position)
+        ):
+            return "recover"
+        if (
             self.performance_section is None
             and self.performance_system_rect().collidepoint(position)
         ):
@@ -5554,6 +5775,535 @@ class PersistentExpressionDisplay:
             return
         eased = 1.0 - (1.0 - raw) ** 3
         direction = 1 if self.performance_transition_opening else -1
+        travel = self.width
+        source_x = -round(direction * travel * eased)
+        target_x = round(direction * travel * (1.0 - eased))
+        self.screen.fill((0, 0, 0))
+        self.screen.blit(source, (source_x, 0))
+        self.screen.blit(target, (target_x, 0))
+
+    @staticmethod
+    def read_workshop_json(path: Path) -> dict:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def refresh_workshop_status(self, now: float, *, force: bool = False) -> None:
+        if not force and now < self.workshop_status_next_read_at:
+            return
+        self.workshop_status = self.read_workshop_json(WORKSHOP_STATUS_PATH)
+        self.workshop_runtime_status = self.read_workshop_json(WORKSHOP_RUNTIME_PATH)
+        self.workshop_status_next_read_at = now + 0.5
+
+    def workshop_pending_review(self) -> dict | None:
+        proposal = self.workshop_status.get("pendingReview")
+        return dict(proposal) if isinstance(proposal, dict) else None
+
+    def workshop_installed_apps(self) -> list[dict]:
+        apps = self.workshop_status.get("installedApps")
+        if not isinstance(apps, list):
+            return []
+        return [dict(item) for item in apps if isinstance(item, dict)]
+
+    def workshop_control_rects(self) -> dict[str, object]:
+        if self.workshop_section == "review":
+            approve = self.pygame.Rect(0, 0, 270, 70)
+            reject = self.pygame.Rect(0, 0, 180, 70)
+            approve.center = (312, 650)
+            reject.center = (555, 650)
+            return {"approve": approve, "reject": reject}
+        if self.workshop_section == "installed":
+            result: dict[str, object] = {}
+            for index, app in enumerate(self.workshop_installed_apps()[:4]):
+                rect = self.pygame.Rect(0, 0, 420, 72)
+                rect.center = (400, 286 + index * 86)
+                result[f"app:{app.get('id', '')}"] = rect
+            return result
+        if self.workshop_section == "runtime":
+            stop = self.pygame.Rect(0, 0, 250, 70)
+            stop.center = (400, 650)
+            return {"stop_runtime": stop}
+        create = self.pygame.Rect(0, 0, 360, 78)
+        installed = self.pygame.Rect(0, 0, 210, 70)
+        import_app = self.pygame.Rect(0, 0, 210, 70)
+        create.center = (400, 452)
+        installed.center = (282, 555)
+        import_app.center = (518, 555)
+        return {
+            "create": create,
+            "installed": installed,
+            "import": import_app,
+        }
+
+    @staticmethod
+    def workshop_installed_app_count() -> int:
+        try:
+            payload = json.loads(WORKSHOP_REGISTRY_PATH.read_text(encoding="utf-8"))
+            apps = payload.get("apps") if isinstance(payload, dict) else None
+        except (OSError, ValueError, json.JSONDecodeError):
+            return 0
+        return len(apps) if isinstance(apps, dict) else 0
+
+    def workshop_target_at(self, position: tuple[int, int]) -> str | None:
+        if math.dist(position, self.gallery_back_button_center()) <= 50:
+            return "back"
+        for name, rect in self.workshop_control_rects().items():
+            if rect.inflate(14, 14).collidepoint(position):
+                return name
+        return None
+
+    def draw_workshop_emblem(self) -> None:
+        center = (400, 310)
+        self.draw_aa_circle(self.screen, (4, 24, 33), center, 92)
+        self.draw_aa_ring(self.screen, (41, 137, 168), center, 92, 2)
+        colors = (
+            (112, 224, 246),
+            (71, 194, 230),
+            (35, 137, 182),
+        )
+        for row in range(3):
+            for column in range(3):
+                x = center[0] - 36 + column * 36
+                y = center[1] - 36 + row * 36
+                color = colors[min(2, max(row, column))]
+                self.draw_aa_round_line(
+                    self.screen,
+                    color,
+                    (x - 8, y),
+                    (x + 8, y),
+                    18,
+                )
+
+    def draw_workshop_button(
+        self,
+        rect: object,
+        label: str,
+        *,
+        primary: bool = False,
+        selected: bool = False,
+    ) -> None:
+        if primary:
+            color = (83, 207, 238) if not selected else (126, 229, 249)
+            text_color = (3, 27, 35)
+        else:
+            color = (19, 52, 67) if not selected else (28, 78, 98)
+            text_color = (205, 236, 244)
+        self.draw_aa_round_line(
+            self.screen,
+            color,
+            (rect.left + rect.height / 2, rect.centery),
+            (rect.right - rect.height / 2, rect.centery),
+            rect.height,
+        )
+        self.draw_centered_text(label, self.font_medium, text_color, rect.center)
+
+    @staticmethod
+    def workshop_capability_label(capability: str) -> str:
+        return {
+            "ui.surface": "圆屏界面",
+            "storage.app": "应用私有存储",
+            "events.subscribe": "设备事件",
+            "notifications.local": "本地提醒",
+            "camera.snapshot": "相机拍照",
+            "camera.stream": "相机实时画面",
+            "microphone.stream": "麦克风",
+            "speaker.playback": "扬声器",
+            "vision.inference": "Hailo 视觉推理",
+            "motor.pan_tilt": "云台控制",
+            "assistant.query": "Daily 助手",
+            "tasks.submit": "后台任务",
+            "reports.read": "报告库",
+            "network.outbound": "受限联网",
+            "lifecycle.autostart": "开机运行",
+        }.get(capability, capability)
+
+    def poll_workshop_action(self, now: float) -> None:
+        future = self.workshop_action_future
+        if future is None or not future.done():
+            return
+        kind = self.workshop_action_kind
+        self.workshop_action_future = None
+        self.workshop_action_kind = ""
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.workshop_notice = str(exc)[:28] or "操作失败"
+            self.workshop_notice_until = now + 4.0
+            return
+        if not result.get("ok"):
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            self.workshop_notice = str(error.get("message") or "操作失败")[:28]
+            self.workshop_notice_until = now + 4.0
+            return
+        if kind == "approve":
+            self.workshop_section = "installed"
+            self.workshop_notice = "应用已验证并安装"
+        elif kind == "reject":
+            self.workshop_section = None
+            self.workshop_notice = "已拒绝这个应用"
+        elif kind == "launch":
+            self.workshop_section = "runtime"
+            self.workshop_notice = "应用已启动"
+        elif kind == "stop":
+            self.workshop_section = "installed"
+            self.workshop_notice = "应用已退出"
+        self.workshop_notice_until = now + 3.0
+        self.refresh_workshop_status(now, force=True)
+
+    def draw_workshop_review(self, now: float, proposal: dict) -> None:
+        self.screen.fill((0, 0, 0))
+        self.draw_gallery_back_button()
+        manifest = proposal.get("manifest") if isinstance(proposal.get("manifest"), dict) else {}
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        risk = proposal.get("risk") if isinstance(proposal.get("risk"), dict) else {}
+        permissions = risk.get("permissions") if isinstance(risk.get("permissions"), list) else []
+        self.draw_centered_text("权限审核", self.font_large, (220, 245, 252), (400, 126))
+        self.draw_centered_text(
+            str(metadata.get("name") or "待审核应用")[:20],
+            self.font_medium,
+            (114, 214, 239),
+            (400, 178),
+        )
+        description = str(metadata.get("description") or proposal.get("requirement") or "")
+        for index in range(0, min(len(description), 54), 27):
+            self.draw_centered_text(
+                description[index : index + 27],
+                self.font_small,
+                (119, 158, 171),
+                (400, 224 + index // 27 * 30),
+            )
+        overall = str(risk.get("overall") or "low")
+        risk_label = {"low": "低风险", "medium": "中风险", "high": "含高风险权限"}.get(overall, overall)
+        risk_color = (121, 226, 173) if overall == "low" else (245, 195, 91) if overall == "medium" else (255, 130, 112)
+        self.draw_centered_text(risk_label, self.font_small, risk_color, (400, 292))
+        for index, permission in enumerate(permissions[:7]):
+            if not isinstance(permission, dict):
+                continue
+            capability = str(permission.get("capability") or "")
+            level = str(permission.get("risk") or "low")
+            dot = (86, 211, 231) if level == "low" else (246, 187, 77) if level == "medium" else (250, 111, 95)
+            y = 340 + index * 38
+            self.draw_aa_circle(self.screen, dot, (222, y), 5)
+            label = self.workshop_capability_label(capability)
+            rendered = self.font_small.render(label, True, (202, 231, 238))
+            self.screen.blit(rendered, (244, y - rendered.get_height() // 2))
+        if len(permissions) > 7:
+            self.draw_centered_text(
+                f"另有 {len(permissions) - 7} 项，已写入授权摘要",
+                self.font_small,
+                (118, 157, 169),
+                (400, 606),
+            )
+        rects = self.workshop_control_rects()
+        busy = self.workshop_action_future is not None
+        self.draw_workshop_button(
+            rects["approve"],
+            "正在处理" if busy else "批准并安装",
+            primary=True,
+            selected=self.pointer_down and self.workshop_pointer_target == "approve",
+        )
+        self.draw_workshop_button(
+            rects["reject"],
+            "拒绝",
+            selected=self.pointer_down and self.workshop_pointer_target == "reject",
+        )
+
+    def draw_workshop_installed(self, now: float) -> None:
+        self.screen.fill((0, 0, 0))
+        self.draw_gallery_back_button()
+        self.draw_centered_text("我的应用", self.font_large, (220, 245, 252), (400, 132))
+        apps = self.workshop_installed_apps()
+        if not apps:
+            self.draw_centered_text("还没有安装用户应用", self.font_medium, (115, 159, 174), (400, 360))
+        rects = self.workshop_control_rects()
+        for app in apps[:4]:
+            app_id = str(app.get("id") or "")
+            rect = rects.get(f"app:{app_id}")
+            if rect is None:
+                continue
+            status = "可运行" if app.get("status") == "enabled" else "已停用"
+            label = f"{str(app.get('name') or '应用')[:12]}  ·  {status}"
+            self.draw_workshop_button(
+                rect,
+                label,
+                selected=self.pointer_down and self.workshop_pointer_target == f"app:{app_id}",
+            )
+        self.draw_centered_text("点击应用启动；左滑返回", self.font_small, (74, 118, 132), (400, 655))
+
+    def draw_workshop_runtime(self, now: float) -> None:
+        self.screen.fill((0, 0, 0))
+        self.draw_gallery_back_button()
+        runtime = self.workshop_runtime_status
+        title = str(runtime.get("title") or "用户应用")[:20]
+        status = str(runtime.get("status") or "starting")
+        self.draw_centered_text(title, self.font_large, (220, 245, 252), (400, 134))
+        status_label = {
+            "starting": "正在启动",
+            "running": "运行中",
+            "completed": "已完成",
+            "lease_expired": "相机授权已到期",
+            "error": "运行失败",
+        }.get(status, status)
+        status_color = (119, 224, 174) if status in {"running", "completed"} else (255, 131, 110) if status == "error" else (112, 198, 225)
+        self.draw_centered_text(status_label, self.font_medium, status_color, (400, 198))
+        surface = runtime.get("surface") if isinstance(runtime.get("surface"), dict) else {}
+        data = surface.get("data") if isinstance(surface.get("data"), dict) else {}
+        view = str(surface.get("view") or "status")
+        self.draw_aa_circle(self.screen, (4, 25, 34), (400, 390), 150)
+        self.draw_aa_ring(self.screen, (26, 100, 126), (400, 390), 150, 2)
+        detection_count = int(data.get("detectionCount") or 0)
+        counters = data.get("counters") if isinstance(data.get("counters"), dict) else {}
+        value = next(iter(counters.values()), detection_count) if counters else detection_count
+        self.draw_centered_text(str(value), self.font_large, (104, 224, 245), (400, 374))
+        self.draw_centered_text(
+            "当前计数" if "counter" in view or counters else "应用状态",
+            self.font_small,
+            (109, 158, 174),
+            (400, 438),
+        )
+        error = str(runtime.get("error") or "")
+        if error:
+            self.draw_centered_text(error[:28], self.font_small, (255, 151, 136), (400, 566))
+        rect = self.workshop_control_rects()["stop_runtime"]
+        self.draw_workshop_button(
+            rect,
+            "退出应用",
+            selected=self.pointer_down and self.workshop_pointer_target == "stop_runtime",
+        )
+
+    def draw_workshop_page(self, now: float) -> None:
+        self.poll_workshop_action(now)
+        self.refresh_workshop_status(now)
+        if self.workshop_section == "review":
+            proposal = self.workshop_pending_review()
+            if proposal is not None:
+                self.draw_workshop_review(now, proposal)
+                return
+            self.workshop_section = None
+        elif self.workshop_section == "installed":
+            self.draw_workshop_installed(now)
+            return
+        elif self.workshop_section == "runtime":
+            self.draw_workshop_runtime(now)
+            return
+        self.screen.fill((0, 0, 0))
+        self.draw_gallery_back_button()
+        self.draw_centered_text(
+            "工坊",
+            self.font_large,
+            (220, 245, 252),
+            (400, 136),
+        )
+        self.draw_centered_text(
+            "把一句想法变成 RiverBank 应用",
+            self.font_small,
+            (105, 165, 183),
+            (400, 184),
+        )
+        self.draw_workshop_emblem()
+        rects = self.workshop_control_rects()
+        self.draw_workshop_button(
+            rects["create"],
+            "创建应用",
+            primary=True,
+            selected=self.pointer_down and self.workshop_pointer_target == "create",
+        )
+        self.draw_workshop_button(
+            rects["installed"],
+            "审核权限" if self.workshop_pending_review() is not None else "我的应用",
+            selected=self.pointer_down and self.workshop_pointer_target == "installed",
+        )
+        self.draw_workshop_button(
+            rects["import"],
+            "导入应用",
+            selected=self.pointer_down and self.workshop_pointer_target == "import",
+        )
+        if self.workshop_notice and now < self.workshop_notice_until:
+            notice = self.workshop_notice
+            color = (153, 207, 220)
+        else:
+            counts = self.workshop_status.get("counts") if isinstance(self.workshop_status.get("counts"), dict) else {}
+            active = int(counts.get("active") or 0)
+            notice = "正在生成安全方案" if active else "签名校验 · 权限审核 · 受控运行"
+            color = (69, 111, 123)
+        self.draw_centered_text(notice, self.font_small, color, (400, 660))
+
+    def render_workshop_surface(self, now: float | None = None) -> object:
+        surface = self.pygame.Surface(self.target_size)
+        original_screen = self.screen
+        original_pointer_down = self.pointer_down
+        original_target = self.workshop_pointer_target
+        try:
+            self.screen = surface
+            self.pointer_down = False
+            self.workshop_pointer_target = None
+            self.draw_workshop_page(time.monotonic() if now is None else now)
+        finally:
+            self.screen = original_screen
+            self.pointer_down = original_pointer_down
+            self.workshop_pointer_target = original_target
+        return surface
+
+    def open_workshop(self) -> None:
+        if self.workshop_active:
+            return
+        now = time.monotonic()
+        self.workshop_section = None
+        self.refresh_workshop_status(now, force=True)
+        self.workshop_transition_source = self.screen.copy()
+        self.workshop_active = True
+        self.workshop_pointer_target = None
+        self.workshop_notice = ""
+        self.workshop_notice_until = 0.0
+        self.workshop_transition_active = True
+        self.workshop_transition_opening = True
+        self.workshop_transition_started_at = now
+        self.workshop_transition_exits_page = False
+        self.workshop_transition_target = self.render_workshop_surface(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("workshop page opened")
+
+    def close_workshop(self, animated: bool = True) -> None:
+        if not self.workshop_active:
+            return
+        now = time.monotonic()
+        return_target = self.prepare_application_menu_return(now)
+        self.workshop_pointer_target = None
+        if animated:
+            self.workshop_transition_source = self.screen.copy()
+            self.workshop_transition_target = return_target
+            self.workshop_transition_active = True
+            self.workshop_transition_opening = False
+            self.workshop_transition_started_at = now
+            self.workshop_transition_exits_page = True
+        else:
+            self.workshop_active = False
+            self.workshop_transition_active = False
+            self.workshop_transition_source = None
+            self.workshop_transition_target = None
+            self.workshop_transition_exits_page = False
+            self.complete_application_menu_return(now)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+        log("workshop page close requested")
+
+    def handle_workshop_target(self, target: str | None) -> None:
+        if target == "back":
+            if self.workshop_section == "runtime":
+                if self.workshop_action_future is None:
+                    self.workshop_action_kind = "stop"
+                    self.workshop_action_future = self.control_executor.submit(stop_workshop_app)
+                return
+            if self.workshop_section is not None:
+                self.workshop_section = None
+                self.workshop_pointer_target = None
+                self.needs_redraw = True
+                return
+            self.close_workshop(animated=True)
+            return
+        now = time.monotonic()
+        if target == "create":
+            sent = self.send_voice_command(
+                {"command": "workshop_create", "source": "workshop"}
+            )
+            if sent:
+                self.workshop_active = False
+                self.workshop_transition_active = False
+                self.workshop_transition_source = None
+                self.workshop_transition_target = None
+                self.workshop_transition_exits_page = False
+                self.workshop_pointer_target = None
+                log("workshop requirement conversation requested")
+            else:
+                self.workshop_notice = "语音助手暂时不可用"
+                self.workshop_notice_until = now + 3.0
+        elif target == "installed":
+            self.refresh_workshop_status(now, force=True)
+            self.workshop_section = (
+                "review" if self.workshop_pending_review() is not None else "installed"
+            )
+        elif target == "import":
+            self.workshop_notice = "请通过客户端导入已签名 .rbapp"
+            self.workshop_notice_until = now + 3.0
+        elif target == "approve" and self.workshop_action_future is None:
+            proposal = self.workshop_pending_review()
+            manifest = proposal.get("manifest") if isinstance(proposal, dict) else None
+            spec = manifest.get("spec") if isinstance(manifest, dict) else None
+            permissions = spec.get("permissions") if isinstance(spec, dict) else None
+            capabilities = [
+                str(item.get("capability"))
+                for item in permissions or []
+                if isinstance(item, dict) and item.get("capability")
+            ]
+            if proposal and capabilities:
+                self.workshop_action_kind = "approve"
+                self.workshop_action_future = self.control_executor.submit(
+                    approve_proposal,
+                    str(proposal["id"]),
+                    capabilities,
+                )
+        elif target == "reject" and self.workshop_action_future is None:
+            proposal = self.workshop_pending_review()
+            if proposal:
+                self.workshop_action_kind = "reject"
+                self.workshop_action_future = self.control_executor.submit(
+                    reject_proposal,
+                    str(proposal["id"]),
+                )
+        elif target and target.startswith("app:") and self.workshop_action_future is None:
+            app_id = target.partition(":")[2]
+            if app_id:
+                self.workshop_action_kind = "launch"
+                self.workshop_action_future = self.control_executor.submit(
+                    workshop_request,
+                    {"command": "launch", "appId": app_id},
+                    timeout=5.0,
+                )
+        elif target == "stop_runtime" and self.workshop_action_future is None:
+            self.workshop_action_kind = "stop"
+            self.workshop_action_future = self.control_executor.submit(stop_workshop_app)
+        self.note_screensaver_activity(now)
+        self.needs_redraw = True
+        self.write_state()
+
+    def draw_workshop(self, now: float) -> None:
+        if not self.workshop_transition_active:
+            self.draw_workshop_page(now)
+            return
+        source = self.workshop_transition_source
+        target = self.workshop_transition_target
+        if source is None or target is None:
+            self.workshop_transition_active = False
+            self.draw_workshop_page(now)
+            return
+        raw = min(
+            1.0,
+            max(
+                0.0,
+                (now - self.workshop_transition_started_at)
+                / self.workshop_transition_seconds,
+            ),
+        )
+        if raw >= 1.0:
+            self.screen.blit(target, (0, 0))
+            self.workshop_transition_active = False
+            self.workshop_transition_source = None
+            self.workshop_transition_target = None
+            if self.workshop_transition_exits_page:
+                self.workshop_active = False
+                self.workshop_pointer_target = None
+                self.complete_application_menu_return(now)
+                log("workshop page exit transition completed")
+            self.workshop_transition_exits_page = False
+            self.write_state()
+            return
+        eased = 1.0 - (1.0 - raw) ** 3
+        direction = 1 if self.workshop_transition_opening else -1
         travel = self.width
         source_x = -round(direction * travel * eased)
         target_x = round(direction * travel * (1.0 - eased))
@@ -6960,6 +7710,8 @@ class PersistentExpressionDisplay:
         if self.boot_active:
             self.screen.fill((0, 0, 0))
             self.draw_boot_animation(now)
+        elif self.provisioning_active:
+            self.draw_provisioning()
         elif self.pomodoro_completion_alert_active:
             self.draw_pomodoro_completion_alert()
         elif self.screensaver_active:
@@ -6968,6 +7720,8 @@ class PersistentExpressionDisplay:
             self.draw_video_call(now)
         elif self.music_active:
             self.draw_music(now)
+        elif self.workshop_active:
+            self.draw_workshop(now)
         elif self.performance_active:
             self.draw_performance(now)
         elif self.pomodoro_active:
@@ -7072,6 +7826,110 @@ class PersistentExpressionDisplay:
     ) -> None:
         surface = font.render(text, True, color)
         self.screen.blit(surface, surface.get_rect(center=center))
+
+    def update_provisioning_status(self, now: float, force: bool = False) -> bool:
+        if not force and now < self.provisioning_next_read_at:
+            return False
+        self.provisioning_next_read_at = now + 1.0
+        try:
+            payload = json.loads(PROVISIONING_STATUS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("provisioning status must be an object")
+        except (OSError, ValueError, json.JSONDecodeError):
+            payload = {"active": False, "phase": "idle"}
+        active = bool(payload.get("active"))
+        qr_path = str(payload.get("qr_path") or "")
+        qr_mtime = 0
+        if qr_path:
+            try:
+                qr_mtime = Path(qr_path).stat().st_mtime_ns
+            except OSError:
+                qr_mtime = 0
+        changed = (
+            payload != self.provisioning_status
+            or active != self.provisioning_active
+            or qr_path != self.provisioning_qr_path
+            or qr_mtime != self.provisioning_qr_mtime_ns
+        )
+        self.provisioning_status = payload
+        self.provisioning_active = active
+        if qr_path != self.provisioning_qr_path or qr_mtime != self.provisioning_qr_mtime_ns:
+            self.provisioning_qr_surface = None
+            if qr_mtime:
+                try:
+                    loaded = self.pygame.image.load(qr_path).convert()
+                    self.provisioning_qr_surface = self.pygame.transform.scale(
+                        loaded,
+                        (340, 340),
+                    )
+                except (OSError, self.pygame.error) as exc:
+                    log(f"provisioning QR warning: {exc}")
+            self.provisioning_qr_path = qr_path
+            self.provisioning_qr_mtime_ns = qr_mtime
+        if changed:
+            self.needs_redraw = True
+        return changed
+
+    def draw_provisioning(self) -> None:
+        self.screen.fill((0, 0, 0))
+        self.draw_aa_ring(
+            self.screen,
+            (38, 127, 153, 76),
+            (self.width // 2, self.height // 2),
+            min(self.width, self.height) // 2 - 10,
+            width=3,
+        )
+        self.draw_centered_text(
+            "网络设置",
+            self.font_large,
+            (226, 246, 250),
+            (self.width // 2, 90),
+        )
+        message = str(
+            self.provisioning_status.get("message")
+            or "手机扫码完成网络与设备设置"
+        )
+        self.draw_centered_text(
+            self.ellipsize_text(message, self.font_small, 600),
+            self.font_small,
+            (130, 185, 199),
+            (self.width // 2, 132),
+        )
+        qr_rect = self.pygame.Rect(230, 172, 340, 340)
+        if self.provisioning_qr_surface is not None:
+            self.screen.blit(self.provisioning_qr_surface, qr_rect.topleft)
+        else:
+            self.screen.blit(
+                self.settings_card_surface(qr_rect.size, False, False),
+                qr_rect.topleft,
+            )
+            self.draw_centered_text(
+                "二维码准备中",
+                self.font_medium,
+                (171, 207, 216),
+                qr_rect.center,
+            )
+        ssid = str(self.provisioning_status.get("ssid") or "")
+        mode = str(self.provisioning_status.get("mode") or "lan")
+        title = f"临时 Wi-Fi：{ssid}" if mode == "hotspot" and ssid else "打开手机相机扫码"
+        self.draw_centered_text(
+            self.ellipsize_text(title, self.font_medium, 590),
+            self.font_medium,
+            (214, 239, 245),
+            (self.width // 2, 563),
+        )
+        self.draw_centered_text(
+            "设置 Wi-Fi · 设备名 · 账号 · 模型密钥",
+            self.font_small,
+            (102, 165, 181),
+            (self.width // 2, 609),
+        )
+        self.draw_centered_text(
+            "密钥不会写入二维码、日志或状态文件",
+            self.font_status,
+            (79, 133, 147),
+            (self.width // 2, 667),
+        )
 
     def request_system_status_refresh(self, now: float | None = None) -> bool:
         requested_at = time.monotonic() if now is None else now
@@ -8192,6 +9050,7 @@ class PersistentExpressionDisplay:
         return bool(
             self.video_call_active
             or self.music_active
+            or self.workshop_active
             or self.performance_active
             or self.pomodoro_active
             or self.settings_active
@@ -9199,11 +10058,13 @@ class PersistentExpressionDisplay:
                         continue
                     for frame in range(1, 25):
                         progress = frame / 24.0
-                        self.application_pin_affordance_surface(
-                            selected_index,
-                            progress,
-                            frame == 24,
-                        )
+                        for unpin in (False, True):
+                            self.application_pin_affordance_surface(
+                                selected_index,
+                                progress,
+                                frame == 24,
+                                unpin=unpin,
+                            )
         self.menu_level = original_level
         self.menu_pin_mode = original_pin_mode
         self.radial_menu = original_menu
@@ -9213,14 +10074,14 @@ class PersistentExpressionDisplay:
         self.status_bar_surface(now)
         for phase in ("focus", "short_break"):
             self.pomodoro_duration_adjust_base(phase)
-            for pointer_step in range(72):
+            # Prewarm a sparse set and fill the remaining pointer positions lazily.
+            # This preserves a smooth first gesture without retaining 144 large
+            # supersampled dial frames in RAM from boot.
+            for pointer_step in range(0, 72, 6):
                 self.pomodoro_duration_wave_surface(pointer_step, phase)
-        for minutes in range(
-            self.pomodoro_duration_min_minutes,
-            self.pomodoro_duration_max_minutes + 1,
-            self.pomodoro_duration_step_minutes,
-        ):
+        for minutes in (1, 5, 10, 15, 20, 25, 30, 45, 60, 90, 120, 180):
             self.pomodoro_duration_time_surface(minutes)
+        self.release_unused_memory()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         log(
             "control and radial-menu transition cache ready "
@@ -9936,11 +10797,13 @@ class PersistentExpressionDisplay:
         selected: int,
         progress: float,
         ready: bool,
+        *,
+        unpin: bool = False,
     ) -> tuple[object, tuple[int, int]]:
-        """Return one pre-renderable, cropped frame of the morphing pin arc."""
+        """Return one pre-renderable frame of the pin or unpin affordance."""
         frame_count = 24
         frame = max(1, min(round(progress * frame_count), frame_count))
-        cache_key = (selected, frame, bool(ready))
+        cache_key = (selected, frame, bool(ready), bool(unpin))
         cached = self.app_pin_affordance_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -9970,8 +10833,17 @@ class PersistentExpressionDisplay:
             soft_edge=True,
             steps=28,
         )
-        if ready:
+        if ready and unpin:
+            fill = (247, 155, 135, 252)
+        elif ready:
             fill = (105, 226, 248, 252)
+        elif unpin:
+            fill = (
+                round(183 + 32 * eased),
+                round(112 + 28 * eased),
+                round(105 + 20 * eased),
+                round(225 + 27 * eased),
+            )
         else:
             fill = (
                 round(70 + 22 * eased),
@@ -9994,7 +10866,7 @@ class PersistentExpressionDisplay:
         if label_progress > 0.0:
             self.draw_curved_arc_text(
                 layer,
-                "固定到首页菜单",
+                "取消固定" if unpin else "固定到桌面",
                 center,
                 middle_radius,
                 middle_angle,
@@ -10070,6 +10942,10 @@ class PersistentExpressionDisplay:
             selected,
             progress,
             self.app_pin_drag_ready,
+            unpin=(
+                self.application_menu.pinned_app_id
+                == self.app_pin_candidate_app_id
+            ),
         )
         self.screen.blit(surface, position)
 
@@ -10439,6 +11315,9 @@ class PersistentExpressionDisplay:
 
     def handle_pointer_down(self, position: tuple[int, int]) -> None:
         now = time.monotonic()
+        if self.provisioning_active:
+            self.last_touch_at = now
+            return
         if self.pomodoro_completion_alert_active:
             self.last_touch_at = now
             return
@@ -10478,6 +11357,14 @@ class PersistentExpressionDisplay:
                 self.music_volume_interaction_started_at = now
                 self.music_volume_last_interaction_at = now
                 self.set_music_volume_from_position(position, force=True)
+            self.needs_redraw = True
+            return
+        if self.workshop_active:
+            if self.workshop_transition_active:
+                self.pointer_down = False
+                self.workshop_pointer_target = None
+                return
+            self.workshop_pointer_target = self.workshop_target_at(position)
             self.needs_redraw = True
             return
         if self.performance_active:
@@ -10659,6 +11546,11 @@ class PersistentExpressionDisplay:
                 self.music_pointer_target = None
             self.needs_redraw = True
             return
+        if self.workshop_active:
+            if self.pointer_moved:
+                self.workshop_pointer_target = None
+            self.needs_redraw = True
+            return
         if self.performance_active:
             if self.pointer_moved:
                 self.performance_pointer_target = None
@@ -10834,6 +11726,33 @@ class PersistentExpressionDisplay:
             self.needs_redraw = True
             self.write_state()
             return
+        if self.workshop_active:
+            target = self.workshop_pointer_target
+            swipe_direction = (
+                self.pomodoro_horizontal_swipe_direction(position)
+                if self.pointer_moved
+                else 0
+            )
+            if swipe_direction > 0:
+                if self.workshop_section == "runtime":
+                    self.handle_workshop_target("back")
+                elif self.workshop_section is not None:
+                    self.workshop_section = None
+                else:
+                    self.close_workshop(animated=True)
+                log("workshop returned by left-to-right swipe")
+            elif (
+                not self.pointer_moved
+                and target is not None
+                and target == self.workshop_target_at(position)
+            ):
+                self.handle_workshop_target(target)
+            self.workshop_pointer_target = None
+            self.pointer_down = False
+            self.pointer_moved = False
+            self.needs_redraw = True
+            self.write_state()
+            return
         if self.performance_active:
             target = self.performance_pointer_target
             swipe_direction = (
@@ -10851,6 +11770,12 @@ class PersistentExpressionDisplay:
                     and target == self.performance_target_at(position)
                 ):
                     self.start_performance_section_transition(None, -1)
+                elif (
+                    not self.pointer_moved
+                    and target == "recover"
+                    and target == self.performance_target_at(position)
+                ):
+                    self.request_full_recovery()
             elif swipe_direction > 0:
                 self.close_performance(animated=True)
                 log("performance returned by left-to-right swipe")
@@ -11064,7 +11989,12 @@ class PersistentExpressionDisplay:
                             "label": selected_item.get("label"),
                             "glyph": selected_item.get("glyph"),
                             "action": {
-                                "type": "pin_app",
+                                "type": (
+                                    "unpin_app"
+                                    if self.application_menu.pinned_app_id
+                                    == self.app_pin_candidate_app_id
+                                    else "pin_app"
+                                ),
                                 "app_id": self.app_pin_candidate_app_id,
                             },
                         }
@@ -11135,6 +12065,7 @@ class PersistentExpressionDisplay:
             not self.pointer_down
             or self.menu_active
             or self.music_active
+            or self.workshop_active
             or self.performance_active
             or self.pomodoro_active
             or self.settings_active
@@ -11200,8 +12131,8 @@ class PersistentExpressionDisplay:
             "open_app_menu",
             "open_app_pin_menu",
             "menu_back",
-            "clear_app_pin",
             "pin_app",
+            "unpin_app",
             "noop",
         }
 
@@ -11214,6 +12145,9 @@ class PersistentExpressionDisplay:
             return True
         if app_id == "music":
             self.open_music()
+            return True
+        if app_id == "workshop":
+            self.open_workshop()
             return True
         if app_id == "video_call":
             self.set_video_call_view(True, request_service=True)
@@ -11254,6 +12188,16 @@ class PersistentExpressionDisplay:
             self.music_transition_target = None
             self.music_pointer_target = None
             self.music_volume_dragging = False
+        if target != "workshop":
+            if self.workshop_section == "runtime" and self.workshop_action_future is None:
+                self.workshop_action_kind = "stop"
+                self.workshop_action_future = self.control_executor.submit(stop_workshop_app)
+            self.workshop_active = False
+            self.workshop_section = None
+            self.workshop_transition_active = False
+            self.workshop_transition_source = None
+            self.workshop_transition_target = None
+            self.workshop_pointer_target = None
         self.needs_redraw = True
 
     def execute_menu_item(self, item: dict) -> None:
@@ -11264,8 +12208,8 @@ class PersistentExpressionDisplay:
             "open_app_menu",
             "open_app_pin_menu",
             "menu_back",
-            "clear_app_pin",
             "pin_app",
+            "unpin_app",
             "noop",
         }
         if (
@@ -11315,13 +12259,6 @@ class PersistentExpressionDisplay:
         elif action_type == "menu_back":
             self.set_radial_menu_context("main", False, animate=True)
             result = "returned"
-        elif action_type == "clear_app_pin":
-            if self.application_menu.clear_pin():
-                self.radial_menu_content_cache.clear()
-                self.set_radial_menu_context("main", False, animate=True)
-                result = "cleared"
-            else:
-                result = "clear_failed"
         elif action_type == "pin_app":
             app_id = str(action.get("app_id", "")).strip()
             if self.application_menu.pin(app_id):
@@ -11330,6 +12267,14 @@ class PersistentExpressionDisplay:
                 result = "pinned"
             else:
                 result = "pin_failed"
+        elif action_type == "unpin_app":
+            app_id = str(action.get("app_id", "")).strip()
+            if self.application_menu.unpin(app_id):
+                self.radial_menu_content_cache.clear()
+                self.set_radial_menu_context("main", False, animate=True)
+                result = "unpinned"
+            else:
+                result = "unpin_failed"
         elif action_type == "launch_app":
             app_id = str(action.get("app_id", "")).strip()
             result = "opened" if self.launch_application(app_id) else "failed"
@@ -11405,6 +12350,7 @@ class PersistentExpressionDisplay:
                 "peak_ms": round(self.frame_render_peak_ms, 3),
             },
             "animation_interpolation": True,
+            "expression_animation_fps": round(self.expression_animation_fps, 3),
             "max_animation_fps": round(self.target_render_fps, 3),
             "transition_rendering": {
                 "strategy": "cached-composite-crossfade-scale",
@@ -11428,6 +12374,11 @@ class PersistentExpressionDisplay:
                 "group_states": self.boot_group_states,
                 "preload_ready": self.boot_preload_ready(),
                 "warning": self.boot_warning,
+            },
+            "provisioning": {
+                "active": self.provisioning_active,
+                "phase": self.provisioning_status.get("phase", "idle"),
+                "mode": self.provisioning_status.get("mode"),
             },
             "touch_enabled": self.touch_enabled,
             "touch_state": self.touch_state,
@@ -11707,6 +12658,42 @@ class PersistentExpressionDisplay:
                     "style": "cached-carousel-slide-ease-out",
                 },
             },
+            "workshop": {
+                "active": self.workshop_active,
+                "pointer_target": self.workshop_pointer_target,
+                "notice": (
+                    self.workshop_notice
+                    if time.monotonic() < self.workshop_notice_until
+                    else ""
+                ),
+                "capabilities": [
+                    "requirements-conversation",
+                    "model-to-declarative-plan",
+                    "signed-package-validation",
+                    "capability-authorization",
+                    "user-permission-review",
+                    "transactional-registration",
+                    "declarative-host-runtime",
+                ],
+                "section": self.workshop_section,
+                "manifest_protocol": "riverbank.workshop/v1",
+                "host_protocol": "riverbank.app-host/v1",
+                "installed_app_count": self.workshop_installed_app_count(),
+                "pending_review": self.workshop_pending_review(),
+                "service_connected": bool(self.workshop_status.get("ok")),
+                "action_pending": self.workshop_action_future is not None,
+                "execution_policy": "validated-declarative-only",
+                "python_sandbox_enabled": False,
+                "transition": {
+                    "active": self.workshop_transition_active,
+                    "opening": self.workshop_transition_opening,
+                    "exits_page": self.workshop_transition_exits_page,
+                    "duration_ms": round(
+                        self.workshop_transition_seconds * 1000
+                    ),
+                    "style": "cached-carousel-slide-ease-out",
+                },
+            },
             "settings": {
                 "active": self.settings_active,
                 "section": self.settings_section,
@@ -11860,6 +12847,7 @@ class PersistentExpressionDisplay:
             "window_id": self.window_id,
             "deadline_monotonic": self.deadline,
             "cache_mb": round(self.cache_bytes / 1024 / 1024, 1),
+            "cache_limit_mb": round(self.cache_limit / 1024 / 1024, 1),
             "cached_states": list(self.cache),
             "pending_states": list(self.pending),
             "preloaded_first_frames": len(self.first_frames),
@@ -11876,6 +12864,14 @@ class PersistentExpressionDisplay:
         now = time.monotonic()
         if self.boot_active:
             self.update_boot_state(now)
+            if now - self.last_overlay_redraw >= self.render_interval:
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
+        self.update_provisioning_status(now)
+        if self.provisioning_active:
             if now - self.last_overlay_redraw >= self.render_interval:
                 self.needs_redraw = True
             if self.needs_redraw:
@@ -11914,6 +12910,8 @@ class PersistentExpressionDisplay:
         if self.update_performance_async(now):
             self.needs_redraw = True
             self.write_state()
+        if self.update_full_recovery(now):
+            self.write_state()
         if self.update_music(now):
             self.write_state()
         if self.update_music_lyrics(now):
@@ -11940,6 +12938,25 @@ class PersistentExpressionDisplay:
                 or self.music_volume_expansion(now) > 0.0
                 or self.music_player.status == "playing"
             ) and now - self.last_overlay_redraw >= self.render_interval:
+                self.needs_redraw = True
+            if self.needs_redraw:
+                self.draw()
+            self.refresh_always_on_top()
+            return
+        if self.workshop_active:
+            if now >= self.workshop_status_next_read_at:
+                self.refresh_workshop_status(now, force=True)
+                self.needs_redraw = True
+            if self.workshop_action_future is not None and self.workshop_action_future.done():
+                self.needs_redraw = True
+            if self.workshop_notice_until and now >= self.workshop_notice_until:
+                self.workshop_notice = ""
+                self.workshop_notice_until = 0.0
+                self.needs_redraw = True
+            if (
+                self.workshop_transition_active
+                and now - self.last_overlay_redraw >= self.render_interval
+            ):
                 self.needs_redraw = True
             if self.needs_redraw:
                 self.draw()
@@ -12388,6 +13405,28 @@ def main() -> int:
                             display.close_performance(
                                 animated=bool(request.get("animated", True))
                             )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "workshop_view":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.prepare_voice_application_switch("workshop")
+                            display.open_workshop()
+                        else:
+                            display.close_workshop(
+                                animated=bool(request.get("animated", True))
+                            )
+                        display.needs_redraw = True
+                        display.write_state()
+                    elif request.get("command") == "workshop_app_view":
+                        preview_active = bool(request.get("active", True))
+                        if preview_active:
+                            display.prepare_voice_application_switch("workshop")
+                            display.open_workshop()
+                            display.workshop_section = "runtime"
+                            display.refresh_workshop_status(time.monotonic(), force=True)
+                        elif display.workshop_active:
+                            display.workshop_section = "installed"
                         display.needs_redraw = True
                         display.write_state()
                     elif request.get("command") == "music_view":

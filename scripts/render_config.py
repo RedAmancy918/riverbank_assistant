@@ -87,6 +87,14 @@ def main() -> int:
         REPO / "apps/health-monitor/config.example.json",
         output / "health-monitor.json",
     )
+    shutil.copy2(
+        REPO / "apps/recovery/config.example.json",
+        output / "recovery.json",
+    )
+    shutil.copy2(
+        REPO / "apps/provisioning/config.example.json",
+        output / "provisioning.json",
+    )
 
     replacements = {
         "RIVERBANK_USER": args.user,

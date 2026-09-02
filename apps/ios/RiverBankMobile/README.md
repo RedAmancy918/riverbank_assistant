@@ -1,6 +1,6 @@
 # RiverBank Mobile
 
-SwiftUI iOS 客户端，支持与 `riverbank-tech` 进行双向 WebRTC 音视频通话，以及提交持久化后台任务、处理 Agent 追问、取消任务、阅读和分享 Markdown 报告。关闭 App 不会终止树莓派上的后台任务。
+SwiftUI iOS 客户端，支持与 `riverbank-tech` 进行持久化连续 Chat、双向 WebRTC 音视频通话，以及提交后台任务、处理 Agent 追问、取消任务、阅读和分享 Markdown 报告。Chat 采用会话列表、消息流、底部多行输入框、停止生成和失败重试式交互；关闭 App 不会丢失对话，也不会终止树莓派上的后台任务。
 
 ## 构建
 
@@ -10,7 +10,7 @@ SwiftUI iOS 客户端，支持与 `riverbank-tech` 进行双向 WebRTC 音视频
 4. 在 Signing & Capabilities 选择自己的 Apple Development Team；
 5. 连接 iPhone 后运行 `RiverBankMobile` scheme。
 
-版本显示为 `v0.20.0 beta`。App Store 的 `CFBundleShortVersionString` 保持三段数字，beta 通道在界面中单独标记。
+版本显示为 `v0.24.4 beta`。App Store 的 `CFBundleShortVersionString` 保持三段数字，beta 通道在界面中单独标记。
 
 仓库保存 Swift 源码、Asset Catalog、`project.yml` 和共享 Xcode 工程，不保存本机 `DerivedData`、开发证书、Provisioning Profile、`.app`、`.ipa` 或 `.xcarchive`。克隆后需要选择自己的 Apple Development Team；若要分发给其他设备，应通过 TestFlight、App Store 或签名后的独立 Release 流程，而不是提交本机编译目录。
 
@@ -28,6 +28,10 @@ iPhone 需安装 Tailscale 并登录允许访问树莓派的 tailnet。首次进
 
 ## 接口
 
+- `GET/POST /api/v1/chats`：会话列表与新对话；
+- `DELETE /api/v1/chats/{id}`：删除已停止的对话；
+- `GET/POST /api/v1/chats/{id}/messages`：消息历史与新消息；
+- `POST /api/v1/chats/{id}/messages/{message_id}/cancel`：停止生成；
 - `POST /api/v1/tasks`：幂等提交；
 - `GET /api/v1/tasks`：任务列表；
 - `GET /api/v1/tasks/{id}`：状态；

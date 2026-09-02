@@ -15,6 +15,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from paper_qa import annotate_report, build_daily_knowledge
 from special_focus import mark_consumed
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -326,6 +327,20 @@ def render(input_path: Path) -> None:
         paper.get("reading_depth") == "full"
         for paper in report["papers"] + report["potential_methods"] + report["special_focus"]
     )
+    annotate_report(report)
+    try:
+        knowledge = build_daily_knowledge(report)
+        report["paper_qa"] = {
+            "enabled": True,
+            "paper_count": knowledge["paper_count"],
+            "full_source_count": knowledge["full_source_count"],
+            "retention": knowledge["retention"],
+        }
+    except Exception as exc:
+        report["paper_qa"] = {
+            "enabled": False,
+            "error": str(exc)[:500],
+        }
     date = datetime.strptime(report["date"], "%Y-%m-%d")
     report_dir = REPORTS / date.strftime("%Y") / date.strftime("%m")
     report_json = report_dir / f"{report['date']}.json"

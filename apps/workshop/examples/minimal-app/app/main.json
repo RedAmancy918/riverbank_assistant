@@ -1,0 +1,17 @@
+{
+  "schema": "riverbank.declarative-app/v1",
+  "title": "我的应用",
+  "pipeline": [
+    {
+      "source": "app.lifecycle.foreground"
+    },
+    {
+      "sink": "ui.present",
+      "view": "main"
+    }
+  ],
+  "safety": {
+    "runOnlyInForeground": true,
+    "stopOnUserExit": true
+  }
+}

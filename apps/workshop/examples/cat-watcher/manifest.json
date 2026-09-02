@@ -1,0 +1,62 @@
+{
+  "apiVersion": "riverbank.workshop/v1",
+  "kind": "RiverBankApp",
+  "metadata": {
+    "id": "tech.riverbank.catwatcher",
+    "name": "小猫观察员",
+    "version": "0.1.0",
+    "description": "只在用户打开应用时识别经过镜头的小猫，并在本地保存事件计数。",
+    "vendor": "RiverBank Local Workshop"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "declarative-v1",
+      "entrypoint": "app/main.json",
+      "protocol": "riverbank.app-host/v1"
+    },
+    "permissions": [
+      {
+        "capability": "ui.surface",
+        "reason": "在圆屏显示检测状态和今日计数。",
+        "constraints": {}
+      },
+      {
+        "capability": "storage.app",
+        "reason": "只在应用私有目录保存小猫出现次数。",
+        "constraints": {}
+      },
+      {
+        "capability": "camera.stream",
+        "reason": "在应用前台运行时读取 Camera Hub 帧流。",
+        "constraints": {
+          "privacyIndicator": true
+        }
+      },
+      {
+        "capability": "vision.inference",
+        "reason": "调用宿主白名单目标检测模型识别 cat 类别。",
+        "constraints": {}
+      },
+      {
+        "capability": "notifications.local",
+        "reason": "检测到小猫时显示限频本地提示。",
+        "constraints": {}
+      }
+    ],
+    "resources": {
+      "cpuPercent": 12,
+      "memoryMB": 192,
+      "storageMB": 128,
+      "maxProcesses": 2
+    },
+    "lifecycle": {
+      "autostart": false,
+      "startTimeoutSeconds": 10,
+      "stopTimeoutSeconds": 5
+    },
+    "ui": {
+      "menuLabel": "小猫",
+      "glyph": "猫"
+    }
+  }
+}

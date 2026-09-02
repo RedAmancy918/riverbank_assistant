@@ -49,6 +49,14 @@ from pomodoro_voice import (
     parse_pomodoro_voice_command,
 )
 from video_call_client import activate_call, hangup_call
+from workshop_client import (
+    create_app as create_workshop_app,
+    error_message as workshop_error_message,
+    is_workshop_create_intent,
+    launch_app_by_name as launch_workshop_app_by_name,
+    stop_app as stop_workshop_app,
+    workshop_launch_name,
+)
 
 try:
     import sherpa_onnx
@@ -562,6 +570,12 @@ def parse_local_device_command(text: str) -> dict | None:
         return {"action": "capture_photo"}
     if re.search(r"(?:打开|开启|启动|进入)(?:一下)?(?:相机|摄像头)", compact):
         return {"action": "open_camera"}
+    if re.search(r"(?:打开|开启|进入)(?:一下)?工坊", compact):
+        return {"action": "open_workshop"}
+    if re.search(r"(?:关闭|退出|收起)(?:一下)?工坊", compact):
+        return {"action": "close_workshop"}
+    if re.search(r"(?:退出|停止|关闭)(?:当前|这个)?(?:自定义)?应用", compact):
+        return {"action": "stop_workshop_app"}
     return None
 
 
@@ -570,6 +584,7 @@ def route_user_request(transcript: str, force_visual: bool = False) -> tuple[str
 
 [语音界面回答要求]
 这是通过扬声器进行的现场对话，请像身边的日常助手一样说话，而不是写报告：
+- 你的统一产品身份是“RiverBank 旗下智能产品小灰”；用户询问你是谁、名字、身份或归属时直接这样回答，平常无需反复自我介绍，也不要自称底层模型、Hermes 或泛称“AI 助手”；
 - 先顺着用户的话直接回应，不复述问题，不用“首先、其次、综上所述、建议您”等书面套话；
 - 默认用自然、轻松的中文口语回答 1 至 4 个短句，一句话只表达一个重点，可以适度使用“嗯、可以、对、这样就行”等自然衔接，但不要刻意卖萌；
 - 不使用 Markdown 标题、项目符号或表格，不朗读链接、文件路径、代码和冗长参数；
@@ -2580,6 +2595,22 @@ class DailyVoiceAssistant:
             self.write_state()
 
     def run_local_device_command(self, transcript: str) -> str | None:
+        if is_workshop_create_intent(transcript):
+            result = create_workshop_app(transcript, source="voice")
+            if not result.get("ok"):
+                return workshop_error_message(result)
+            proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+            send_expression_command("workshop_view", active=True)
+            self.last_local_command = {
+                "action": "create_workshop_app",
+                "proposal_id": proposal.get("id"),
+                "transcript": transcript,
+                "executed_at": time.time(),
+            }
+            self.last_result = "local_command:create_workshop_app"
+            self.write_state()
+            log(f"Workshop proposal queued id={proposal.get('id')}")
+            return "好的，工坊开始生成受控应用方案了。完成后会在圆屏显示完整权限，只有你批准才会安装。"
         if is_background_task_request(transcript):
             task = enqueue_background_task(transcript)
             if task is not None:
@@ -2598,6 +2629,21 @@ class DailyVoiceAssistant:
                 )
         command = parse_local_device_command(transcript)
         if command is None:
+            app_name = workshop_launch_name(transcript)
+            if app_name:
+                try:
+                    result = launch_workshop_app_by_name(app_name)
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    log(f"Workshop app launch lookup warning: {exc}")
+                else:
+                    if result.get("ok"):
+                        app = result.get("app") if isinstance(result.get("app"), dict) else {}
+                        send_expression_command(
+                            "workshop_app_view",
+                            active=True,
+                            app_id=str(app.get("id") or ""),
+                        )
+                        return f"好的，{app.get('name') or app_name}已经打开。"
             return None
 
         action = str(command["action"])
@@ -2710,6 +2756,20 @@ class DailyVoiceAssistant:
                 raise RuntimeError("拍照失败")
             self.set_visual_mode(True)
             response = "拍好了，照片已经保存到相册。"
+        elif action == "open_workshop":
+            if not send_expression_command("workshop_view", active=True):
+                raise RuntimeError("工坊界面启动失败")
+            response = "好的，工坊已经打开。"
+        elif action == "close_workshop":
+            if not send_expression_command("workshop_view", active=False):
+                raise RuntimeError("工坊界面关闭失败")
+            response = "好的，工坊已经收起来了。"
+        elif action == "stop_workshop_app":
+            result = stop_workshop_app()
+            if not result.get("ok"):
+                raise RuntimeError(workshop_error_message(result))
+            send_expression_command("workshop_app_view", active=False)
+            response = "好的，当前自定义应用已经退出。"
         elif action == "open_pomodoro":
             if not send_expression_command("pomodoro_view", active=True):
                 raise RuntimeError("番茄钟界面启动失败")
@@ -3039,6 +3099,7 @@ class DailyVoiceAssistant:
             self.raise_if_interrupted()
             self.last_result = "speaking"
             self.write_state()
+
             if response_streamed:
                 log("Streaming TTS playback completed")
             else:
@@ -3071,6 +3132,84 @@ class DailyVoiceAssistant:
                 else self.last_result
             )
             self.finish_latency(latency_status)
+            if self.last_result != "error" and not self.has_pending_wake():
+                expression("idle", stage=self.last_result)
+            self.write_state()
+
+    def interact_workshop_prompt(self) -> None:
+        """Collect one spoken app requirement and submit it to the trusted gate."""
+
+        now = time.monotonic()
+        if self.busy or now - self.last_trigger_monotonic < 1.0:
+            return
+        EXPRESSION_EVENTS.begin_interaction("workshop_requirement")
+        self.interrupt_event = threading.Event()
+        self.busy = True
+        self.microphone.set_learning(False)
+        self.last_error = None
+        self.last_result = "workshop_invitation"
+        self.last_trigger_monotonic = now
+        self.last_trigger_at = time.time()
+        self.last_wake = {"source": "workshop"}
+        self.write_state()
+        wav_path: Path | None = None
+        try:
+            self.apply_response_expression("happy", "workshop_invitation")
+            self.speak("可以，告诉我你想做一个什么应用？")
+            self.raise_if_interrupted()
+            self.last_result = "workshop_recording"
+            self.write_state()
+            wav_path = self.record_until_silence(
+                follow_up=True,
+                no_speech_timeout=FOLLOW_UP_NO_SPEECH_SECONDS,
+            )
+            if wav_path is None:
+                response = "这次没有听到需求。你准备好后再打开工坊就行。"
+            else:
+                self.last_result = "workshop_transcribing"
+                self.write_state()
+                requirement = self.transcribe_interruptibly(wav_path).strip()
+                self.raise_if_interrupted()
+                if not requirement:
+                    response = "我没有识别清楚。你可以稍后再试一次。"
+                else:
+                    result = create_workshop_app(requirement, source="screen_voice")
+                    if result.get("ok"):
+                        proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+                        self.last_local_command = {
+                            "action": "create_workshop_app",
+                            "proposal_id": proposal.get("id"),
+                            "transcript": requirement,
+                            "executed_at": time.time(),
+                        }
+                        response = "收到。工坊正在生成受控方案，稍后请在圆屏审核它申请的全部权限。"
+                        send_expression_command("workshop_view", active=True)
+                    else:
+                        response = workshop_error_message(result)
+            self.apply_response_expression("happy", "workshop_submitted")
+            self.last_result = "speaking"
+            self.write_state()
+            self.speak(response)
+            self.last_result = "completed"
+        except InteractionInterrupted:
+            self.last_error = None
+            self.last_result = "interrupted_by_wake"
+            self.publish_speech_bubble(False)
+            log("Workshop requirement interaction interrupted")
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.last_result = "error"
+            expression("error", 8, stage=self.last_result)
+            log(f"Workshop requirement interaction error: {exc}")
+        finally:
+            if wav_path is not None:
+                try:
+                    wav_path.unlink()
+                except FileNotFoundError:
+                    pass
+            self.busy = False
+            self.microphone.set_learning(True)
+            self.publish_speech_bubble(False)
             if self.last_result != "error" and not self.has_pending_wake():
                 expression("idle", stage=self.last_result)
             self.write_state()
@@ -3166,6 +3305,8 @@ def main() -> int:
                             str(request.get("text", "")),
                             source=str(request.get("source", "screen_menu")),
                         )
+                    elif request.get("command") == "workshop_create":
+                        assistant.interact_workshop_prompt()
                 except Exception as exc:
                     log(f"invalid voice control command: {exc}")
             assistant.check_hardware()

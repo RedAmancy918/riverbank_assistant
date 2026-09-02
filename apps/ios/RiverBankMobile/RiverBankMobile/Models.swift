@@ -126,3 +126,79 @@ struct StatusEnvelope: Codable {
         case startedAt = "started_at"
     }
 }
+
+struct ChatConversation: Codable, Identifiable, Hashable {
+    let id: String
+    let title: String
+    let source: String
+    let deviceName: String
+    let preview: String?
+    let messageCount: Int?
+    let createdAt: Double
+    let updatedAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, source, preview
+        case deviceName = "device_name"
+        case messageCount = "message_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct ChatMessage: Codable, Identifiable, Hashable {
+    let id: String
+    let conversationId: String
+    let role: String
+    let content: String
+    let state: String
+    let error: String
+    let cancelRequested: Bool
+    let createdAt: Double
+    let updatedAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, role, content, state, error
+        case conversationId = "conversation_id"
+        case cancelRequested = "cancel_requested"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    var isAssistant: Bool { role == "assistant" }
+    var isActive: Bool { ["queued", "running"].contains(state) }
+}
+
+struct ChatConversationListEnvelope: Codable {
+    let count: Int
+    let conversations: [ChatConversation]
+}
+
+struct ChatConversationEnvelope: Codable {
+    let conversation: ChatConversation
+}
+
+struct ChatMessagesEnvelope: Codable {
+    let conversation: ChatConversation
+    let count: Int
+    let messages: [ChatMessage]
+}
+
+struct ChatTurnEnvelope: Codable {
+    let userMessage: ChatMessage
+    let assistantMessage: ChatMessage
+
+    enum CodingKeys: String, CodingKey {
+        case userMessage = "user_message"
+        case assistantMessage = "assistant_message"
+    }
+}
+
+struct ChatMessageEnvelope: Codable {
+    let message: ChatMessage
+}
+
+struct DeleteChatEnvelope: Codable {
+    let ok: Bool
+    let deleted: String
+}
