@@ -12,6 +12,8 @@ User=geo
 Group=geo
 WorkingDirectory=/home/geo/video-call
 Environment="HOME=/home/geo"
+Environment="HERMES_HOME=/home/geo/.hermes/profiles/daily"
+EnvironmentFile=-/home/geo/.hermes/.env
 Environment="PYTHONUNBUFFERED=1"
 Environment="http_proxy=http://127.0.0.1:15732"
 Environment="https_proxy=http://127.0.0.1:15732"

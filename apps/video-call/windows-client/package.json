@@ -1,6 +1,6 @@
 {
   "name": "riverbank-call",
-  "version": "0.24.5-beta.1",
+  "version": "0.25.1-beta.1",
   "description": "RiverBank Chat, WebRTC call and task report client",
   "author": "RiverBank CO., LTD",
   "main": "main.js",

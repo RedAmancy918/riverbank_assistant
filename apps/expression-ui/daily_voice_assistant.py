@@ -404,6 +404,19 @@ def vision_activity(
         pass
 
 
+def audio_activity(
+    active: bool,
+    source: str = "voice_recording",
+    ttl_seconds: float = 60.0,
+) -> None:
+    send_expression_command(
+        "audio_activity",
+        active=bool(active),
+        source=source,
+        ttl_seconds=ttl_seconds,
+    )
+
+
 def send_expression_command(command: str, **payload: object) -> bool:
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
@@ -570,7 +583,7 @@ def parse_local_device_command(text: str) -> dict | None:
         return {"action": "capture_photo"}
     if re.search(r"(?:打开|开启|启动|进入)(?:一下)?(?:相机|摄像头)", compact):
         return {"action": "open_camera"}
-    if re.search(r"(?:打开|开启|进入)(?:一下)?工坊", compact):
+    if re.fullmatch(r"(?:(?:打开|开启|启动|进入|唤醒)(?:一下)?)?工坊", compact):
         return {"action": "open_workshop"}
     if re.search(r"(?:关闭|退出|收起)(?:一下)?工坊", compact):
         return {"action": "close_workshop"}
@@ -620,11 +633,27 @@ def is_background_task_request(text: str) -> bool:
     return explicit_background or (action and artifact)
 
 
+def background_task_output_format(text: str) -> str:
+    compact = re.sub(r"\s+", "", text).lower()
+    if any(
+        phrase in compact
+        for phrase in ("图文并茂", "图文报告", "带配图", "配上图片", "配一张图")
+    ):
+        return "illustrated"
+    if any(
+        phrase in compact
+        for phrase in ("生成图片", "生成一张图", "生成图像", "画一张", "插画", "海报")
+    ):
+        return "image"
+    return "text"
+
+
 def enqueue_background_task(transcript: str, source: str = "voice") -> dict | None:
     payload = json.dumps(
         {
             "prompt": transcript,
             "kind": "research",
+            "output_format": background_task_output_format(transcript),
             "source": source,
             "device_name": "riverbank-tech",
         },
@@ -1736,6 +1765,7 @@ class DailyVoiceAssistant:
         self.interrupt_event = threading.Event()
         self.barge_in_lock = threading.Lock()
         self.pending_wake: dict | None = None
+        self.pending_workshop_requirement = False
         self.active_speech_session: StreamingSpeechSession | None = None
         self.active_player: subprocess.Popen | None = None
         self.active_async_loop: asyncio.AbstractEventLoop | None = None
@@ -1897,6 +1927,11 @@ class DailyVoiceAssistant:
             self.pending_wake = None
             return wake
 
+    def pop_pending_workshop_requirement(self) -> bool:
+        pending = self.pending_workshop_requirement
+        self.pending_workshop_requirement = False
+        return pending
+
     def set_active_speech_session(
         self,
         session: StreamingSpeechSession | None,
@@ -1919,6 +1954,10 @@ class DailyVoiceAssistant:
             if token:
                 self.last_token = token
             self.pending_wake = wake
+            # A new wake word always replaces the previous interaction.  Do
+            # not begin Workshop's deferred follow-up after the replacement
+            # turn has arrived.
+            self.pending_workshop_requirement = False
             self.interrupt_event.set()
             speech_session = self.active_speech_session
             player = self.active_player
@@ -2759,7 +2798,12 @@ class DailyVoiceAssistant:
         elif action == "open_workshop":
             if not send_expression_command("workshop_view", active=True):
                 raise RuntimeError("工坊界面启动失败")
-            response = "好的，工坊已经打开。"
+            # Opening Workshop by voice is an entry into the creation flow, not
+            # just navigation.  Defer the second recording until the current
+            # acknowledgement has finished playing so it cannot record its own
+            # TTS or be rejected by the interaction debounce.
+            self.pending_workshop_requirement = True
+            response = "好的，工坊已经打开。告诉我你想做一个什么应用？"
         elif action == "close_workshop":
             if not send_expression_command("workshop_view", active=False):
                 raise RuntimeError("工坊界面关闭失败")
@@ -3136,11 +3180,18 @@ class DailyVoiceAssistant:
                 expression("idle", stage=self.last_result)
             self.write_state()
 
-    def interact_workshop_prompt(self) -> None:
+    def interact_workshop_prompt(
+        self,
+        *,
+        prompt_user: bool = True,
+        bypass_debounce: bool = False,
+    ) -> None:
         """Collect one spoken app requirement and submit it to the trusted gate."""
 
         now = time.monotonic()
-        if self.busy or now - self.last_trigger_monotonic < 1.0:
+        if self.busy or (
+            not bypass_debounce and now - self.last_trigger_monotonic < 1.0
+        ):
             return
         EXPRESSION_EVENTS.begin_interaction("workshop_requirement")
         self.interrupt_event = threading.Event()
@@ -3155,14 +3206,17 @@ class DailyVoiceAssistant:
         wav_path: Path | None = None
         try:
             self.apply_response_expression("happy", "workshop_invitation")
-            self.speak("可以，告诉我你想做一个什么应用？")
+            if prompt_user:
+                self.speak("可以，告诉我你想做一个什么应用？")
             self.raise_if_interrupted()
             self.last_result = "workshop_recording"
             self.write_state()
+            audio_activity(True, source="workshop_requirement", ttl_seconds=60.0)
             wav_path = self.record_until_silence(
                 follow_up=True,
                 no_speech_timeout=FOLLOW_UP_NO_SPEECH_SECONDS,
             )
+            audio_activity(False, source="workshop_requirement")
             if wav_path is None:
                 response = "这次没有听到需求。你准备好后再打开工坊就行。"
             else:
@@ -3209,6 +3263,7 @@ class DailyVoiceAssistant:
                     pass
             self.busy = False
             self.microphone.set_learning(True)
+            audio_activity(False, source="workshop_requirement")
             self.publish_speech_bubble(False)
             if self.last_result != "error" and not self.has_pending_wake():
                 expression("idle", stage=self.last_result)
@@ -3270,6 +3325,11 @@ def main() -> int:
                     pending_wake,
                     bypass_debounce=True,
                 )
+                if assistant.pop_pending_workshop_requirement():
+                    assistant.interact_workshop_prompt(
+                        prompt_user=False,
+                        bypass_debounce=True,
+                    )
                 continue
             ready, _, _ = select.select([control], [], [], 0.15)
             if ready:
@@ -3309,6 +3369,11 @@ def main() -> int:
                         assistant.interact_workshop_prompt()
                 except Exception as exc:
                     log(f"invalid voice control command: {exc}")
+            if assistant.pop_pending_workshop_requirement():
+                assistant.interact_workshop_prompt(
+                    prompt_user=False,
+                    bypass_debounce=True,
+                )
             assistant.check_hardware()
     finally:
         expression("idle", stage="service_stopping")

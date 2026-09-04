@@ -57,6 +57,7 @@ class ChatStore:
                 """
                 CREATE TABLE IF NOT EXISTS chat_conversations (
                     id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL,
                     source TEXT NOT NULL DEFAULT '',
                     device_name TEXT NOT NULL DEFAULT '',
@@ -96,8 +97,6 @@ class ChatStore:
                         REFERENCES chat_messages(id) ON DELETE CASCADE
                 );
 
-                CREATE INDEX IF NOT EXISTS chat_conversations_updated
-                    ON chat_conversations(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS chat_messages_conversation_created
                     ON chat_messages(conversation_id, created_at ASC);
                 CREATE INDEX IF NOT EXISTS chat_messages_state_created
@@ -108,11 +107,31 @@ class ChatStore:
                     ON chat_attachments(conversation_id, created_at ASC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(chat_conversations)"
+                ).fetchall()
+            }
+            if "owner_user_id" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE chat_conversations
+                    ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS chat_conversations_owner_updated
+                ON chat_conversations(owner_user_id, updated_at DESC)
+                """
+            )
 
     @staticmethod
     def _conversation(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "owner_user_id": row["owner_user_id"],
             "title": row["title"],
             "source": row["source"],
             "device_name": row["device_name"],
@@ -227,6 +246,7 @@ class ChatStore:
     def create_conversation(
         self,
         *,
+        owner_user_id: Any = "",
         title: Any = "",
         source: Any = "api",
         device_name: Any = "",
@@ -234,17 +254,24 @@ class ChatStore:
         conversation_id = uuid.uuid4().hex
         timestamp = now_epoch()
         clean_title = clean_text(title, maximum=120, field="conversation title")
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            field="owner user id",
+        )
         clean_source = clean_text(source, maximum=40, field="source") or "api"
         clean_device = clean_text(device_name, maximum=120, field="device name")
         with self.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO chat_conversations (
-                    id, title, source, device_name, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    id, owner_user_id, title, source, device_name,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
+                    clean_owner,
                     clean_title or "新对话",
                     clean_source,
                     clean_device,
@@ -259,7 +286,12 @@ class ChatStore:
         assert row is not None
         return self._conversation(row)
 
-    def get_conversation(self, conversation_id: Any) -> dict[str, Any] | None:
+    def get_conversation(
+        self,
+        conversation_id: Any,
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         clean_id = clean_text(
             conversation_id,
             maximum=64,
@@ -267,10 +299,19 @@ class ChatStore:
             field="conversation id",
         )
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM chat_conversations WHERE id = ?",
-                (clean_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM chat_conversations WHERE id = ?",
+                    (clean_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT * FROM chat_conversations
+                    WHERE id = ? AND owner_user_id = ?
+                    """,
+                    (clean_id, str(owner_user_id)),
+                ).fetchone()
         return self._conversation(row) if row is not None else None
 
     def list_conversations(
@@ -278,9 +319,17 @@ class ChatStore:
         *,
         limit: int = 100,
         include_internal: bool = False,
+        owner_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 200))
-        internal_filter = "" if include_internal else "WHERE c.source != 'paper-radar-internal'"
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        if not include_internal:
+            conditions.append("c.source != 'paper-radar-internal'")
+        if owner_user_id is not None:
+            conditions.append("c.owner_user_id = ?")
+            parameters.append(str(owner_user_id))
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
@@ -291,11 +340,11 @@ class ChatStore:
                     (SELECT COUNT(*) FROM chat_messages m
                      WHERE m.conversation_id = c.id) AS message_count
                 FROM chat_conversations c
-                {internal_filter}
+                {where}
                 ORDER BY c.updated_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (*parameters, limit),
             ).fetchall()
         records = []
         for row in rows:
@@ -305,7 +354,12 @@ class ChatStore:
             records.append(record)
         return records
 
-    def delete_conversation(self, conversation_id: Any) -> bool:
+    def delete_conversation(
+        self,
+        conversation_id: Any,
+        *,
+        owner_user_id: str | None = None,
+    ) -> bool:
         clean_id = clean_text(
             conversation_id,
             maximum=64,
@@ -313,10 +367,19 @@ class ChatStore:
             field="conversation id",
         )
         with self.connect() as connection:
-            result = connection.execute(
-                "DELETE FROM chat_conversations WHERE id = ?",
-                (clean_id,),
-            )
+            if owner_user_id is None:
+                result = connection.execute(
+                    "DELETE FROM chat_conversations WHERE id = ?",
+                    (clean_id,),
+                )
+            else:
+                result = connection.execute(
+                    """
+                    DELETE FROM chat_conversations
+                    WHERE id = ? AND owner_user_id = ?
+                    """,
+                    (clean_id, str(owner_user_id)),
+                )
         return result.rowcount > 0
 
     def list_messages(
@@ -324,6 +387,7 @@ class ChatStore:
         conversation_id: Any,
         *,
         include_private_attachments: bool = False,
+        owner_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         clean_id = clean_text(
             conversation_id,
@@ -332,14 +396,25 @@ class ChatStore:
             field="conversation id",
         )
         with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM chat_messages
-                WHERE conversation_id = ?
-                ORDER BY created_at ASC, rowid ASC
-                """,
-                (clean_id,),
-            ).fetchall()
+            if owner_user_id is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM chat_messages
+                    WHERE conversation_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (clean_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT m.* FROM chat_messages m
+                    JOIN chat_conversations c ON c.id = m.conversation_id
+                    WHERE m.conversation_id = ? AND c.owner_user_id = ?
+                    ORDER BY m.created_at ASC, m.rowid ASC
+                    """,
+                    (clean_id, str(owner_user_id)),
+                ).fetchall()
             return self._messages_with_attachments(
                 connection,
                 list(rows),
@@ -352,6 +427,7 @@ class ChatStore:
         *,
         content: Any,
         attachments: list[dict[str, Any]] | None = None,
+        owner_user_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         clean_id = clean_text(
             conversation_id,
@@ -374,10 +450,19 @@ class ChatStore:
         user_id = uuid.uuid4().hex
         assistant_id = uuid.uuid4().hex
         with self.connect() as connection:
-            conversation = connection.execute(
-                "SELECT * FROM chat_conversations WHERE id = ?",
-                (clean_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                conversation = connection.execute(
+                    "SELECT * FROM chat_conversations WHERE id = ?",
+                    (clean_id,),
+                ).fetchone()
+            else:
+                conversation = connection.execute(
+                    """
+                    SELECT * FROM chat_conversations
+                    WHERE id = ? AND owner_user_id = ?
+                    """,
+                    (clean_id, str(owner_user_id)),
+                ).fetchone()
             if conversation is None:
                 raise KeyError("conversation not found")
             active = connection.execute(
@@ -515,6 +600,7 @@ class ChatStore:
         attachment_id: Any,
         *,
         include_private: bool = False,
+        owner_user_id: str | None = None,
     ) -> dict[str, Any] | None:
         clean_conversation_id = clean_text(
             conversation_id,
@@ -529,18 +615,128 @@ class ChatStore:
             field="attachment id",
         )
         with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM chat_attachments
-                WHERE id = ? AND conversation_id = ?
-                """,
-                (clean_attachment_id, clean_conversation_id),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM chat_attachments
+                    WHERE id = ? AND conversation_id = ?
+                    """,
+                    (clean_attachment_id, clean_conversation_id),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT a.* FROM chat_attachments a
+                    JOIN chat_conversations c ON c.id = a.conversation_id
+                    WHERE a.id = ? AND a.conversation_id = ?
+                          AND c.owner_user_id = ?
+                    """,
+                    (
+                        clean_attachment_id,
+                        clean_conversation_id,
+                        str(owner_user_id),
+                    ),
+                ).fetchone()
         return (
             self._attachment(row, include_private=include_private)
             if row is not None
             else None
         )
+
+    def add_attachment_to_message(
+        self,
+        message_id: Any,
+        attachment: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach a worker-produced file to an existing assistant message."""
+        clean_message_id = clean_text(
+            message_id,
+            maximum=64,
+            minimum=8,
+            field="message id",
+        )
+        attachment_id = clean_text(
+            attachment.get("id"),
+            maximum=64,
+            minimum=8,
+            field="attachment id",
+        )
+        kind = clean_text(
+            attachment.get("kind"),
+            maximum=20,
+            minimum=1,
+            field="attachment kind",
+        )
+        if kind not in VALID_ATTACHMENT_KINDS:
+            raise ValueError("invalid attachment kind")
+        original_name = clean_text(
+            attachment.get("original_name"),
+            maximum=180,
+            minimum=1,
+            field="attachment filename",
+        )
+        media_type = clean_text(
+            attachment.get("media_type"),
+            maximum=100,
+            minimum=1,
+            field="attachment media type",
+        )
+        sha256 = clean_text(
+            attachment.get("sha256"),
+            maximum=64,
+            minimum=64,
+            field="attachment hash",
+        )
+        storage_path = clean_text(
+            attachment.get("storage_path"),
+            maximum=1_000,
+            minimum=1,
+            field="attachment storage path",
+        )
+        extracted_text = clean_text(
+            attachment.get("extracted_text", ""),
+            maximum=80_000,
+            field="attachment text",
+        )
+        size_bytes = int(attachment.get("size_bytes", 0))
+        if size_bytes <= 0:
+            raise ValueError("invalid attachment size")
+        timestamp = now_epoch()
+        with self.connect() as connection:
+            message = connection.execute(
+                "SELECT * FROM chat_messages WHERE id = ? AND role = 'assistant'",
+                (clean_message_id,),
+            ).fetchone()
+            if message is None:
+                raise KeyError("assistant message not found")
+            connection.execute(
+                """
+                INSERT INTO chat_attachments (
+                    id, conversation_id, message_id, original_name,
+                    media_type, kind, size_bytes, sha256, storage_path,
+                    extracted_text, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_id,
+                    message["conversation_id"],
+                    clean_message_id,
+                    original_name,
+                    media_type,
+                    kind,
+                    size_bytes,
+                    sha256,
+                    storage_path,
+                    extracted_text,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM chat_attachments WHERE id = ?",
+                (attachment_id,),
+            ).fetchone()
+        assert row is not None
+        return self._attachment(row)
 
     def claim_next(self) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -648,13 +844,29 @@ class ChatStore:
                     (timestamp, conversation["conversation_id"]),
                 )
 
-    def request_cancel(self, message_id: Any) -> dict[str, Any] | None:
+    def request_cancel(
+        self,
+        message_id: Any,
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         clean_id = clean_text(message_id, maximum=64, minimum=8, field="message id")
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM chat_messages WHERE id = ? AND role = 'assistant'",
-                (clean_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM chat_messages WHERE id = ? AND role = 'assistant'",
+                    (clean_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT m.* FROM chat_messages m
+                    JOIN chat_conversations c ON c.id = m.conversation_id
+                    WHERE m.id = ? AND m.role = 'assistant'
+                          AND c.owner_user_id = ?
+                    """,
+                    (clean_id, str(owner_user_id)),
+                ).fetchone()
             if row is None:
                 return None
             if row["state"] in {"queued", "running"}:
@@ -679,6 +891,115 @@ class ChatStore:
                 (clean_id,),
             ).fetchone()
         return bool(row and row["cancel_requested"])
+
+    def claim_unowned_conversations(self, owner_user_id: Any) -> int:
+        """Assign pre-account user chats to the first administrator.
+
+        Daily paper Q&A conversations remain device-owned and are not exposed in
+        the regular chat list.
+        """
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            minimum=8,
+            field="owner user id",
+        )
+        with self.connect() as connection:
+            result = connection.execute(
+                """
+                UPDATE chat_conversations SET owner_user_id = ?
+                WHERE owner_user_id = '' AND source != 'paper-radar-internal'
+                """,
+                (clean_owner,),
+            )
+        return result.rowcount
+
+    def owner_usage(self, owner_user_id: Any) -> dict[str, int]:
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            minimum=8,
+            field="owner user id",
+        )
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM chat_conversations
+                     WHERE owner_user_id = ?) AS conversations,
+                    (SELECT COUNT(*) FROM chat_messages m
+                     JOIN chat_conversations c ON c.id = m.conversation_id
+                     WHERE c.owner_user_id = ?) AS messages,
+                    (SELECT COUNT(*) FROM chat_attachments a
+                     JOIN chat_conversations c ON c.id = a.conversation_id
+                     WHERE c.owner_user_id = ?) AS attachments,
+                    (SELECT COALESCE(SUM(a.size_bytes), 0) FROM chat_attachments a
+                     JOIN chat_conversations c ON c.id = a.conversation_id
+                     WHERE c.owner_user_id = ?) AS attachment_bytes,
+                    (SELECT COUNT(*) FROM chat_messages m
+                     JOIN chat_conversations c ON c.id = m.conversation_id
+                     WHERE c.owner_user_id = ? AND m.role = 'assistant'
+                           AND m.state IN ('queued', 'running')) AS active_messages
+                """,
+                (clean_owner, clean_owner, clean_owner, clean_owner, clean_owner),
+            ).fetchone()
+        assert row is not None
+        return {
+            "conversations": int(row["conversations"] or 0),
+            "messages": int(row["messages"] or 0),
+            "attachments": int(row["attachments"] or 0),
+            "attachment_bytes": int(row["attachment_bytes"] or 0),
+            "active_messages": int(row["active_messages"] or 0),
+        }
+
+    def delete_owner_cache(self, owner_user_id: Any) -> dict[str, Any]:
+        """Delete one user's chat history and return files for safe removal."""
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            minimum=8,
+            field="owner user id",
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM chat_messages m
+                    JOIN chat_conversations c ON c.id = m.conversation_id
+                    WHERE c.owner_user_id = ? AND m.role = 'assistant'
+                          AND m.state IN ('queued', 'running')
+                    """,
+                    (clean_owner,),
+                ).fetchone()[0]
+            )
+            if active:
+                connection.rollback()
+                raise RuntimeError(
+                    "user has an active chat response; stop it before cleanup"
+                )
+            attachment_rows = connection.execute(
+                """
+                SELECT a.* FROM chat_attachments a
+                JOIN chat_conversations c ON c.id = a.conversation_id
+                WHERE c.owner_user_id = ?
+                """,
+                (clean_owner,),
+            ).fetchall()
+            attachments = [
+                self._attachment(row, include_private=True)
+                for row in attachment_rows
+            ]
+            result = connection.execute(
+                "DELETE FROM chat_conversations WHERE owner_user_id = ?",
+                (clean_owner,),
+            )
+            connection.commit()
+        return {
+            "deleted_conversations": int(result.rowcount),
+            "deleted_attachments": len(attachments),
+            "attachment_records": attachments,
+        }
 
     def recover_interrupted(self) -> int:
         with self.connect() as connection:

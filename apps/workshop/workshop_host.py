@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import array
 import json
+import math
 import os
 import re
+import select
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -38,6 +42,145 @@ def send_expression(payload: dict[str, Any]) -> None:
             client.close()
     except OSError:
         pass
+
+
+class PipeWireMicrophoneCapture:
+    """Read one shared PipeWire source without opening ALSA or persisting PCM."""
+
+    def __init__(
+        self,
+        source: str,
+        sample_rate: int,
+        *,
+        command: Path = Path("/usr/bin/pw-cat"),
+    ) -> None:
+        self.source = str(source).strip()
+        self.sample_rate = int(sample_rate)
+        self.command = Path(command)
+        self.process: subprocess.Popen[bytes] | None = None
+        self.buffer = bytearray()
+        self.lock = threading.RLock()
+
+    def start(self) -> None:
+        with self.lock:
+            if self.process is not None and self.process.poll() is None:
+                return
+            if not self.command.is_file():
+                raise RuntimeError("PipeWire 录音工具未安装")
+            command = [str(self.command), "--record"]
+            if self.source:
+                command.extend(("--target", self.source))
+            command.extend(
+                (
+                    "--format",
+                    "s16",
+                    "--rate",
+                    str(self.sample_rate),
+                    "--channels",
+                    "1",
+                    "--channel-map",
+                    "mono",
+                    "--latency",
+                    "20ms",
+                    "--media-role",
+                    "Communication",
+                    "-",
+                )
+            )
+            self.buffer.clear()
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                start_new_session=True,
+            )
+            if self.process.stdout is None:
+                self.close()
+                raise RuntimeError("PipeWire 麦克风输出不可用")
+            os.set_blocking(self.process.stdout.fileno(), False)
+
+    def read_level(self, frame_milliseconds: int) -> dict[str, Any]:
+        frame_milliseconds = max(20, min(int(frame_milliseconds), 500))
+        expected = max(
+            2,
+            round(self.sample_rate * frame_milliseconds / 1000.0) * 2,
+        )
+        deadline = time.monotonic() + max(1.0, frame_milliseconds / 1000.0 * 4.0)
+        with self.lock:
+            process = self.process
+            if process is None or process.stdout is None:
+                raise RuntimeError("PipeWire 麦克风尚未启动")
+            file_descriptor = process.stdout.fileno()
+            while len(self.buffer) < expected:
+                if process.poll() is not None:
+                    raise RuntimeError("PipeWire 麦克风流意外结束")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("PipeWire 麦克风读取超时")
+                readable, _, _ = select.select(
+                    [file_descriptor], [], [], min(remaining, 0.25)
+                )
+                if not readable:
+                    continue
+                payload = os.read(file_descriptor, max(4096, expected - len(self.buffer)))
+                if not payload:
+                    raise RuntimeError("PipeWire 麦克风流已经关闭")
+                self.buffer.extend(payload)
+            payload = bytes(self.buffer[:expected])
+            del self.buffer[:expected]
+
+        return self._level_metrics(payload, self.sample_rate, frame_milliseconds)
+
+    @staticmethod
+    def _level_metrics(
+        payload: bytes,
+        sample_rate: int,
+        frame_milliseconds: int,
+    ) -> dict[str, Any]:
+        samples = array.array("h")
+        samples.frombytes(payload)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if not samples:
+            return {
+                "rms": 0.0,
+                "peak": 0.0,
+                "dbfs": -96.0,
+                "sampleRate": sample_rate,
+                "frameMilliseconds": frame_milliseconds,
+                "samplesAnalyzed": 0,
+            }
+        square_sum = sum(float(sample) * float(sample) for sample in samples)
+        rms = math.sqrt(square_sum / len(samples))
+        peak = max(abs(int(sample)) for sample in samples)
+        dbfs = max(-96.0, 20.0 * math.log10(max(rms, 1.0) / 32768.0))
+        return {
+            "rms": round(rms / 32768.0, 6),
+            "peak": round(min(1.0, peak / 32768.0), 6),
+            "dbfs": round(dbfs, 2),
+            "sampleRate": sample_rate,
+            "frameMilliseconds": frame_milliseconds,
+            "samplesAnalyzed": len(samples),
+        }
+
+    def close(self) -> None:
+        with self.lock:
+            process = self.process
+            self.process = None
+            self.buffer.clear()
+        if process is None:
+            return
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
 
 
 class HailoResourceCoordinator:
@@ -317,6 +460,7 @@ class WorkshopHostBroker:
         reports_dir: Path | None = None,
         ui_callback: Callable[[str, dict[str, Any]], None] | None = None,
         notification_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        microphone_factory: Callable[[str, int], Any] | None = None,
     ) -> None:
         self.manager = manager
         self.store = store
@@ -345,6 +489,12 @@ class WorkshopHostBroker:
         )
         self.ui_callback = ui_callback
         self.notification_callback = notification_callback
+        self.microphone_source = os.environ.get("RIVERBANK_AUDIO_SOURCE", "").strip()
+        self.microphone_factory = microphone_factory or (
+            lambda source, sample_rate: PipeWireMicrophoneCapture(source, sample_rate)
+        )
+        self.microphone_lock = threading.RLock()
+        self.microphone_leases: dict[str, dict[str, Any]] = {}
         self.detector = HailoObjectDetector()
         self.hailo_coordinator = HailoResourceCoordinator()
         self.hailo_reservation_id: str | None = None
@@ -353,6 +503,82 @@ class WorkshopHostBroker:
         self.event_subscriptions: dict[str, set[str]] = {}
         self.notification_times: dict[tuple[str, str], float] = {}
         self.stream_leases: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _microphone_indicator(app_id: str, active: bool, ttl_seconds: float = 2.0) -> None:
+        send_expression(
+            {
+                "command": "audio_activity",
+                "active": bool(active),
+                "source": f"workshop:{app_id}",
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+
+    def _close_microphone_lease(
+        self,
+        lease_id: str,
+        *,
+        expected_app_id: str | None = None,
+        expired: bool = False,
+    ) -> bool:
+        with self.microphone_lock:
+            lease = self.microphone_leases.get(lease_id)
+            if lease is None:
+                return False
+            app_id = str(lease.get("appId") or "")
+            if expected_app_id is not None and app_id != expected_app_id:
+                return False
+            self.microphone_leases.pop(lease_id, None)
+            timer = lease.get("timer")
+            capture = lease.get("capture")
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        if capture is not None:
+            capture.close()
+        self._microphone_indicator(app_id, False)
+        if expired:
+            self.store.audit(
+                "microphone.lease_expired",
+                app_id=app_id,
+                lease_id=lease_id,
+            )
+        return True
+
+    def _expire_microphone_lease(self, lease_id: str) -> None:
+        self._close_microphone_lease(lease_id, expired=True)
+
+    def stop_microphone(self, app_id: str) -> None:
+        with self.microphone_lock:
+            lease_ids = [
+                lease_id
+                for lease_id, lease in self.microphone_leases.items()
+                if lease.get("appId") == app_id
+            ]
+        for lease_id in lease_ids:
+            self._close_microphone_lease(lease_id, expected_app_id=app_id)
+
+    def close(self) -> None:
+        with self.microphone_lock:
+            lease_ids = list(self.microphone_leases)
+        for lease_id in lease_ids:
+            self._close_microphone_lease(lease_id)
+
+    def microphone_status(self) -> dict[str, Any]:
+        runtime_dir = Path(
+            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        )
+        pipewire_socket = runtime_dir / "pipewire-0"
+        with self.microphone_lock:
+            active_leases = len(self.microphone_leases)
+        return {
+            "ready": Path("/usr/bin/pw-cat").is_file() and pipewire_socket.exists(),
+            "transport": "pipewire-shared",
+            "source": self.microphone_source or "default-input",
+            "pipewireSocket": str(pipewire_socket),
+            "activeLeases": active_leases,
+            "rawAudioPersisted": False,
+        }
 
     def _task_api(
         self,
@@ -575,6 +801,78 @@ class WorkshopHostBroker:
                 {"command": "vision_activity", "active": False, "source": f"workshop:{app_id}"}
             )
             return {"closed": True}
+        if method == "microphone.stream.open":
+            ttl = float(params["leaseSeconds"])
+            sample_rate = int(params["sampleRate"])
+            frame_milliseconds = int(params["frameMilliseconds"])
+            with self.microphone_lock:
+                if self.microphone_leases:
+                    raise RuntimeError("另一个工坊麦克风会话仍在运行")
+            capture = self.microphone_factory(self.microphone_source, sample_rate)
+            try:
+                capture.start()
+            except Exception:
+                capture.close()
+                raise
+            lease_id = uuid.uuid4().hex
+            timer = threading.Timer(ttl, self._expire_microphone_lease, (lease_id,))
+            timer.daemon = True
+            with self.microphone_lock:
+                self.microphone_leases[lease_id] = {
+                    "appId": app_id,
+                    "capture": capture,
+                    "expires": time.monotonic() + ttl,
+                    "frameMilliseconds": frame_milliseconds,
+                    "sampleRate": sample_rate,
+                    "sequence": 0,
+                    "timer": timer,
+                }
+            timer.start()
+            self._microphone_indicator(app_id, True, min(ttl, 2.0))
+            return {
+                "leaseId": lease_id,
+                "ttlSeconds": ttl,
+                "sampleRate": sample_rate,
+                "frameMilliseconds": frame_milliseconds,
+                "format": "level-metrics-v1",
+                "rawAudioPersisted": False,
+            }
+        if method == "microphone.stream.read":
+            lease_id = str(params["leaseId"])
+            with self.microphone_lock:
+                lease = self.microphone_leases.get(lease_id)
+                if lease is None or lease.get("appId") != app_id:
+                    raise RuntimeError("麦克风租约不存在或已经过期")
+                if time.monotonic() >= float(lease["expires"]):
+                    expired = True
+                    capture = None
+                else:
+                    expired = False
+                    capture = lease["capture"]
+            if expired:
+                self._close_microphone_lease(
+                    lease_id, expected_app_id=app_id, expired=True
+                )
+                raise RuntimeError("麦克风租约已经过期")
+            result = capture.read_level(int(params["frameMilliseconds"]))
+            with self.microphone_lock:
+                current = self.microphone_leases.get(lease_id)
+                if current is None or current.get("appId") != app_id:
+                    raise RuntimeError("麦克风租约已经过期")
+                current["sequence"] = int(current.get("sequence") or 0) + 1
+                sequence = int(current["sequence"])
+                remaining = max(0.0, float(current["expires"]) - time.monotonic())
+            self._microphone_indicator(app_id, True, min(2.0, max(0.5, remaining)))
+            return {
+                **result,
+                "sequence": sequence,
+                "leaseRemainingSeconds": round(remaining, 3),
+            }
+        if method == "microphone.stream.close":
+            closed = self._close_microphone_lease(
+                str(params["leaseId"]), expected_app_id=app_id
+            )
+            return {"closed": closed}
         if method == "vision.detect":
             classes = [str(value).lower() for value in params.get("classes", [])][:12]
             confidence = max(0.1, min(float(params.get("minimumConfidence", 0.55)), 0.99))
@@ -650,8 +948,6 @@ class WorkshopHostBroker:
                 "text": content.decode("utf-8", errors="replace"),
             }
         if method in {
-            "microphone.stream.open",
-            "microphone.stream.close",
             "speaker.play",
             "speaker.stop",
             "motor.move",

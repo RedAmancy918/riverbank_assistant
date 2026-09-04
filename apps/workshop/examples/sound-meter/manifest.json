@@ -1,0 +1,52 @@
+{
+  "apiVersion": "riverbank.workshop/v1",
+  "kind": "RiverBankApp",
+  "metadata": {
+    "id": "tech.riverbank.example.soundmeter",
+    "name": "声音计数器",
+    "version": "0.1.0-beta.1",
+    "description": "在前台显示环境音量，并统计超过阈值的声音事件。",
+    "vendor": "RiverBank"
+  },
+  "spec": {
+    "runtime": {
+      "kind": "declarative-v1",
+      "entrypoint": "app/main.json",
+      "protocol": "riverbank.app-host/v1"
+    },
+    "permissions": [
+      {
+        "capability": "microphone.stream",
+        "reason": "读取不落盘的实时音量指标。",
+        "constraints": {
+          "privacyIndicator": true
+        }
+      },
+      {
+        "capability": "storage.app",
+        "reason": "在应用私有目录保存声音事件计数。",
+        "constraints": {}
+      },
+      {
+        "capability": "ui.surface",
+        "reason": "在圆屏显示音量和事件计数。",
+        "constraints": {}
+      }
+    ],
+    "resources": {
+      "cpuPercent": 12,
+      "memoryMB": 96,
+      "storageMB": 32,
+      "maxProcesses": 2
+    },
+    "lifecycle": {
+      "autostart": false,
+      "startTimeoutSeconds": 10,
+      "stopTimeoutSeconds": 5
+    },
+    "ui": {
+      "menuLabel": "声音",
+      "glyph": "声"
+    }
+  }
+}

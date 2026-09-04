@@ -31,7 +31,7 @@
       <textarea id="paper-chat-{{ paper.qa_id }}" data-paper-chat-input rows="2" maxlength="4000" placeholder="例如：论文的训练目标与基线方法有什么不同？" required></textarea>
       <button type="submit" data-paper-chat-send>发送</button>
     </form>
-    <p class="paper-chat-note">回答优先使用当天全文阅读缓存；阅读缓存每日替换，对话记录持续保留。</p>
+    <p class="paper-chat-note">回答优先使用当天精读缓存；证据不足时自动补读论文原文并回写当日缓存。知识缓存每日替换，对话记录持续保留。</p>
   </section>
 </details>
 {%- endmacro %}

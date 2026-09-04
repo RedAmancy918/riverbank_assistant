@@ -78,7 +78,7 @@ Camera Hub / Hailo / PipeWire / Daily / Tasks / Reports / UI / Motor Broker
 | `notifications.local` | 中 | 安装期 | `notifications.show` | 宿主限频；不能伪装系统安全提示 |
 | `camera.snapshot` | 中 | 会话期 | `camera.snapshot` | 需要近期用户操作；获取时亮隐私指示 |
 | `camera.stream` | 高 | 会话期 | `camera.stream.open/close` | 前台、用户在场、TTL 租约、持续隐私指示 |
-| `microphone.stream` | 高 | 会话期 | `microphone.stream.open/close` | 前台、用户在场、持续录音指示 |
+| `microphone.stream` | 高 | 会话期 | `microphone.stream.open/read/close` | 前台、用户在场、TTL 租约、持续录音指示、原始音频不落盘 |
 | `speaker.playback` | 中 | 安装期 | `speaker.play/stop` | 只能经 PipeWire；清单限制最大音量 |
 | `vision.inference` | 中 | 会话期 | `vision.detect` | 只调用宿主白名单模型和类别；不能上传帧 |
 | `motor.pan_tilt` | 高 | 会话期 | `motor.move/stop` | 限角、限速、看门狗和宿主急停必须同时成立 |
@@ -172,6 +172,8 @@ Camera Hub / Hailo / PipeWire / Daily / Tasks / Reports / UI / Motor Broker
 - 圆屏隐私点由宿主绘制，应用不能覆盖；
 - 退出页面、锁屏、授权撤销、应用崩溃或租约超时立即关闭流；
 - Camera Hub 常驻持有摄像头不等于应用正在使用摄像头，也不会点亮隐私指示。
+
+麦克风适配器只通过用户 PipeWire 会话读取共享输入，不直接打开 ALSA，因此可以与常驻唤醒和视频通话共存。`declarative-v1` 当前开放 `microphone.stream` 数据源和 `audio.level` 运算节点，应用只会收到归一化 RMS、峰值、dBFS、采样率、窗口长度和序号；不会收到原始 PCM，也不能要求 `retainAudio: true`。麦克风单次租约为 1–300 秒，支持 16 kHz 或 48 kHz 单声道、20–500 ms 分析窗口。打开、持续读取和关闭均写入工坊审计，宿主看门狗在租约到期后独立回收采集进程。
 
 ### 6.2 云台
 
@@ -437,14 +439,14 @@ Python 隔离运行器目前没有启用，所以 `python-sandbox-v1` 包即便�
 5. 包先事务化安装为 `installed_disabled`，圆屏显示权限、理由与风险；当前由物理在场的圆屏操作者批准完全一致的权限集合后才写入 grant 并启用，尚未验证该操作者的账户角色；
 6. 受信任声明式解释器只运行前台单应用；退出、租约到期、服务停止或错误都会回收视觉资源；
 7. Host Broker 对每次调用重新执行 declaration + grant + session 校验，并写入追加式审计日志；
-8. UI、私有存储、限频通知、Camera Hub 租约、Hailo 白名单检测、后台任务与只读报告适配器已接通；Hailo 检测必须先向单一视觉协调器取得带 TTL 的互斥预约，不能与人脸 Worker 并行占用设备；
+8. UI、私有存储、限频通知、Camera Hub 租约、PipeWire 麦克风音量分析、Hailo 白名单检测、后台任务与只读报告适配器已接通；Hailo 检测必须先向单一视觉协调器取得带 TTL 的互斥预约，不能与人脸 Worker 并行占用设备；
 9. `riverbank-workshop.service`、运行状态与契约自检均纳入 SYSTEM 健康监控和整机发布清单。
 
 仍然明确关闭：
 
 - `python-sandbox-v1` 的代码执行；
 - 自定义应用直接访问 Shell、systemd、凭据、宿主文件、软件包、网络 Socket 或设备节点；
-- 麦克风、扬声器和云台的工坊适配器，直到各自的租约、隐私与物理急停验收完成；
+- 扬声器和云台的工坊适配器，直到各自的音量租约、机械租约、隐私与物理急停验收完成；
 - 自动后台常驻；生成应用默认只在用户打开的前台会话运行；
 - 客户端上传第三方包后的圆屏授权流程，目前外部包只可由维护 CLI 验证和登记为 disabled。
 
@@ -455,6 +457,7 @@ Python 隔离运行器目前没有启用，所以 `python-sandbox-v1` 包即便�
 ```bash
 python3 apps/workshop/workshopctl.py self-test
 python3 apps/workshop/workshopctl.py service-health
+python3 apps/workshop/workshopctl.py microphone-smoke --seconds 1.5
 python3 apps/workshop/workshopctl.py capabilities
 python3 apps/workshop/workshopctl.py validate-manifest \
   apps/workshop/examples/cat-watcher/manifest.json

@@ -1,5 +1,6 @@
 const remoteVideo = document.getElementById('remoteVideo');
 const localVideo = document.getElementById('localVideo');
+const launchView = document.getElementById('launchView');
 const loginView = document.getElementById('loginView');
 const loginForm = document.getElementById('loginForm');
 const loginButton = document.getElementById('loginButton');
@@ -13,7 +14,37 @@ const connectButton = document.getElementById('connectButton');
 const muteButton = document.getElementById('muteButton');
 const cameraButton = document.getElementById('cameraButton');
 const serverUrl = document.getElementById('serverUrl');
-const pairingToken = document.getElementById('pairingToken');
+const accountUsername = document.getElementById('accountUsername');
+const accountPassword = document.getElementById('accountPassword');
+const loginModeButton = document.getElementById('loginModeButton');
+const registerModeButton = document.getElementById('registerModeButton');
+const registerFields = document.getElementById('registerFields');
+const registerPasswordConfirmation = document.getElementById('registerPasswordConfirmation');
+const registerDisplayName = document.getElementById('registerDisplayName');
+const registrationPasscode = document.getElementById('registrationPasscode');
+const registerGuidance = document.getElementById('registerGuidance');
+const accountDisplayName = document.getElementById('accountDisplayName');
+const setupFields = document.getElementById('setupFields');
+const setupCredential = document.getElementById('setupCredential');
+const toggleHostSettings = document.getElementById('toggleHostSettings');
+const hostSettings = document.getElementById('hostSettings');
+const accountButton = document.getElementById('accountButton');
+const accountDialog = document.getElementById('accountDialog');
+const closeAccountDialog = document.getElementById('closeAccountDialog');
+const currentAccountName = document.getElementById('currentAccountName');
+const currentAccountMeta = document.getElementById('currentAccountMeta');
+const desktopVersion = document.getElementById('desktopVersion');
+const changePasswordForm = document.getElementById('changePasswordForm');
+const currentPassword = document.getElementById('currentPassword');
+const newPassword = document.getElementById('newPassword');
+const adminUsersSection = document.getElementById('adminUsersSection');
+const accountUserList = document.getElementById('accountUserList');
+const createUserForm = document.getElementById('createUserForm');
+const newUserUsername = document.getElementById('newUserUsername');
+const newUserDisplayName = document.getElementById('newUserDisplayName');
+const newUserPassword = document.getElementById('newUserPassword');
+const newUserRole = document.getElementById('newUserRole');
+const accountMessage = document.getElementById('accountMessage');
 const cameraSelect = document.getElementById('cameraSelect');
 const microphoneSelect = document.getElementById('microphoneSelect');
 const refreshDevices = document.getElementById('refreshDevices');
@@ -58,17 +89,20 @@ let selectedReport = null;
 let reportsLoading = false;
 let reportRequestId = 0;
 let chats = [];
-let activeChatId = localStorage.getItem('riverbank.activeChatId') || '';
+let activeChatId = '';
 let currentChatMessages = [];
 let chatLoading = false;
 let chatPollTimer = null;
 let authenticated = false;
 let devicesInitialized = false;
 let pendingChatAttachments = [];
+let authToken = '';
+let currentUser = null;
+let authenticationMode = 'login';
 const attachmentObjectUrls = new Map();
-
+const DEFAULT_EDGE_HOST = 'https://riverbank-tech.tail0acdab.ts.net/assistant';
 const CHAT_ATTACHMENT_EXTENSIONS = new Set([
-  'jpg', 'jpeg', 'png', 'webp', 'pdf', 'md', 'markdown', 'txt', 'csv'
+  'jpg', 'jpeg', 'png', 'webp', 'pdf', 'md', 'markdown', 'txt'
 ]);
 const CHAT_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp']);
 const MAX_CHAT_ATTACHMENT_BYTES = 15 * 1024 * 1024;
@@ -81,7 +115,7 @@ function endpoint(path) {
 
 function headers() {
   return {
-    'Authorization': `Bearer ${pairingToken.value.trim()}`,
+    'Authorization': `Bearer ${authToken}`,
     'Content-Type': 'application/json'
   };
 }
@@ -90,26 +124,120 @@ function setState(state, label) {
   connectionPill.dataset.state = state;
   connectionLabel.textContent = label;
   const active = state === 'connected' || state === 'connecting';
-  connectButton.textContent = active ? '挂断' : '开始通话';
+  connectButton.textContent = active ? '结束通话' : '开始通话';
   connectButton.classList.toggle('hangup', active);
   muteButton.disabled = !active;
   cameraButton.disabled = !active;
-  serverUrl.disabled = active;
-  pairingToken.disabled = active;
   cameraSelect.disabled = active;
   microphoneSelect.disabled = active;
 }
 
 function saveSettings() {
   localStorage.setItem('riverbank.serverUrl', serverUrl.value.trim());
-  localStorage.setItem('riverbank.pairingToken', pairingToken.value.trim());
+  localStorage.setItem('riverbank.username', accountUsername.value.trim());
   if (cameraSelect.value) localStorage.setItem('riverbank.cameraId', cameraSelect.value);
   if (microphoneSelect.value) localStorage.setItem('riverbank.microphoneId', microphoneSelect.value);
 }
 
+function migrateEdgeHost(value) {
+  const candidate = String(value || '').trim().replace(/\/$/, '');
+  if (!candidate) return DEFAULT_EDGE_HOST;
+  if (candidate === 'https://riverbank-tech.tail0acdab.ts.net') return DEFAULT_EDGE_HOST;
+  if (candidate === 'http://riverbank-tech.tail0acdab.ts.net/assistant') return DEFAULT_EDGE_HOST;
+  return candidate;
+}
+
 function restoreSettings() {
-  serverUrl.value = localStorage.getItem('riverbank.serverUrl') || serverUrl.value;
-  pairingToken.value = localStorage.getItem('riverbank.pairingToken') || '';
+  const savedHost = localStorage.getItem('riverbank.serverUrl');
+  serverUrl.value = migrateEdgeHost(savedHost || serverUrl.value);
+  if (savedHost !== serverUrl.value) {
+    localStorage.setItem('riverbank.serverUrl', serverUrl.value);
+  }
+  accountUsername.value = localStorage.getItem('riverbank.username') || '';
+}
+
+function setHostSettingsVisible(visible) {
+  hostSettings.classList.toggle('hidden', !visible);
+  toggleHostSettings.setAttribute('aria-expanded', String(visible));
+  toggleHostSettings.textContent = visible ? '收起连接设置' : '连接设置';
+}
+
+async function setAuthenticationMode(mode) {
+  authenticationMode = mode === 'register' ? 'register' : 'login';
+  const registering = authenticationMode === 'register';
+  loginModeButton.classList.toggle('active', !registering);
+  registerModeButton.classList.toggle('active', registering);
+  loginModeButton.setAttribute('aria-selected', String(!registering));
+  registerModeButton.setAttribute('aria-selected', String(registering));
+  registerFields.classList.toggle('hidden', !registering);
+  setupFields.classList.add('hidden');
+  accountPassword.autocomplete = registering ? 'new-password' : 'current-password';
+  loginButton.textContent = registering ? '注册并进入' : '登录';
+  accountPassword.value = '';
+  registerPasswordConfirmation.value = '';
+  registerDisplayName.value = '';
+  registrationPasscode.value = '';
+  registerPasswordConfirmation.value = '';
+  registrationPasscode.value = '';
+  loginMessage.classList.remove('error');
+  loginMessage.textContent = registering ? '使用注册通行码创建独立账号' : '等待连接';
+  registerGuidance.textContent = '';
+  if (!registering) return;
+  try {
+    const config = await fetchAuthConfig();
+    if (!config.registration_enabled) {
+      registerGuidance.textContent = '此设备当前未开放账号注册';
+    } else if (config.initial_admin_username) {
+      registerGuidance.textContent = `请先注册 ${config.initial_admin_username} 管理员账号。`;
+      accountUsername.value = config.initial_admin_username;
+    }
+  } catch (_error) {
+    // Submission provides the complete connection error.
+  }
+}
+
+function activeChatStorageKey() {
+  return currentUser?.id ? `riverbank.activeChatId.${currentUser.id}` : '';
+}
+
+function saveActiveChatId() {
+  const key = activeChatStorageKey();
+  if (!key) return;
+  if (activeChatId) localStorage.setItem(key, activeChatId);
+  else localStorage.removeItem(key);
+}
+
+async function fetchAuthConfig() {
+  const response = await fetch(endpoint('/api/v1/auth/config'), { cache: 'no-store' });
+  if (!response.ok) throw new Error((await response.text()) || `设备返回 ${response.status}`);
+  return response.json();
+}
+
+async function completeLogin(payload, { persist = true } = {}) {
+  authToken = String(payload.token || '');
+  currentUser = payload.user || null;
+  if (!authToken.startsWith('rbs_') || !currentUser?.id) throw new Error('设备返回了无效的账号会话');
+  accountPassword.value = '';
+  setupCredential.value = '';
+  setupFields.classList.add('hidden');
+  accountUsername.value = currentUser.username || accountUsername.value;
+  saveSettings();
+  if (persist) {
+    await window.riverbankDesktop?.saveAuthSession({
+      server: serverUrl.value.trim(),
+      username: currentUser.username,
+      token: authToken
+    });
+  }
+  activeChatId = localStorage.getItem(activeChatStorageKey()) || '';
+  authenticated = true;
+  loginView.classList.add('hidden');
+  appShell.classList.remove('hidden');
+  accountButton.textContent = currentUser.display_name || currentUser.username;
+  loginMessage.textContent = '连接成功';
+  message.textContent = `已登录为 ${currentUser.display_name || currentUser.username}`;
+  setState('idle', '未通话');
+  setView('chat');
 }
 
 async function enumerateDevices({ reportStatus = true } = {}) {
@@ -165,43 +293,96 @@ async function enumerateDevices({ reportStatus = true } = {}) {
 }
 
 async function login() {
-  const address = serverUrl.value.trim().replace(/\/$/, '');
-  const token = pairingToken.value.trim();
+  const address = migrateEdgeHost(serverUrl.value);
+  const username = accountUsername.value.trim();
+  const password = accountPassword.value;
   let target;
   try {
     target = new URL(address);
   } catch (_error) {
     throw new Error('请输入正确的 RiverBank Edge Host');
   }
-  if (!['http:', 'https:'].includes(target.protocol)) throw new Error('地址必须使用 HTTP 或 HTTPS');
-  if (token.length < 16) throw new Error('请输入至少 16 字符的配对令牌');
+  if (target.protocol !== 'https:') throw new Error('账号登录必须使用 HTTPS Edge Host');
+  if (username.length < 3) throw new Error('请输入用户名');
+  if (password.length < 10) throw new Error('密码至少需要 10 个字符');
 
   serverUrl.value = address;
   loginButton.disabled = true;
   loginMessage.classList.remove('error');
-  loginMessage.textContent = '正在验证设备…';
+  loginMessage.textContent = authenticationMode === 'register' ? '正在安全注册…' : '正在安全登录…';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 9000);
   try {
-    const response = await fetch(endpoint('/api/v1/status'), {
-      headers: reportHeaders(),
+    const config = await fetchAuthConfig();
+    if (authenticationMode === 'register') {
+      if (!config.registration_enabled) throw new Error('此设备当前未开放账号注册');
+      if (password !== registerPasswordConfirmation.value) throw new Error('两次输入的密码不一致');
+      const passcode = registrationPasscode.value;
+      if (!passcode) throw new Error('请输入注册通行码');
+      if (config.initial_admin_username && username.toLowerCase() !== String(config.initial_admin_username).toLowerCase()) {
+        throw new Error(`请先注册管理员账号 ${config.initial_admin_username}`);
+      }
+      const response = await fetch(endpoint('/api/v1/auth/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          password,
+          display_name: registerDisplayName.value.trim(),
+          registration_passcode: passcode,
+          device_name: `RiverBank Call on ${navigator.platform || 'Desktop'}`
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        if (response.status === 401) throw new Error('注册通行码不正确');
+        if (response.status === 409 && /administrator/i.test(detail)) {
+          throw new Error(`请先注册管理员账号 ${config.initial_admin_username || 'Geo'}`);
+        }
+        if (response.status === 400 && /already in use/i.test(detail)) throw new Error('这个用户名已经被使用');
+        if (response.status === 426) throw new Error('账号注册必须通过 HTTPS 地址');
+        throw new Error(detail || `设备返回 ${response.status}`);
+      }
+      await completeLogin(await response.json());
+      return;
+    }
+    const bootstrap = Boolean(config.bootstrap_required);
+    setupFields.classList.toggle('hidden', !bootstrap);
+    const credential = setupCredential.value.trim();
+    if (bootstrap && credential.length < 16) {
+      throw new Error('首次设置请再输入一次性设备凭据');
+    }
+    const response = await fetch(endpoint(bootstrap ? '/api/v1/auth/bootstrap' : '/api/v1/auth/login'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bootstrap ? { Authorization: `Bearer ${credential}` } : {})
+      },
+      body: JSON.stringify({
+        username,
+        password,
+        display_name: accountDisplayName.value.trim(),
+        device_name: `RiverBank Call on ${navigator.platform || 'Desktop'}`
+      }),
       signal: controller.signal
     });
     if (!response.ok) {
-      if (response.status === 401) throw new Error('配对令牌不正确');
+      if (response.status === 401) throw new Error(bootstrap ? '一次性设备凭据不正确' : '用户名或密码不正确');
+      if (response.status === 426) throw new Error('账号密码登录必须通过 HTTPS 地址');
       throw new Error((await response.text()) || `设备返回 ${response.status}`);
     }
-    await response.json();
-    saveSettings();
-    authenticated = true;
-    loginView.classList.add('hidden');
-    appShell.classList.remove('hidden');
-    loginMessage.textContent = '连接成功';
-    message.textContent = '已连接 RiverBank';
-    setState('idle', '未通话');
-    setView('chat');
+    await completeLogin(await response.json());
   } catch (error) {
-    const detail = error.name === 'AbortError' ? '连接超时，请检查 Edge Host 和网络' : error.message;
+    const fetchFailed = /failed to fetch|load failed|networkerror/i.test(String(error?.message || ''));
+    const detail = error.name === 'AbortError'
+      ? '连接超时，请检查 Edge Host 和网络'
+      : fetchFailed
+        ? '无法连接 RiverBank Edge Host，请检查网络和连接设置中的 HTTPS 地址'
+        : error.message;
+    if (error.name === 'AbortError' || /Host|HTTPS|连接|网络|地址/.test(detail)) {
+      setHostSettingsVisible(true);
+    }
     loginMessage.classList.add('error');
     loginMessage.textContent = detail;
     throw new Error(detail);
@@ -213,6 +394,11 @@ async function login() {
 
 async function logout() {
   if (peerConnection) await hangup();
+  if (authToken) {
+    await fetch(endpoint('/api/v1/auth/logout'), {
+      method: 'POST', headers: headers(), body: '{}'
+    }).catch(() => {});
+  }
   authenticated = false;
   clearTimeout(chatPollTimer);
   chatPollTimer = null;
@@ -222,13 +408,107 @@ async function logout() {
   currentChatMessages = [];
   reports = [];
   selectedReport = null;
-  localStorage.removeItem('riverbank.pairingToken');
-  pairingToken.value = '';
+  authToken = '';
+  currentUser = null;
+  activeChatId = '';
+  await window.riverbankDesktop?.clearAuthSession();
   appShell.classList.add('hidden');
   loginView.classList.remove('hidden');
   loginMessage.classList.remove('error');
   loginMessage.textContent = '已安全登出';
-  pairingToken.focus();
+  await setAuthenticationMode('login');
+  accountPassword.focus();
+}
+
+function setAccountMessage(text, error = false) {
+  accountMessage.textContent = text;
+  accountMessage.classList.toggle('error', error);
+}
+
+function renderAccountUsers(users) {
+  accountUserList.replaceChildren();
+  users.forEach((user) => {
+    const row = document.createElement('div');
+    row.className = 'account-user-row';
+    const info = document.createElement('div');
+    const name = document.createElement('strong');
+    name.textContent = user.display_name || user.username;
+    const meta = document.createElement('span');
+    meta.textContent = `@${user.username} · ${user.role === 'admin' ? '管理员' : '普通用户'}${user.disabled ? ' · 已停用' : ''}`;
+    info.append(name, meta);
+    row.append(info);
+    if (user.id !== currentUser?.id) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.textContent = user.disabled ? '启用' : '停用';
+      toggle.classList.toggle('enable', user.disabled);
+      toggle.addEventListener('click', async () => {
+        toggle.disabled = true;
+        try {
+          const response = await fetch(endpoint(`/api/v1/auth/users/${encodeURIComponent(user.id)}`), {
+            method: 'PATCH', headers: headers(), body: JSON.stringify({ disabled: !user.disabled })
+          });
+          if (!response.ok) throw new Error((await response.text()) || `设备返回 ${response.status}`);
+          await loadAccountUsers();
+          setAccountMessage(user.disabled ? '账号已启用' : '账号已停用，现有会话已经撤销');
+        } catch (error) {
+          setAccountMessage(error.message, true);
+        } finally {
+          toggle.disabled = false;
+        }
+      });
+      row.append(toggle);
+    }
+    accountUserList.append(row);
+  });
+}
+
+async function loadAccountUsers() {
+  if (currentUser?.role !== 'admin') return;
+  const response = await fetch(endpoint('/api/v1/auth/users'), { headers: reportHeaders() });
+  if (!response.ok) throw new Error((await response.text()) || `设备返回 ${response.status}`);
+  const payload = await response.json();
+  renderAccountUsers(Array.isArray(payload.users) ? payload.users : []);
+}
+
+async function openAccount() {
+  if (!currentUser) return;
+  currentAccountName.textContent = currentUser.display_name || currentUser.username;
+  currentAccountMeta.textContent = `@${currentUser.username} · ${currentUser.role === 'admin' ? '管理员' : '普通用户'}`;
+  adminUsersSection.classList.toggle('hidden', currentUser.role !== 'admin');
+  setAccountMessage('');
+  accountDialog.showModal();
+  if (currentUser.role === 'admin') {
+    try {
+      await loadAccountUsers();
+    } catch (error) {
+      setAccountMessage(`用户列表读取失败：${error.message}`, true);
+    }
+  }
+}
+
+async function resumeSavedSession() {
+  const saved = await window.riverbankDesktop?.loadAuthSession();
+  if (!saved?.token || !saved?.server) return false;
+  const migratedServer = migrateEdgeHost(saved.server);
+  serverUrl.value = migratedServer;
+  localStorage.setItem('riverbank.serverUrl', migratedServer);
+  accountUsername.value = saved.username || '';
+  authToken = saved.token;
+  try {
+    const response = await fetch(endpoint('/api/v1/auth/me'), { headers: reportHeaders() });
+    if (!response.ok) throw new Error('session expired');
+    const payload = await response.json();
+    await completeLogin(
+      { token: authToken, user: payload.user },
+      { persist: migratedServer !== saved.server }
+    );
+    return true;
+  } catch (_error) {
+    authToken = '';
+    await window.riverbankDesktop?.clearAuthSession();
+    return false;
+  }
 }
 
 function waitForIceGathering(pc, timeoutMs = 8000) {
@@ -247,8 +527,7 @@ function waitForIceGathering(pc, timeoutMs = 8000) {
 }
 
 async function startCall() {
-  const token = pairingToken.value.trim();
-  if (token.length < 16) throw new Error('请输入至少 16 字符的配对令牌');
+  if (!authToken.startsWith('rbs_')) throw new Error('请先登录 RiverBank 账号');
   saveSettings();
   if (!devicesInitialized) await enumerateDevices({ reportStatus: true });
   if (!cameraSelect.options.length || !microphoneSelect.options.length) {
@@ -319,7 +598,7 @@ async function hangup({ notify = true } = {}) {
   clearInterval(statsTimer);
   statsTimer = null;
   previousStats.clear();
-  if (notify && pairingToken.value.trim()) {
+  if (notify && authToken) {
     fetch(endpoint('/api/v1/hangup'), {
       method: 'POST',
       headers: headers(),
@@ -341,8 +620,10 @@ async function hangup({ notify = true } = {}) {
   networkStats.textContent = '—';
   muteButton.classList.remove('active');
   cameraButton.classList.remove('active');
-  muteButton.querySelector('span:last-child').textContent = '静音';
-  cameraButton.querySelector('span:last-child').textContent = '关闭画面';
+  muteButton.querySelector('.control-label').textContent = '静音';
+  muteButton.setAttribute('aria-label', '静音');
+  cameraButton.querySelector('.control-label').textContent = '关闭摄像头';
+  cameraButton.setAttribute('aria-label', '关闭摄像头');
   setState('idle', '未连接');
   message.textContent = '通话已结束';
 }
@@ -353,7 +634,9 @@ function toggleTrack(kind, button, enabledLabel, disabledLabel) {
   const enabled = !tracks[0].enabled;
   tracks.forEach((track) => { track.enabled = enabled; });
   button.classList.toggle('active', !enabled);
-  button.querySelector('span:last-child').textContent = enabled ? enabledLabel : disabledLabel;
+  const label = enabled ? enabledLabel : disabledLabel;
+  button.querySelector('.control-label').textContent = label;
+  button.setAttribute('aria-label', label);
 }
 
 async function updateStats() {
@@ -565,7 +848,7 @@ function addPendingChatAttachments(files) {
     }
     const extension = fileExtension(file.name);
     if (!CHAT_ATTACHMENT_EXTENSIONS.has(extension)) {
-      message.textContent = `不支持 ${file.name}；请选择图片、PDF、Markdown、TXT 或 CSV`;
+      message.textContent = `不支持 ${file.name}；请选择图片、PDF、Markdown 或 TXT`;
       continue;
     }
     if (!file.size || file.size > MAX_CHAT_ATTACHMENT_BYTES) {
@@ -630,7 +913,7 @@ async function downloadChatAttachment(attachment) {
   try {
     const result = await window.riverbankDesktop.downloadAttachment({
       url: attachmentEndpoint(attachment),
-      token: pairingToken.value.trim(),
+      token: authToken,
       filename: attachment.original_name
     });
     if (!result.canceled) message.textContent = `附件已保存：${result.path}`;
@@ -772,8 +1055,8 @@ function renderChatMessages() {
 
 async function loadChats({ silent = false } = {}) {
   if (chatLoading) return;
-  if (pairingToken.value.trim().length < 16) {
-    if (!silent) message.textContent = 'Chat 需要 RiverBank Edge Host 和配对令牌';
+  if (!authToken) {
+    if (!silent) message.textContent = '请先登录 RiverBank 账号';
     return;
   }
   chatLoading = true;
@@ -784,7 +1067,7 @@ async function loadChats({ silent = false } = {}) {
     chats = Array.isArray(payload.conversations) ? payload.conversations : [];
     if (activeChatId && !chats.some((item) => item.id === activeChatId)) activeChatId = '';
     if (!activeChatId && chats.length) activeChatId = chats[0].id;
-    if (activeChatId) localStorage.setItem('riverbank.activeChatId', activeChatId);
+    saveActiveChatId();
     renderChatHistory();
     if (activeChatId) await loadChatMessages({ silent: true });
     else renderChatMessages();
@@ -808,7 +1091,7 @@ async function createChat() {
   chats.unshift(chat);
   activeChatId = chat.id;
   currentChatMessages = [];
-  localStorage.setItem('riverbank.activeChatId', activeChatId);
+  saveActiveChatId();
   renderChatHistory();
   renderChatMessages();
   chatInput.focus();
@@ -819,7 +1102,7 @@ async function selectChat(chatId) {
   if (chatIsResponding() && chatId !== activeChatId) return;
   if (chatId !== activeChatId) clearPendingChatAttachments();
   activeChatId = chatId;
-  localStorage.setItem('riverbank.activeChatId', chatId);
+  saveActiveChatId();
   renderChatHistory();
   await loadChatMessages();
 }
@@ -906,8 +1189,7 @@ async function deleteChat(chatId) {
   if (activeChatId === chatId) {
     activeChatId = chats[0]?.id || '';
     currentChatMessages = [];
-    if (activeChatId) localStorage.setItem('riverbank.activeChatId', activeChatId);
-    else localStorage.removeItem('riverbank.activeChatId');
+    saveActiveChatId();
   }
   renderChatHistory();
   if (activeChatId) await loadChatMessages(); else renderChatMessages();
@@ -939,7 +1221,7 @@ function setView(view) {
 }
 
 function reportHeaders() {
-  return { Authorization: `Bearer ${pairingToken.value.trim()}` };
+  return { Authorization: `Bearer ${authToken}` };
 }
 
 function renderReportList() {
@@ -974,10 +1256,9 @@ function renderReportList() {
 
 async function loadReports({ silent = false } = {}) {
   if (reportsLoading) return;
-  const token = pairingToken.value.trim();
-  if (token.length < 16) {
-    reportListStatus.textContent = '请先填写配对令牌';
-    if (!silent) message.textContent = '报告库需要 RiverBank Edge Host 和配对令牌';
+  if (!authToken) {
+    reportListStatus.textContent = '请先登录 RiverBank 账号';
+    if (!silent) message.textContent = '报告库需要登录 RiverBank 账号';
     return;
   }
   saveSettings();
@@ -1045,7 +1326,7 @@ async function downloadSelectedReport() {
   try {
     const result = await window.riverbankDesktop.downloadReport({
       url: endpoint(`/api/v1/reports/${encodeURIComponent(selectedReport.id)}/download`),
-      token: pairingToken.value.trim(),
+      token: authToken,
       filename: selectedReport.filename
     });
     if (!result.canceled) message.textContent = `报告已保存：${result.path}`;
@@ -1105,14 +1386,6 @@ serverUrl.addEventListener('change', () => {
   if (currentView === 'reports') loadReports();
   if (currentView === 'chat') loadChats();
 });
-pairingToken.addEventListener('change', () => {
-  if (!authenticated) return;
-  saveSettings();
-  clearAttachmentObjectUrls();
-  if (currentView === 'reports') loadReports();
-  if (currentView === 'chat') loadChats();
-});
-
 connectButton.addEventListener('click', async () => {
   if (peerConnection) {
     await hangup();
@@ -1127,15 +1400,68 @@ connectButton.addEventListener('click', async () => {
   }
 });
 muteButton.addEventListener('click', () => toggleTrack('audio', muteButton, '静音', '取消静音'));
-cameraButton.addEventListener('click', () => toggleTrack('video', cameraButton, '关闭画面', '打开画面'));
+cameraButton.addEventListener('click', () => toggleTrack('video', cameraButton, '关闭摄像头', '打开摄像头'));
 refreshDevices.addEventListener('click', enumerateDevices);
 loginForm.addEventListener('submit', (event) => {
   event.preventDefault();
   login().catch(() => {});
 });
+loginModeButton.addEventListener('click', () => setAuthenticationMode('login'));
+registerModeButton.addEventListener('click', () => setAuthenticationMode('register'));
+accountButton.addEventListener('click', () => openAccount());
+closeAccountDialog.addEventListener('click', () => accountDialog.close());
+accountDialog.addEventListener('click', (event) => {
+  if (event.target === accountDialog) accountDialog.close();
+});
+changePasswordForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const response = await fetch(endpoint('/api/v1/auth/change-password'), {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        current_password: currentPassword.value,
+        new_password: newPassword.value
+      })
+    });
+    if (!response.ok) throw new Error((await response.text()) || `设备返回 ${response.status}`);
+    currentPassword.value = '';
+    newPassword.value = '';
+    setAccountMessage('密码已更新；其他设备上的登录会话已撤销');
+  } catch (error) {
+    setAccountMessage(error.message, true);
+  }
+});
+createUserForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const response = await fetch(endpoint('/api/v1/auth/users'), {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        username: newUserUsername.value.trim(),
+        display_name: newUserDisplayName.value.trim(),
+        password: newUserPassword.value,
+        role: newUserRole.value
+      })
+    });
+    if (!response.ok) throw new Error((await response.text()) || `设备返回 ${response.status}`);
+    newUserUsername.value = '';
+    newUserDisplayName.value = '';
+    newUserPassword.value = '';
+    newUserRole.value = 'user';
+    await loadAccountUsers();
+    setAccountMessage('新用户已创建，可立即在其他设备登录');
+  } catch (error) {
+    setAccountMessage(error.message, true);
+  }
+});
 logoutButton.addEventListener('click', () => logout().catch((error) => {
   message.textContent = `登出失败：${error.message}`;
 }));
+toggleHostSettings.addEventListener('click', () => {
+  setHostSettingsVisible(hostSettings.classList.contains('hidden'));
+});
 window.addEventListener('beforeunload', () => {
   clearPendingChatAttachments();
   clearAttachmentObjectUrls();
@@ -1143,10 +1469,20 @@ window.addEventListener('beforeunload', () => {
 });
 
 restoreSettings();
+window.riverbankDesktop?.getAppVersion().then((version) => {
+  desktopVersion.textContent = `RiverBank Call · ${version.displayVersion}`;
+}).catch(() => {
+  desktopVersion.textContent = 'RiverBank Call';
+});
 setState('idle', '未通话');
 loginView.classList.remove('hidden');
 appShell.classList.add('hidden');
-serverUrl.focus();
+resumeSavedSession().then((resumed) => {
+  if (!resumed) (accountUsername.value ? accountPassword : serverUrl).focus();
+});
+setTimeout(() => {
+  launchView.classList.add('completed');
+}, 2150);
 setInterval(() => {
   if (currentView === 'reports') loadReports({ silent: true });
 }, 15000);

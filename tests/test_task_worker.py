@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,19 @@ class FakeRunner:
         return self.response
 
 
+class FakeImageGenerator:
+    available = True
+
+    def generate(self, prompt):
+        return SimpleNamespace(
+            payload=b"\x89PNG\r\n\x1a\nriverbank-test",
+            filename="generated.png",
+            media_type="image/png",
+            model="test-image-model",
+            request_id="request-1",
+        )
+
+
 class TaskWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -38,11 +52,12 @@ class TaskWorkerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def worker(self, runner: FakeRunner) -> TaskWorker:
+    def worker(self, runner: FakeRunner, *, image_generator=None) -> TaskWorker:
         return TaskWorker(
             store=self.store,
             runner=runner,
             reports_dir=self.reports,
+            image_generator=image_generator,
             poll_seconds=0.01,
         )
 
@@ -65,6 +80,51 @@ class TaskWorkerTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "waiting_input")
         self.assertIn("哪个主题", waiting["question"])
         self.assertEqual(list(self.reports.iterdir()), [])
+
+    def test_image_task_creates_private_png_and_companion_report(self) -> None:
+        task, _ = self.store.create_task(
+            prompt="生成一张简洁的机器人插画",
+            title="机器人插画",
+            output_format="image",
+        )
+        self.worker(
+            FakeRunner("runner should not be used"),
+            image_generator=FakeImageGenerator(),
+        ).serve(once=True)
+        completed = self.store.get_task(task["id"])
+        assert completed is not None
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["artifact_media_type"], "image/png")
+        artifact = (
+            self.reports
+            / ".task-artifacts"
+            / task["id"]
+            / completed["artifact_filename"]
+        )
+        self.assertEqual(artifact.read_bytes(), b"\x89PNG\r\n\x1a\nriverbank-test")
+
+    def test_illustrated_task_creates_self_contained_html(self) -> None:
+        task, _ = self.store.create_task(
+            prompt="整理机器人新闻并配图",
+            title="机器人新闻",
+            output_format="illustrated",
+        )
+        self.worker(
+            FakeRunner("报告已经生成。", create_report=True),
+            image_generator=FakeImageGenerator(),
+        ).serve(once=True)
+        completed = self.store.get_task(task["id"])
+        assert completed is not None
+        self.assertEqual(completed["artifact_media_type"], "text/html")
+        artifact = (
+            self.reports
+            / ".task-artifacts"
+            / task["id"]
+            / completed["artifact_filename"]
+        )
+        document = artifact.read_text(encoding="utf-8")
+        self.assertIn("data:image/png;base64,", document)
+        self.assertIn("测试报告", document)
 
 
 if __name__ == "__main__":

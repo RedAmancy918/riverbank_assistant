@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 @MainActor
 final class AppStore: ObservableObject {
@@ -9,31 +10,154 @@ final class AppStore: ObservableObject {
     @Published var activeChatID: String?
     @Published var server: String
     @Published var token: String
+    @Published var currentUser: AuthUser?
+    @Published var isAuthenticated = false
+    @Published var isRestoringSession = true
     @Published var errorMessage = ""
     @Published var connectionMessage = "尚未检测"
     @Published var isLoading = false
 
     private let serverKey = "riverbank.server"
-    private let tokenAccount = "pairing-token"
-    private let activeChatKey = "riverbank.active-chat"
+    private let tokenAccount = "session-token-v1"
+    private let usernameKey = "riverbank.username"
 
     init() {
         server = UserDefaults.standard.string(forKey: serverKey)
             ?? "https://riverbank-tech.tail0acdab.ts.net/assistant"
         token = KeychainStore.read(tokenAccount)
-        activeChatID = UserDefaults.standard.string(forKey: activeChatKey)
+        activeChatID = nil
+        if !token.hasPrefix("rbs_") {
+            token = ""
+            KeychainStore.write("", account: tokenAccount)
+        }
     }
 
     private var client: APIClient {
         APIClient(server: server, token: token)
     }
 
-    func saveSettings(server: String, token: String) {
-        self.server = server.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        self.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(self.server, forKey: serverKey)
-        KeychainStore.write(self.token, account: tokenAccount)
-        connectionMessage = "设置已保存"
+    private var activeChatKey: String? {
+        currentUser.map { "riverbank.active-chat.\($0.id)" }
+    }
+
+    private func normalizedServer(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    func authConfiguration(server: String) async throws -> AuthConfigEnvelope {
+        try await APIClient(server: normalizedServer(server), token: "").authConfig()
+    }
+
+    func signIn(
+        server: String,
+        username: String,
+        password: String,
+        displayName: String = "",
+        bootstrapCredential: String? = nil
+    ) async throws {
+        let cleanServer = normalizedServer(server)
+        let unauthenticated = APIClient(server: cleanServer, token: "")
+        let session: AuthSessionEnvelope
+        if let bootstrapCredential {
+            session = try await unauthenticated.bootstrap(
+                username: username,
+                password: password,
+                displayName: displayName,
+                deviceName: UIDevice.current.name,
+                credential: bootstrapCredential
+            )
+        } else {
+            session = try await unauthenticated.login(
+                username: username,
+                password: password,
+                deviceName: UIDevice.current.name
+            )
+        }
+        self.server = cleanServer
+        token = session.token
+        currentUser = session.user
+        isAuthenticated = true
+        UserDefaults.standard.set(cleanServer, forKey: serverKey)
+        UserDefaults.standard.set(session.user.username, forKey: usernameKey)
+        KeychainStore.write(session.token, account: tokenAccount)
+        activeChatID = activeChatKey.flatMap { UserDefaults.standard.string(forKey: $0) }
+        connectionMessage = "已连接 RiverBank"
+        errorMessage = ""
+    }
+
+    func signUp(
+        server: String,
+        username: String,
+        password: String,
+        displayName: String,
+        registrationPasscode: String
+    ) async throws {
+        let cleanServer = normalizedServer(server)
+        let session = try await APIClient(
+            server: cleanServer,
+            token: ""
+        ).register(
+            username: username,
+            password: password,
+            displayName: displayName,
+            registrationPasscode: registrationPasscode,
+            deviceName: UIDevice.current.name
+        )
+        self.server = cleanServer
+        token = session.token
+        currentUser = session.user
+        isAuthenticated = true
+        UserDefaults.standard.set(cleanServer, forKey: serverKey)
+        UserDefaults.standard.set(session.user.username, forKey: usernameKey)
+        KeychainStore.write(session.token, account: tokenAccount)
+        activeChatID = nil
+        connectionMessage = "已连接 RiverBank"
+        errorMessage = ""
+    }
+
+    func restoreSession() async {
+        guard isRestoringSession else { return }
+        defer { isRestoringSession = false }
+        guard token.hasPrefix("rbs_") else { return }
+        do {
+            let account = try await client.currentUser().user
+            currentUser = account
+            isAuthenticated = true
+            activeChatID = activeChatKey.flatMap { UserDefaults.standard.string(forKey: $0) }
+            connectionMessage = "已连接 RiverBank"
+        } catch {
+            token = ""
+            currentUser = nil
+            isAuthenticated = false
+            KeychainStore.write("", account: tokenAccount)
+        }
+    }
+
+    func logout() async {
+        if !token.isEmpty { try? await client.logout() }
+        token = ""
+        currentUser = nil
+        isAuthenticated = false
+        activeChatID = nil
+        chats = []
+        chatMessages = []
+        tasks = []
+        reports = []
+        KeychainStore.write("", account: tokenAccount)
+        connectionMessage = "已安全登出"
+    }
+
+    func changePassword(current: String, new: String) async throws {
+        try await client.changePassword(current: current, new: new)
+    }
+
+    func chatAttachmentData(_ attachment: ChatAttachment) async throws -> Data {
+        try await client.chatAttachment(attachment)
+    }
+
+    var savedUsername: String {
+        UserDefaults.standard.string(forKey: usernameKey) ?? ""
     }
 
     func testConnection() async {
@@ -72,8 +196,18 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func createTask(title: String, prompt: String, kind: String) async throws -> RemoteTask {
-        let task = try await client.createTask(title: title, prompt: prompt, kind: kind)
+    func createTask(
+        title: String,
+        prompt: String,
+        kind: String,
+        outputFormat: String
+    ) async throws -> RemoteTask {
+        let task = try await client.createTask(
+            title: title,
+            prompt: prompt,
+            kind: kind,
+            outputFormat: outputFormat
+        )
         tasks.insert(task, at: 0)
         return task
     }
@@ -108,6 +242,14 @@ final class AppStore: ObservableObject {
         try await client.download(report: report)
     }
 
+    func taskArtifactData(taskID: String) async throws -> Data {
+        try await client.taskArtifactData(taskID: taskID)
+    }
+
+    func downloadArtifact(task: RemoteTask) async throws -> URL {
+        try await client.downloadArtifact(task: task)
+    }
+
     func refreshChats(showLoading: Bool = false) async {
         if showLoading { isLoading = true }
         defer { if showLoading { isLoading = false } }
@@ -117,7 +259,7 @@ final class AppStore: ObservableObject {
                !chats.contains(where: { $0.id == activeChatID }) {
                 self.activeChatID = nil
                 chatMessages = []
-                UserDefaults.standard.removeObject(forKey: activeChatKey)
+                if let activeChatKey { UserDefaults.standard.removeObject(forKey: activeChatKey) }
             }
             errorMessage = ""
         } catch {
@@ -132,13 +274,13 @@ final class AppStore: ObservableObject {
         chats.insert(conversation, at: 0)
         activeChatID = conversation.id
         chatMessages = []
-        UserDefaults.standard.set(conversation.id, forKey: activeChatKey)
+        if let activeChatKey { UserDefaults.standard.set(conversation.id, forKey: activeChatKey) }
         return conversation
     }
 
     func selectChat(_ conversation: ChatConversation) async {
         activeChatID = conversation.id
-        UserDefaults.standard.set(conversation.id, forKey: activeChatKey)
+        if let activeChatKey { UserDefaults.standard.set(conversation.id, forKey: activeChatKey) }
         await refreshChatMessages()
     }
 
@@ -160,7 +302,10 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func sendChat(_ content: String) async throws {
+    func sendChat(
+        _ content: String,
+        attachments: [ChatUploadAttachment] = []
+    ) async throws {
         let conversationID: String
         if let activeChatID {
             conversationID = activeChatID
@@ -169,7 +314,8 @@ final class AppStore: ObservableObject {
         }
         let turn = try await client.sendChatMessage(
             conversationID: conversationID,
-            content: content
+            content: content,
+            attachments: attachments
         )
         chatMessages.append(turn.userMessage)
         chatMessages.append(turn.assistantMessage)
@@ -194,7 +340,7 @@ final class AppStore: ObservableObject {
         if activeChatID == conversation.id {
             activeChatID = nil
             chatMessages = []
-            UserDefaults.standard.removeObject(forKey: activeChatKey)
+            if let activeChatKey { UserDefaults.standard.removeObject(forKey: activeChatKey) }
         }
     }
 }

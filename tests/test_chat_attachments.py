@@ -84,6 +84,80 @@ class ChatAttachmentTests(unittest.TestCase):
                 "fake.png",
                 b"not a png",
             )
+        with self.assertRaises(AttachmentValidationError):
+            self.attachments.save(
+                self.conversation["id"],
+                "data.csv",
+                b"name,value\nalpha,1\n",
+            )
+
+    def test_first_release_document_allowlist(self) -> None:
+        markdown = self.attachments.save(
+            self.conversation["id"],
+            "research.markdown",
+            "# 研究记录\n正文".encode("utf-8"),
+        )
+        text = self.attachments.save(
+            self.conversation["id"],
+            "notes.txt",
+            "安全的纯文本".encode("utf-8"),
+        )
+        self.assertEqual(markdown["media_type"], "text/markdown")
+        self.assertEqual(text["media_type"], "text/plain")
+
+    def test_attachment_lookup_is_isolated_by_conversation_owner(self) -> None:
+        conversation = self.store.create_conversation(owner_user_id="alice-user-id")
+        attachment = self.attachments.save(
+            conversation["id"],
+            "private.md",
+            b"private attachment",
+        )
+        self.store.create_turn(
+            conversation["id"],
+            content="read this",
+            attachments=[attachment],
+            owner_user_id="alice-user-id",
+        )
+        self.assertIsNotNone(
+            self.store.get_attachment(
+                conversation["id"],
+                attachment["id"],
+                owner_user_id="alice-user-id",
+            )
+        )
+        self.assertIsNone(
+            self.store.get_attachment(
+                conversation["id"],
+                attachment["id"],
+                owner_user_id="bob-user-id",
+            )
+        )
+
+    def test_worker_can_attach_generated_image_to_assistant_message(self) -> None:
+        image = Image.new("RGB", (32, 32), (60, 170, 220))
+        payload = io.BytesIO()
+        image.save(payload, format="PNG")
+        _user, assistant = self.store.create_turn(
+            self.conversation["id"],
+            content="帮我生成一张蓝色的图片",
+        )
+        generated = self.attachments.save(
+            self.conversation["id"],
+            "riverbank-generated.png",
+            payload.getvalue(),
+        )
+        attached = self.store.add_attachment_to_message(
+            assistant["id"],
+            generated,
+        )
+        self.assertEqual(attached["message_id"], assistant["id"])
+        self.store.finish(assistant["id"], "已经生成好了。")
+        messages = self.store.list_messages(self.conversation["id"])
+        self.assertEqual(messages[-1]["attachments"][0]["kind"], "image")
+        self.assertEqual(
+            messages[-1]["attachments"][0]["original_name"],
+            "riverbank-generated.png",
+        )
 
 
 if __name__ == "__main__":

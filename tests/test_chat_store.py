@@ -70,6 +70,95 @@ class ChatStoreTests(unittest.TestCase):
         with_internal = self.store.list_conversations(include_internal=True)
         self.assertEqual({item["id"] for item in with_internal}, {visible["id"], hidden["id"]})
 
+    def test_conversations_and_messages_are_isolated_by_owner(self) -> None:
+        alice = self.store.create_conversation(
+            owner_user_id="alice-user-id",
+            title="Alice private chat",
+        )
+        bob = self.store.create_conversation(
+            owner_user_id="bob-user-id",
+            title="Bob private chat",
+        )
+        self.store.create_turn(
+            alice["id"],
+            content="Alice secret",
+            owner_user_id="alice-user-id",
+        )
+
+        self.assertEqual(
+            [item["id"] for item in self.store.list_conversations(
+                owner_user_id="alice-user-id"
+            )],
+            [alice["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in self.store.list_conversations(
+                owner_user_id="bob-user-id"
+            )],
+            [bob["id"]],
+        )
+        self.assertIsNone(
+            self.store.get_conversation(
+                alice["id"], owner_user_id="bob-user-id"
+            )
+        )
+        self.assertEqual(
+            self.store.list_messages(
+                alice["id"], owner_user_id="bob-user-id"
+            ),
+            [],
+        )
+        with self.assertRaises(KeyError):
+            self.store.create_turn(
+                alice["id"],
+                content="Bob must not enter",
+                owner_user_id="bob-user-id",
+            )
+        self.assertFalse(
+            self.store.delete_conversation(
+                alice["id"], owner_user_id="bob-user-id"
+            )
+        )
+
+    def test_first_admin_can_claim_legacy_conversations(self) -> None:
+        legacy = self.store.create_conversation(title="Old chat")
+        internal = self.store.create_conversation(
+            source="paper-radar-internal",
+            title="Daily paper cache",
+        )
+        claimed = self.store.claim_unowned_conversations("first-admin-id")
+        self.assertEqual(claimed, 1)
+        self.assertIsNotNone(
+            self.store.get_conversation(
+                legacy["id"], owner_user_id="first-admin-id"
+            )
+        )
+        self.assertIsNotNone(
+            self.store.get_conversation(
+                internal["id"], owner_user_id=""
+            )
+        )
+
+    def test_owner_usage_and_cache_cleanup(self) -> None:
+        conversation = self.store.create_conversation(
+            owner_user_id="alice-user-id"
+        )
+        _user, assistant = self.store.create_turn(
+            conversation["id"],
+            content="Keep this private",
+            owner_user_id="alice-user-id",
+        )
+        usage = self.store.owner_usage("alice-user-id")
+        self.assertEqual(usage["conversations"], 1)
+        self.assertEqual(usage["messages"], 2)
+        self.assertEqual(usage["active_messages"], 1)
+        with self.assertRaises(RuntimeError):
+            self.store.delete_owner_cache("alice-user-id")
+        self.store.mark_cancelled(assistant["id"])
+        result = self.store.delete_owner_cache("alice-user-id")
+        self.assertEqual(result["deleted_conversations"], 1)
+        self.assertEqual(self.store.owner_usage("alice-user-id")["messages"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

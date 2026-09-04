@@ -1,0 +1,198 @@
+name: RiverBank Release
+
+on:
+  push:
+    tags:
+      - "suite/v*-beta"
+      - "suite/v*-stable"
+      - "edge-system/v*-beta"
+      - "edge-system/v*-stable"
+      - "ios/v*-beta"
+      - "ios/v*-stable"
+      - "call/v*-beta"
+      - "call/v*-stable"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      scope: ${{ steps.release.outputs.scope }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check catalog and tag
+        run: |
+          ./scripts/validate-release.sh
+          python3 scripts/versionctl.py check-tag "$GITHUB_REF_NAME"
+      - id: release
+        name: Resolve release scope
+        shell: bash
+        run: |
+          scope="${GITHUB_REF_NAME%%/*}"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_NAME" == *-beta ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  edge:
+    name: Package Edge System
+    needs: preflight
+    if: needs.preflight.outputs.scope == 'edge-system' || needs.preflight.outputs.scope == 'suite'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build immutable source bundle
+        shell: bash
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("config/version-catalog.json"))["edge_system"]["version"])')
+          mkdir -p release-assets
+          git archive \
+            --format=tar \
+            --prefix="RiverBank-Edge-System-v${version}/" \
+            HEAD \
+            README.md README.zh-CN.md requirements-ci.txt apps config docs scripts tests \
+            | gzip -9 > "release-assets/RiverBank-Edge-System-${version}.tar.gz"
+          cd release-assets
+          sha256sum RiverBank-Edge-System-* > SHA256SUMS-edge.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-edge-system
+          path: release-assets/*
+          if-no-files-found: error
+
+  call-macos:
+    name: Package RiverBank Call for macOS
+    needs: preflight
+    if: needs.preflight.outputs.scope == 'call' || needs.preflight.outputs.scope == 'suite'
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: apps/video-call/windows-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/video-call/windows-client/package-lock.json
+      - run: npm ci
+      - run: npm run dist:mac
+      - name: Collect checksums
+        run: |
+          cd dist
+          shasum -a 256 *.dmg *.zip > SHA256SUMS-macos.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-call-macos
+          path: apps/video-call/windows-client/dist/*
+          if-no-files-found: error
+
+  call-windows:
+    name: Package RiverBank Call for Windows
+    needs: preflight
+    if: needs.preflight.outputs.scope == 'call' || needs.preflight.outputs.scope == 'suite'
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: apps/video-call/windows-client
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/video-call/windows-client/package-lock.json
+      - run: npm ci
+      - run: npm run dist:win
+      - name: Collect checksums
+        run: |
+          cd dist
+          sha256sum *.exe > SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-call-windows
+          path: apps/video-call/windows-client/dist/*
+          if-no-files-found: error
+
+  ios:
+    name: Package RiverBank for iOS
+    needs: preflight
+    if: needs.preflight.outputs.scope == 'ios' || needs.preflight.outputs.scope == 'suite'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build unsigned release candidate
+        run: >-
+          xcodebuild
+          -project apps/ios/RiverBankMobile/RiverBankMobile.xcodeproj
+          -scheme RiverBankMobile
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/riverbank-ios"
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Package and checksum
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("config/version-catalog.json"))["clients"]["ios"]["version"])')
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/riverbank-ios/Build/Products/Release-iphoneos/RiverBank.app" \
+            "release-assets/RiverBank-iOS-${version}-unsigned.app.zip"
+          cd release-assets
+          shasum -a 256 RiverBank-iOS-* > SHA256SUMS-ios.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ios
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release candidate
+    needs:
+      - preflight
+      - edge
+      - call-macos
+      - call-windows
+      - ios
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      (needs.edge.result == 'success' || needs.edge.result == 'skipped') &&
+      (needs.call-macos.result == 'success' || needs.call-macos.result == 'skipped') &&
+      (needs.call-windows.result == 'success' || needs.call-windows.result == 'skipped') &&
+      (needs.ios.result == 'success' || needs.ios.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: List release assets
+        run: find release-assets -maxdepth 1 -type f -printf '%f\n' | sort
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            该 Release 由 RiverBank CI/CD 根据版本清单生成。
+
+            beta 阶段的 macOS、Windows 与 iOS 构建尚未使用商业发行证书；iOS 附件明确标记为 unsigned，只用于编译验证。Edge System 附件是可审计的发布候选源码包，不会自动安装到用户设备。正式 OTA 必须经过 release Environment 审核、公司签名服务签名与设备端兼容性检查。
+          files: release-assets/*

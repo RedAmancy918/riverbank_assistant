@@ -265,10 +265,10 @@
         return;
       }
       setComposerEnabled(panel, !responding);
-      const sourceReady = payload.paper?.source_state === "arxiv_html";
+      const sourceReady = String(payload.paper?.source_state || "").startsWith("arxiv_");
       setPanelStatus(
         panel,
-        responding ? "正在生成回答…" : sourceReady ? "当天全文缓存已就绪" : "当天阅读笔记已就绪",
+        responding ? "正在生成回答…" : sourceReady ? "当天原文缓存已就绪" : "当天阅读笔记已就绪",
         responding ? "" : "ready",
       );
       clearPoll(panel);

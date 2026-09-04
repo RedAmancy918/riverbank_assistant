@@ -50,11 +50,26 @@ class PaperRadarSourceTests(unittest.TestCase):
             "Sanctuary AI",
             "FieldAI",
             "Intrinsic",
+            "World Labs",
             "Amazon Science / Amazon Robotics",
             "Robotics and AI Institute",
             "Toyota Research Institute",
         }
         self.assertLessEqual(expected, names)
+
+    def test_world_labs_research_and_release_channels_are_registered(self) -> None:
+        sources = {
+            source["name"]: source for source in load_config()["company_sources"]
+        }
+        world_labs = sources["World Labs"]
+
+        self.assertEqual(world_labs["url"], "https://www.worldlabs.ai/blog")
+        self.assertIn(
+            "https://docs.worldlabs.ai/marble/release-notes",
+            world_labs.get("additional_urls", []),
+        )
+        self.assertIn("空间智能", world_labs["focus"])
+        self.assertIn("机器人仿真", world_labs["focus"])
 
 
 if __name__ == "__main__":

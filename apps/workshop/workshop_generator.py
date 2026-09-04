@@ -124,6 +124,48 @@ def fallback_plan(requirement: str) -> dict[str, Any]:
                     "cooldownSeconds": 30,
                 }
             )
+    elif any(
+        word in compact
+        for word in (
+            "麦克风",
+            "声音",
+            "音量",
+            "噪声",
+            "噪音",
+            "拍手",
+            "哭声",
+            "叫声",
+        )
+    ):
+        pipeline = [
+            {
+                "source": "microphone.stream",
+                "leaseSeconds": 120,
+                "sampleRate": 16000,
+                "frameMilliseconds": 100,
+                "privacyIndicator": True,
+            },
+            {
+                "operator": "audio.level",
+                "minimumDbfs": -38,
+                "holdMilliseconds": 300,
+            },
+            {
+                "operator": "counter.increment",
+                "key": "sound_events",
+                "whenSound": True,
+            },
+            {"sink": "ui.present", "view": "sound-meter", "title": name},
+        ]
+        if notification:
+            pipeline.append(
+                {
+                    "sink": "notifications.show",
+                    "title": name,
+                    "body": "检测到超过阈值的声音。",
+                    "cooldownSeconds": 15,
+                }
+            )
     elif any(word in compact for word in ("定时", "计时", "倒计时", "每隔", "周期")):
         minute_match = re.search(r"([0-9]{1,4})分钟", compact)
         seconds = max(60, min(int(minute_match.group(1)) * 60, 86400)) if minute_match else 1500
@@ -161,6 +203,7 @@ def fallback_plan(requirement: str) -> dict[str, Any]:
             "runOnlyInForeground": True,
             "stopOnUserExit": True,
             "retainImages": False,
+            "retainAudio": False,
         },
         "generator": "local-safe-fallback",
     }
@@ -180,17 +223,19 @@ def generator_prompt(requirement: str) -> str:
   "menuLabel": "最多6字",
   "glyph": "一个或两个中文字符",
   "pipeline": [声明式节点],
-  "safety": {{"runOnlyInForeground": true, "stopOnUserExit": true, "retainImages": false}}
+  "safety": {{"runOnlyInForeground": true, "stopOnUserExit": true, "retainImages": false, "retainAudio": false}}
 }}
 
 pipeline 必须有且仅有一个 source，且放第一项；至少有一个 sink，最多12项。
 允许的 source：
 - {{"source":"app.lifecycle.foreground"}}
 - {{"source":"camera.stream","leaseSeconds":1到300,"privacyIndicator":true}}
+- {{"source":"microphone.stream","leaseSeconds":1到300,"sampleRate":16000或48000,"frameMilliseconds":20到500的整数,"privacyIndicator":true}}
 - {{"source":"timer.interval","seconds":1到86400,"repeat":true或false}}
 允许的 operator：
 - {{"operator":"vision.detect","model":"host.default-object-detector","classes":[英文COCO类别],"minimumConfidence":0.1到0.99,"maximumFps":0.2到12}}
-- {{"operator":"counter.increment","key":"安全短名称","whenClass":"可选英文类别"}}
+- {{"operator":"audio.level","minimumDbfs":-80到-3,"holdMilliseconds":0到5000}}
+- {{"operator":"counter.increment","key":"安全短名称","whenClass":"可选英文类别","whenSound":"可选布尔值；不得与whenClass同时使用"}}
 - {{"operator":"text.compose","template":"最多240字"}}
 - {{"operator":"assistant.query","prompt":"最多1200字"}}
 允许的 sink：
@@ -200,7 +245,7 @@ pipeline 必须有且仅有一个 source，且放第一项；至少有一个 sin
 - {{"sink":"tasks.create","prompt":"任务","kind":"general|research|file"}}
 
 不得输出 Python、Shell、命令、URL、绝对路径、系统服务、密钥、sudo、软件安装、设备节点或未列出的字段。
-涉及摄像头就必须使用 camera.stream 且 privacyIndicator=true。不要为了显得强大而申请与需求无关的能力。
+涉及摄像头就必须使用 camera.stream，涉及麦克风就必须使用 microphone.stream，并且 privacyIndicator=true。麦克风 v1 只提供实时音量指标，不提供原始音频保存，retainAudio 必须为 false。不要为了显得强大而申请与需求无关的能力。
 """.strip()
 
 

@@ -36,8 +36,11 @@ Industry monitoring uses the `company_sources` list in `config/topics.json` as
 its canonical source registry. In addition to frontier-model teams and the
 existing embodied-intelligence companies, it covers Boston Dynamics, Agility,
 Apptronik, Sanctuary AI, FieldAI, Intrinsic, Amazon Robotics, RAI Institute and
-Toyota Research Institute. Hugging Face, Pollen Robotics and LeRobot remain
-explicitly covered. New open robot platforms such as Microduck or Reachy, and
+Toyota Research Institute. World Labs Research & Insights and the dated Marble
+release notes are monitored explicitly for spatial-intelligence world models,
+interactive 3D worlds, simulation and real-to-sim-to-real robot training.
+Hugging Face, Pollen Robotics and LeRobot remain explicitly covered. New open
+robot platforms such as Microduck or Reachy, and
 substantive releases covering reinforcement learning, sim-to-real, robot
 policies, datasets, simulation, evaluation and
 deployment tooling, are eligible industry updates rather than generic product

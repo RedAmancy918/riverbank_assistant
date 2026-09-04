@@ -1,0 +1,64 @@
+{
+  "schema": "riverbank.version-catalog/v1",
+  "product_suite": {
+    "name": "RiverBank",
+    "product_id": "riverbank",
+    "release_train": "v0.25.2 beta",
+    "purpose": "Compatibility and shipment mapping; not an installable artifact"
+  },
+  "hardware": {
+    "product": "RiverBank Edge",
+    "family_id": "riverbank-edge",
+    "artifact_class": "physical-product",
+    "versioning": "model-generation-and-hardware-revision"
+  },
+  "edge_system": {
+    "name": "RiverBank Edge System",
+    "artifact_id": "riverbank-edge-system",
+    "artifact_class": "device-system-software",
+    "version": "0.25.2",
+    "channel": "beta",
+    "display_version": "v0.25.2 beta",
+    "base_operating_system": {
+      "name": "Debian / Raspberry Pi OS",
+      "ownership": "upstream",
+      "version_source": "/etc/os-release",
+      "included_in_edge_version": false
+    }
+  },
+  "clients": {
+    "ios": {
+      "name": "RiverBank",
+      "bundle_id": "com.riverbank.assistant",
+      "artifact_class": "companion-client",
+      "version": "0.25.1",
+      "channel": "beta",
+      "display_version": "v0.25.1 beta",
+      "build": 2,
+      "compatible_edge": ">=0.25.0 <0.26.0"
+    },
+    "desktop": {
+      "name": "RiverBank Call",
+      "package_id": "riverbank-call",
+      "platforms": [
+        "macOS",
+        "Windows"
+      ],
+      "artifact_class": "companion-client",
+      "version": "0.25.1",
+      "channel": "beta",
+      "display_version": "v0.25.1 beta",
+      "package_version": "0.25.1-beta.1",
+      "compatible_edge": ">=0.25.0 <0.26.0"
+    }
+  },
+  "workshop_apps": {
+    "artifact_class": "user-application-package",
+    "versioning": "independent-semver",
+    "host_api": "riverbank.app-host/v1"
+  },
+  "compatibility": {
+    "edge_api": "riverbank.video-call/v1",
+    "workshop_host_api": "riverbank.app-host/v1"
+  }
+}

@@ -234,11 +234,12 @@ def build_daily_knowledge(
         prior_source = [
             item
             for item in prior.get("chunks", [])
-            if isinstance(item, dict) and item.get("source") == "arxiv_html"
+            if isinstance(item, dict)
+            and str(item.get("source", "")).startswith("arxiv_")
         ]
         if prior_source:
             chunks.extend(prior_source)
-            source_state = "arxiv_html"
+            source_state = clean_text(prior.get("source_state")) or "arxiv_html"
         elif fetch_full and paper.get("reading_depth") == "full" and arxiv_id:
             try:
                 source = read_temp_source(arxiv_id) or fetch_arxiv_source(arxiv_id, session)
@@ -249,7 +250,7 @@ def build_daily_knowledge(
                 time.sleep(0.8)
             except Exception as exc:  # The daily report must still publish if arXiv is unavailable.
                 source_error = clean_text(exc)[:500]
-        if source_state == "arxiv_html":
+        if source_state.startswith("arxiv_"):
             full_source_count += 1
         records[qa_id] = {
             "id": qa_id,
@@ -264,6 +265,9 @@ def build_daily_knowledge(
             "notes": structured_notes(paper),
             "chunks": chunks[:MAX_CHUNKS],
         }
+        prior_on_demand = prior.get("on_demand") if isinstance(prior, dict) else None
+        if prior_source and isinstance(prior_on_demand, dict):
+            records[qa_id]["on_demand"] = prior_on_demand
 
     payload = {
         "schema": SCHEMA,

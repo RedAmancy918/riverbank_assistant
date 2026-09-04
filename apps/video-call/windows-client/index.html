@@ -11,23 +11,75 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <section class="launch-view" id="launchView" aria-hidden="true">
+      <div class="launch-brand">
+        <div class="launch-mark">
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+        </div>
+        <div class="launch-wordmark">RiverBank CO., LTD</div>
+        <div class="launch-chinese">灰 度 流 动</div>
+      </div>
+    </section>
+
     <section class="login-view" id="loginView">
       <form class="login-card" id="loginForm">
         <img class="login-mark" src="assets/riverbank-mark.svg" alt="RiverBank" />
         <div class="login-heading">
           <p>RIVERBANK DEVICE ACCESS</p>
           <h1>连接小灰</h1>
-          <span>输入 Edge Host 和配对令牌，连接你的 RiverBank Edge 节点。</span>
+          <span>使用你的 RiverBank 账号登录。每位用户拥有独立的 Chat 和附件空间。</span>
+        </div>
+        <div class="auth-mode-tabs" role="tablist" aria-label="账号入口">
+          <button class="active" id="loginModeButton" type="button" role="tab" aria-selected="true">登录</button>
+          <button id="registerModeButton" type="button" role="tab" aria-selected="false">注册</button>
         </div>
         <label class="login-field">
-          <span>RiverBank Edge Host</span>
-          <input id="serverUrl" value="http://riverbank-tech:19734" spellcheck="false" autocomplete="url" />
+          <span>用户名</span>
+          <input id="accountUsername" autocomplete="username" spellcheck="false" />
         </label>
         <label class="login-field">
-          <span>配对令牌</span>
-          <input id="pairingToken" type="password" autocomplete="current-password" />
+          <span>密码</span>
+          <input id="accountPassword" type="password" autocomplete="current-password" />
         </label>
-        <button class="login-button" id="loginButton" type="submit">进入 RiverBank</button>
+        <div class="register-fields hidden" id="registerFields">
+          <label class="login-field">
+            <span>再次输入密码</span>
+            <input id="registerPasswordConfirmation" type="password" autocomplete="new-password" />
+          </label>
+          <label class="login-field">
+            <span>显示名称（可选）</span>
+            <input id="registerDisplayName" autocomplete="name" />
+          </label>
+          <label class="login-field">
+            <span>注册通行码</span>
+            <input id="registrationPasscode" type="password" autocomplete="one-time-code" />
+          </label>
+          <p class="register-guidance" id="registerGuidance"></p>
+        </div>
+        <button class="connection-settings-toggle" id="toggleHostSettings" type="button" aria-expanded="false">
+          连接设置
+        </button>
+        <div class="connection-settings hidden" id="hostSettings">
+          <label class="login-field">
+            <span>RiverBank Edge Host</span>
+            <input id="serverUrl" value="https://riverbank-tech.tail0acdab.ts.net/assistant" spellcheck="false" autocomplete="url" />
+          </label>
+          <p>仅在更换 Edge 设备或排查连接时需要修改。</p>
+        </div>
+        <div class="setup-fields hidden" id="setupFields">
+          <p>这是该设备的首次账号设置。创建的第一个账号将成为管理员，并接管已有聊天。</p>
+          <label class="login-field">
+            <span>显示名称（可选）</span>
+            <input id="accountDisplayName" autocomplete="name" />
+          </label>
+          <label class="login-field">
+            <span>一次性设备凭据</span>
+            <input id="setupCredential" type="password" autocomplete="one-time-code" />
+          </label>
+        </div>
+        <button class="login-button" id="loginButton" type="submit">登录</button>
         <p class="login-message" id="loginMessage">等待连接</p>
       </form>
     </section>
@@ -46,6 +98,7 @@
             <span class="status-dot"></span>
             <span id="connectionLabel">未通话</span>
           </div>
+          <button class="account-button" id="accountButton" type="button">账号</button>
           <button class="logout-button" id="logoutButton" type="button">登出</button>
         </div>
       </header>
@@ -91,7 +144,7 @@
                 type="file"
                 hidden
                 multiple
-                accept=".jpg,.jpeg,.png,.webp,.pdf,.md,.markdown,.txt,.csv,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv"
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.md,.markdown,.txt,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown"
               />
               <button class="chat-attach-button" id="chatAttach" type="button" aria-label="添加附件" title="添加附件">＋</button>
               <textarea id="chatInput" rows="1" placeholder="询问任何问题"></textarea>
@@ -118,14 +171,22 @@
         </section>
 
         <section class="controls">
-          <button class="round-control" id="muteButton" type="button" disabled>
-            <span class="icon">麦</span><span>静音</span>
+          <button class="round-control" id="muteButton" type="button" aria-label="静音" disabled>
+            <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+              <path d="M5.5 11.5v.5a6.5 6.5 0 0 0 13 0v-.5M12 18.5V22M8.5 22h7"></path>
+            </svg>
+            <span class="control-label">静音</span>
           </button>
           <button class="primary-control" id="connectButton" type="button">
             开始通话
           </button>
-          <button class="round-control" id="cameraButton" type="button" disabled>
-            <span class="icon">像</span><span>关闭画面</span>
+          <button class="round-control" id="cameraButton" type="button" aria-label="关闭摄像头" disabled>
+            <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="6" width="13" height="12" rx="3"></rect>
+              <path d="m16 10 5-3v10l-5-3z"></path>
+            </svg>
+            <span class="control-label">关闭摄像头</span>
           </button>
         </section>
         <section class="settings-grid call-device-settings">
@@ -178,6 +239,42 @@
         <button id="refreshDevices" type="button">刷新设备</button>
       </footer>
     </main>
+
+    <dialog class="account-dialog" id="accountDialog">
+      <div class="account-dialog-card">
+        <header>
+          <div>
+            <p>RIVERBANK ACCOUNT</p>
+            <h2 id="currentAccountName">账号</h2>
+            <span id="currentAccountMeta"></span>
+            <span id="desktopVersion">RiverBank Call</span>
+          </div>
+          <button id="closeAccountDialog" type="button" aria-label="关闭">×</button>
+        </header>
+        <section class="account-section">
+          <h3>修改密码</h3>
+          <form class="account-form" id="changePasswordForm">
+            <input id="currentPassword" type="password" placeholder="当前密码" autocomplete="current-password" />
+            <input id="newPassword" type="password" placeholder="新密码（至少 10 个字符）" autocomplete="new-password" />
+            <button type="submit">更新密码</button>
+          </form>
+        </section>
+        <section class="account-section hidden" id="adminUsersSection">
+          <div class="account-section-heading">
+            <div><h3>设备用户</h3><p>每个账号只能读取自己的 Chat 历史与附件。</p></div>
+          </div>
+          <div class="account-user-list" id="accountUserList"></div>
+          <form class="account-form create-user-form" id="createUserForm">
+            <input id="newUserUsername" placeholder="用户名" autocomplete="off" />
+            <input id="newUserDisplayName" placeholder="显示名称" autocomplete="off" />
+            <input id="newUserPassword" type="password" placeholder="初始密码（至少 10 个字符）" autocomplete="new-password" />
+            <select id="newUserRole"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+            <button type="submit">添加用户</button>
+          </form>
+        </section>
+        <p class="account-message" id="accountMessage"></p>
+      </div>
+    </dialog>
     <script src="renderer.js"></script>
   </body>
 </html>

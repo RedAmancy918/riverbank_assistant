@@ -1,11 +1,28 @@
 import SwiftUI
 
-private let riverCyan = Color(red: 0.337, green: 0.847, blue: 1.0)
+let riverCyan = Color(red: 0.337, green: 0.847, blue: 1.0)
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
 
     var body: some View {
+        Group {
+            if store.isRestoringSession {
+                ZStack {
+                    Color(red: 0.02, green: 0.055, blue: 0.075).ignoresSafeArea()
+                    ProgressView().tint(riverCyan)
+                }
+            } else if store.isAuthenticated {
+                authenticatedApp
+            } else {
+                LoginView()
+            }
+        }
+        .animation(.easeInOut(duration: 0.24), value: store.isAuthenticated)
+        .task { await store.restoreSession() }
+    }
+
+    private var authenticatedApp: some View {
         TabView {
             ChatView()
                 .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }

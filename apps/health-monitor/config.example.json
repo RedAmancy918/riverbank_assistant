@@ -273,6 +273,12 @@
       "target": "riverbank-workshop.service"
     },
     {
+      "id": "workshop-microphone-adapter",
+      "name": "工坊 PipeWire 麦克风适配器",
+      "type": "path",
+      "target": "/usr/bin/pw-cat"
+    },
+    {
       "id": "workshop-runtime",
       "name": "工坊受控运行时与提案队列",
       "type": "command",

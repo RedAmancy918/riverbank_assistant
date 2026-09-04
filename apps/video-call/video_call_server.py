@@ -15,6 +15,7 @@ import os
 import socket
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from fractions import Fraction
@@ -41,8 +42,21 @@ from attachment_store import (
     AttachmentStore,
     AttachmentValidationError,
 )
+from auth_store import (
+    DEFAULT_AUTH_DB,
+    DEFAULT_REGISTRATION_PASSCODE_FILE,
+    PASSWORD_MIN_CHARS,
+    AuthStore,
+    RegistrationPasscodeGate,
+    normalize_username,
+)
 from chat_store import DEFAULT_CHAT_DB, ChatStore
 from report_library import DEFAULT_REPORTS_DIR, REPORT_EXTENSIONS, ReportLibrary
+from task_artifact_store import (
+    DEFAULT_TASK_ARTIFACT_ROOT,
+    TaskArtifactError,
+    TaskArtifactStore,
+)
 from task_store import TaskStore
 
 
@@ -50,6 +64,26 @@ LOGGER = logging.getLogger("riverbank-video-call")
 SCHEMA = "riverbank.video-call/v1"
 EXPRESSION_SOCKET = Path("/run/riverbank-expression/control.sock")
 DEFAULT_TASK_DB = Path("/var/lib/riverbank-tasks/tasks.db")
+LEGACY_CHAT_OWNER = ""
+DEFAULT_INITIAL_ADMIN_USERNAME = "Geo"
+DEFAULT_ADMIN_WEB_ROOT = Path(__file__).resolve().parent / "admin-web"
+
+
+def request_peer_is_loopback(request: web.Request) -> bool:
+    transport = request.transport
+    peer = transport.get_extra_info("peername") if transport is not None else None
+    if not peer:
+        return False
+    try:
+        return ipaddress.ip_address(str(peer[0])).is_loopback
+    except ValueError:
+        return False
+
+
+def auth_transport_is_secure(request: web.Request) -> bool:
+    # Tailscale Serve terminates TLS locally before forwarding to this process.
+    # A loopback peer therefore remains trusted even when aiohttp sees plain HTTP.
+    return request.secure or request_peer_is_loopback(request)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -75,14 +109,7 @@ def is_loopback_request(request: web.Request) -> bool:
         )
     ):
         return False
-    transport = request.transport
-    peer = transport.get_extra_info("peername") if transport is not None else None
-    if not peer:
-        return False
-    try:
-        return ipaddress.ip_address(str(peer[0])).is_loopback
-    except ValueError:
-        return False
+    return request_peer_is_loopback(request)
 
 
 def send_expression_command(command: str, **payload: Any) -> bool:
@@ -399,9 +426,14 @@ class RiverBankVideoCallServer:
         video_width: int,
         video_height: int,
         reports_dir: Path = DEFAULT_REPORTS_DIR,
+        task_artifact_root: Path = DEFAULT_TASK_ARTIFACT_ROOT,
         task_db: Path = DEFAULT_TASK_DB,
         chat_db: Path = DEFAULT_CHAT_DB,
+        auth_db: Path = DEFAULT_AUTH_DB,
+        registration_passcode_file: Path = DEFAULT_REGISTRATION_PASSCODE_FILE,
+        initial_admin_username: str = DEFAULT_INITIAL_ADMIN_USERNAME,
         attachment_root: Path = DEFAULT_ATTACHMENT_ROOT,
+        admin_web_root: Path = DEFAULT_ADMIN_WEB_ROOT,
     ) -> None:
         if len(token) < 16:
             raise ValueError("pairing token must contain at least 16 characters")
@@ -413,23 +445,130 @@ class RiverBankVideoCallServer:
         self.video_width = video_width
         self.video_height = video_height
         self.report_library = ReportLibrary(reports_dir)
+        self.task_artifact_store = TaskArtifactStore(task_artifact_root)
         self.task_store = TaskStore(task_db)
         self.chat_store = ChatStore(chat_db)
+        self.auth_store = AuthStore(auth_db)
+        self.registration_gate = RegistrationPasscodeGate(
+            registration_passcode_file
+        )
+        self.initial_admin_username = normalize_username(
+            initial_admin_username
+        )[0]
         self.attachment_store = AttachmentStore(attachment_root)
+        self.admin_web_root = Path(admin_web_root).resolve()
         self.started_at = time.time()
         self.waiting = False
         self.session: CallSession | None = None
         self.remote_video_sink = RemoteVideoSink()
         self.last_error: str | None = None
         self._closing = False
+        self._login_failures: dict[str, deque[float]] = {}
         self.write_state()
 
-    def authorized(self, request: web.Request) -> bool:
+    @staticmethod
+    def bearer_token(request: web.Request) -> str:
         header = request.headers.get("Authorization", "")
-        supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        return bool(supplied) and hmac.compare_digest(supplied, self.token)
+        return header[7:].strip() if header.lower().startswith("bearer ") else ""
 
-    def state(self) -> dict[str, Any]:
+    def principal(self, request: web.Request) -> dict[str, Any] | None:
+        cached = request.get("riverbank_principal")
+        if cached is not None:
+            return cached
+        supplied = self.bearer_token(request)
+        session = self.auth_store.session_for_token(supplied) if supplied else None
+        if session is not None:
+            if not auth_transport_is_secure(request):
+                return None
+            user = session["user"]
+            principal = {
+                "kind": "user",
+                "session_id": session["session_id"],
+                "expires_at": session["expires_at"],
+                "user": user,
+                "chat_owner_id": user["id"],
+            }
+            request["riverbank_principal"] = principal
+            return principal
+        if supplied and hmac.compare_digest(supplied, self.token):
+            # Transitional device credential. It remains valid for embedded and
+            # local integrations, but it cannot see account-owned conversations.
+            principal = {
+                "kind": "legacy-device",
+                "session_id": "",
+                "expires_at": None,
+                "user": {
+                    "id": LEGACY_CHAT_OWNER,
+                    "username": "device",
+                    "display_name": "RiverBank Edge",
+                    "role": "service",
+                    "disabled": False,
+                },
+                "chat_owner_id": LEGACY_CHAT_OWNER,
+            }
+            request["riverbank_principal"] = principal
+            return principal
+        return None
+
+    def authorized(self, request: web.Request) -> bool:
+        return self.principal(request) is not None
+
+    def require_principal(self, request: web.Request) -> dict[str, Any]:
+        principal = self.principal(request)
+        if principal is None:
+            raise web.HTTPUnauthorized(text="sign in required")
+        return principal
+
+    def require_user(self, request: web.Request) -> dict[str, Any]:
+        principal = self.require_principal(request)
+        if principal["kind"] != "user":
+            raise web.HTTPForbidden(text="a RiverBank user account is required")
+        return principal
+
+    def require_admin(self, request: web.Request) -> dict[str, Any]:
+        principal = self.require_user(request)
+        if principal["user"]["role"] != "admin":
+            raise web.HTTPForbidden(text="administrator access required")
+        return principal
+
+    def require_chat_principal(self, request: web.Request) -> dict[str, Any]:
+        principal = self.require_principal(request)
+        if principal["kind"] == "user":
+            return principal
+        # The daily paper Q&A proxy is a loopback-only service account. Shared
+        # device credentials presented by remote clients never grant Chat access.
+        if principal["kind"] == "legacy-device" and is_loopback_request(request):
+            return principal
+        raise web.HTTPForbidden(text="a RiverBank user account is required for Chat")
+
+    def login_rate_key(self, request: web.Request, username: Any) -> str:
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        address = str(peer[0]) if peer else "unknown"
+        return f"{address}:{str(username or '').strip().casefold()[:64]}"
+
+    def login_is_limited(self, key: str) -> bool:
+        attempts = self._login_failures.get(key)
+        if attempts is None:
+            return False
+        cutoff = time.monotonic() - 600
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+        return len(attempts) >= 5
+
+    def record_login_failure(self, key: str) -> None:
+        if key not in self._login_failures and len(self._login_failures) >= 2048:
+            # Bound unauthenticated memory even when an attacker rotates names.
+            oldest_key = min(
+                self._login_failures,
+                key=lambda item: self._login_failures[item][-1],
+            )
+            self._login_failures.pop(oldest_key, None)
+        self._login_failures.setdefault(key, deque()).append(time.monotonic())
+
+    def clear_login_failures(self, key: str) -> None:
+        self._login_failures.pop(key, None)
+
+    def state(self, principal: dict[str, Any] | None = None) -> dict[str, Any]:
         session = self.session
         latest_age = (
             max(0.0, time.monotonic() - self.remote_video_sink.latest_at)
@@ -472,14 +611,34 @@ class RiverBankVideoCallServer:
             "tasks": {
                 "available": True,
                 "persistent": True,
-                "counts": self.task_store.counts(),
+                "counts": self.task_store.counts(
+                    owner_user_id=(
+                        principal["chat_owner_id"] if principal is not None else None
+                    )
+                ),
             },
             "chat": {
                 "available": True,
                 "persistent": True,
                 "attachments": True,
-                "conversation_count": len(self.chat_store.list_conversations(limit=200)),
+                "conversation_count": len(
+                    self.chat_store.list_conversations(
+                        limit=200,
+                        owner_user_id=(
+                            principal["chat_owner_id"] if principal is not None else None
+                        ),
+                    )
+                ),
             },
+            "account": (
+                {
+                    "user": principal["user"],
+                    "session_expires_at": principal["expires_at"],
+                    "legacy_device_credential": principal["kind"] == "legacy-device",
+                }
+                if principal is not None
+                else None
+            ),
             "last_error": self.last_error,
             "updated_at": time.time(),
         }
@@ -640,17 +799,420 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         response.headers["Access-Control-Allow-Headers"] = (
             "Authorization, Content-Type, Idempotency-Key"
         )
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = (
+            "GET, POST, PATCH, DELETE, OPTIONS"
+        )
         response.headers["Access-Control-Expose-Headers"] = (
             "Content-Disposition, Content-Length, Content-Type"
         )
         response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if request.path == "/admin" or request.path.startswith("/admin/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+                "base-uri 'none'; form-action 'self'"
+            )
+            response.headers["X-Frame-Options"] = "DENY"
         return response
 
     app = web.Application(
         middlewares=[middleware],
         client_max_size=32 * 1024 * 1024,
     )
+
+    async def json_object(request: web.Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise web.HTTPBadRequest(text="JSON object required") from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="JSON object required")
+        return payload
+
+    def require_secure_auth_transport(request: web.Request) -> None:
+        if not auth_transport_is_secure(request):
+            raise web.HTTPUpgradeRequired(
+                text="account credentials require HTTPS"
+            )
+
+    async def auth_config(_request: web.Request) -> web.Response:
+        configured = await asyncio.to_thread(server.auth_store.has_users)
+        registration_enabled = await asyncio.to_thread(
+            server.registration_gate.enabled
+        )
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-config/v1",
+                "configured": configured,
+                "bootstrap_required": not configured,
+                "registration_enabled": registration_enabled,
+                "initial_admin_username": (
+                    server.initial_admin_username if not configured else ""
+                ),
+                "password_min_chars": PASSWORD_MIN_CHARS,
+                "session_days": 30,
+            }
+        )
+
+    async def auth_bootstrap(request: web.Request) -> web.Response:
+        require_secure_auth_transport(request)
+        if await asyncio.to_thread(server.auth_store.has_users):
+            raise web.HTTPConflict(text="RiverBank account setup is already complete")
+        supplied = server.bearer_token(request)
+        if not supplied or not hmac.compare_digest(supplied, server.token):
+            raise web.HTTPUnauthorized(text="one-time device credential required")
+        payload = await json_object(request)
+        try:
+            supplied_username = normalize_username(payload.get("username"))[1]
+            initial_admin_username = normalize_username(
+                server.initial_admin_username
+            )[1]
+            if supplied_username != initial_admin_username:
+                raise RuntimeError(
+                    f"the first administrator account must be {server.initial_admin_username}"
+                )
+            user = await asyncio.to_thread(
+                server.auth_store.create_user,
+                username=payload.get("username"),
+                password=payload.get("password"),
+                display_name=payload.get("display_name", ""),
+                role="admin",
+                only_if_empty=True,
+            )
+            claimed = await asyncio.to_thread(
+                server.chat_store.claim_unowned_conversations,
+                user["id"],
+            )
+            claimed_tasks = await asyncio.to_thread(
+                server.task_store.claim_unowned_tasks,
+                user["id"],
+            )
+            authenticated = await asyncio.to_thread(
+                server.auth_store.authenticate,
+                username=payload.get("username"),
+                password=payload.get("password"),
+                device_name=payload.get("device_name", "First setup"),
+            )
+        except RuntimeError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        if authenticated is None:
+            raise web.HTTPInternalServerError(text="account setup could not be completed")
+        user, token, expires_at = authenticated
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-session/v1",
+                "token": token,
+                "expires_at": expires_at,
+                "user": user,
+                "claimed_legacy_conversations": claimed,
+                "claimed_legacy_tasks": claimed_tasks,
+            },
+            status=201,
+        )
+
+    async def auth_login(request: web.Request) -> web.Response:
+        require_secure_auth_transport(request)
+        payload = await json_object(request)
+        rate_key = server.login_rate_key(request, payload.get("username"))
+        if server.login_is_limited(rate_key):
+            raise web.HTTPTooManyRequests(
+                text="too many sign-in attempts; wait ten minutes and try again",
+                headers={"Retry-After": "600"},
+            )
+        authenticated = await asyncio.to_thread(
+            server.auth_store.authenticate,
+            username=payload.get("username"),
+            password=payload.get("password"),
+            device_name=payload.get("device_name", ""),
+        )
+        if authenticated is None:
+            server.record_login_failure(rate_key)
+            raise web.HTTPUnauthorized(text="invalid username or password")
+        server.clear_login_failures(rate_key)
+        user, token, expires_at = authenticated
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-session/v1",
+                "token": token,
+                "expires_at": expires_at,
+                "user": user,
+            }
+        )
+
+    async def auth_register(request: web.Request) -> web.Response:
+        require_secure_auth_transport(request)
+        payload = await json_object(request)
+        rate_key = server.login_rate_key(
+            request,
+            f"register:{payload.get('username', '')}",
+        )
+        if server.login_is_limited(rate_key):
+            raise web.HTTPTooManyRequests(
+                text="too many registration attempts; wait ten minutes and try again",
+                headers={"Retry-After": "600"},
+            )
+        if not await asyncio.to_thread(server.registration_gate.enabled):
+            raise web.HTTPForbidden(text="account registration is disabled")
+        allowed = await asyncio.to_thread(
+            server.registration_gate.verify,
+            payload.get("registration_passcode"),
+        )
+        if not allowed:
+            server.record_login_failure(rate_key)
+            raise web.HTTPUnauthorized(text="invalid registration passcode")
+        try:
+            configured = await asyncio.to_thread(server.auth_store.has_users)
+            supplied_username = normalize_username(payload.get("username"))[1]
+            initial_admin_username = normalize_username(
+                server.initial_admin_username
+            )[1]
+            if not configured and supplied_username != initial_admin_username:
+                raise RuntimeError(
+                    f"the first administrator account must be {server.initial_admin_username}"
+                )
+            user = await asyncio.to_thread(
+                server.auth_store.create_user,
+                username=payload.get("username"),
+                password=payload.get("password"),
+                display_name=payload.get("display_name", ""),
+                role="user",
+                admin_if_empty=True,
+            )
+            claimed = 0
+            claimed_tasks = 0
+            if user["role"] == "admin":
+                claimed = await asyncio.to_thread(
+                    server.chat_store.claim_unowned_conversations,
+                    user["id"],
+                )
+                claimed_tasks = await asyncio.to_thread(
+                    server.task_store.claim_unowned_tasks,
+                    user["id"],
+                )
+            authenticated = await asyncio.to_thread(
+                server.auth_store.authenticate,
+                username=payload.get("username"),
+                password=payload.get("password"),
+                device_name=payload.get("device_name", "Registration"),
+            )
+        except RuntimeError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        if authenticated is None:
+            raise web.HTTPInternalServerError(text="registered account could not sign in")
+        server.clear_login_failures(rate_key)
+        user, token, expires_at = authenticated
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-session/v1",
+                "token": token,
+                "expires_at": expires_at,
+                "user": user,
+                "claimed_legacy_conversations": claimed,
+                "claimed_legacy_tasks": claimed_tasks,
+            },
+            status=201,
+        )
+
+    async def auth_me(request: web.Request) -> web.Response:
+        principal = server.require_user(request)
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-user/v1",
+                "user": principal["user"],
+                "expires_at": principal["expires_at"],
+            }
+        )
+
+    async def auth_logout(request: web.Request) -> web.Response:
+        principal = server.require_user(request)
+        await asyncio.to_thread(
+            server.auth_store.revoke_session,
+            principal["session_id"],
+        )
+        return web.json_response({"ok": True})
+
+    async def auth_change_password(request: web.Request) -> web.Response:
+        principal = server.require_user(request)
+        payload = await json_object(request)
+        try:
+            await asyncio.to_thread(
+                server.auth_store.change_password,
+                user_id=principal["user"]["id"],
+                current_password=payload.get("current_password"),
+                new_password=payload.get("new_password"),
+                keep_session_id=principal["session_id"],
+            )
+        except PermissionError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response({"ok": True})
+
+    async def auth_users(request: web.Request) -> web.Response:
+        server.require_admin(request)
+        users = await asyncio.to_thread(server.auth_store.list_users)
+        return web.json_response(
+            {
+                "schema": "riverbank.auth-users/v1",
+                "count": len(users),
+                "users": users,
+            }
+        )
+
+    async def auth_create_user(request: web.Request) -> web.Response:
+        server.require_admin(request)
+        payload = await json_object(request)
+        try:
+            user = await asyncio.to_thread(
+                server.auth_store.create_user,
+                username=payload.get("username"),
+                password=payload.get("password"),
+                display_name=payload.get("display_name", ""),
+                role=payload.get("role", "user"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        return web.json_response(
+            {"schema": "riverbank.auth-user/v1", "user": user},
+            status=201,
+        )
+
+    async def auth_update_user(request: web.Request) -> web.Response:
+        principal = server.require_admin(request)
+        payload = await json_object(request)
+        target_id = request.match_info["user_id"]
+        if not any(field in payload for field in ("role", "disabled")):
+            raise web.HTTPBadRequest(text="role or disabled is required")
+        user = await asyncio.to_thread(server.auth_store.get_user, target_id)
+        if user is None:
+            raise web.HTTPNotFound(text="user not found")
+        try:
+            if "role" in payload:
+                user = await asyncio.to_thread(
+                    server.auth_store.set_user_role,
+                    target_id,
+                    payload["role"],
+                )
+            if "disabled" in payload:
+                if not isinstance(payload["disabled"], bool):
+                    raise ValueError("disabled must be a boolean")
+                if target_id == principal["user"]["id"] and payload["disabled"]:
+                    raise RuntimeError("you cannot disable your own account")
+                user = await asyncio.to_thread(
+                    server.auth_store.set_user_disabled,
+                    target_id,
+                    payload["disabled"],
+                )
+        except RuntimeError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        assert user is not None
+        return web.json_response(
+            {"schema": "riverbank.auth-user/v1", "user": user}
+        )
+
+    async def admin_users(request: web.Request) -> web.Response:
+        server.require_admin(request)
+        users = await asyncio.to_thread(server.auth_store.list_users)
+        sessions = await asyncio.to_thread(server.auth_store.active_session_counts)
+        records = []
+        for user in users:
+            chat = await asyncio.to_thread(server.chat_store.owner_usage, user["id"])
+            tasks_for_user = await asyncio.to_thread(
+                server.task_store.counts,
+                owner_user_id=user["id"],
+            )
+            records.append(
+                {
+                    **user,
+                    "active_sessions": sessions.get(user["id"], 0),
+                    "chat": chat,
+                    "tasks": tasks_for_user,
+                }
+            )
+        return web.json_response(
+            {
+                "schema": "riverbank.admin-users/v1",
+                "count": len(records),
+                "users": records,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def admin_revoke_sessions(request: web.Request) -> web.Response:
+        principal = server.require_admin(request)
+        target_id = request.match_info["user_id"]
+        if await asyncio.to_thread(server.auth_store.get_user, target_id) is None:
+            raise web.HTTPNotFound(text="user not found")
+        if target_id == principal["user"]["id"]:
+            raise web.HTTPConflict(text="use sign out to end your current admin session")
+        revoked = await asyncio.to_thread(
+            server.auth_store.revoke_user_sessions,
+            target_id,
+        )
+        return web.json_response({"ok": True, "revoked_sessions": revoked})
+
+    async def admin_clear_cache(request: web.Request) -> web.Response:
+        server.require_admin(request)
+        target_id = request.match_info["user_id"]
+        if await asyncio.to_thread(server.auth_store.get_user, target_id) is None:
+            raise web.HTTPNotFound(text="user not found")
+        try:
+            result = await asyncio.to_thread(
+                server.chat_store.delete_owner_cache,
+                target_id,
+            )
+        except RuntimeError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        attachment_records = result.pop("attachment_records")
+        await asyncio.to_thread(
+            server.attachment_store.delete_records,
+            attachment_records,
+        )
+        return web.json_response({"ok": True, **result})
+
+    async def admin_clear_tasks(request: web.Request) -> web.Response:
+        server.require_admin(request)
+        target_id = request.match_info["user_id"]
+        if await asyncio.to_thread(server.auth_store.get_user, target_id) is None:
+            raise web.HTTPNotFound(text="user not found")
+        try:
+            result = await asyncio.to_thread(
+                server.task_store.delete_owner_tasks,
+                target_id,
+            )
+        except RuntimeError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        artifact_task_ids = result.pop("artifact_task_ids", [])
+        result["deleted_artifact_directories"] = await asyncio.to_thread(
+            server.task_artifact_store.delete_tasks,
+            artifact_task_ids,
+        )
+        return web.json_response({"ok": True, **result})
+
+    async def admin_page(request: web.Request) -> web.StreamResponse:
+        if not request.path.endswith("/"):
+            raise web.HTTPPermanentRedirect(location="./admin/")
+        path = server.admin_web_root / "index.html"
+        if not path.is_file():
+            raise web.HTTPNotFound(text="admin console is not installed")
+        return web.FileResponse(path)
+
+    async def admin_asset(request: web.Request) -> web.StreamResponse:
+        name = request.match_info["name"]
+        if name not in {"app.js", "styles.css"}:
+            raise web.HTTPNotFound()
+        path = server.admin_web_root / name
+        if not path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path)
 
     async def healthz(_request: web.Request) -> web.Response:
         state = server.state()
@@ -665,28 +1227,22 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 "reports": True,
                 "reports_available": server.report_library.root.is_dir(),
                 "tasks": True,
-                "task_counts": await asyncio.to_thread(server.task_store.counts),
                 "chat": True,
                 "chat_attachments": True,
-                "chat_conversation_count": len(
-                    await asyncio.to_thread(
-                        server.chat_store.list_conversations,
-                        limit=200,
-                    )
+                "accounts_configured": await asyncio.to_thread(
+                    server.auth_store.has_users
                 ),
             }
         )
 
     async def status(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
-        return web.json_response(server.state())
+        principal = server.require_principal(request)
+        return web.json_response(server.state(principal))
 
     async def activate(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         await server.activate()
-        return web.json_response({"ok": True, "state": server.state()})
+        return web.json_response({"ok": True, "state": server.state(principal)})
 
     async def offer(request: web.Request) -> web.Response:
         if not server.authorized(request):
@@ -709,13 +1265,20 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         return web.Response(body=payload, content_type="image/jpeg")
 
     async def reports(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         try:
             limit = int(request.query.get("limit", "200"))
         except ValueError:
             raise web.HTTPBadRequest(text="invalid report limit")
         records = await asyncio.to_thread(server.report_library.list_reports, limit)
+        owners = await asyncio.to_thread(server.task_store.report_owners)
+        owner_user_id = principal["chat_owner_id"]
+        records = [
+            record
+            for record in records
+            if not owners.get(record["id"])
+            or owner_user_id in owners[record["id"]]
+        ]
         return web.json_response(
             {
                 "schema": "riverbank.reports/v1",
@@ -727,12 +1290,17 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def report_content(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
+        report_id = request.match_info["report_id"]
+        owners = (await asyncio.to_thread(server.task_store.report_owners)).get(
+            report_id, set()
+        )
+        if owners and principal["chat_owner_id"] not in owners:
+            raise web.HTTPNotFound(text="report not found")
         try:
             path, content = await asyncio.to_thread(
                 server.report_library.read_report,
-                request.match_info["report_id"],
+                report_id,
             )
         except FileNotFoundError:
             raise web.HTTPNotFound(text="report not found")
@@ -751,10 +1319,15 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def report_download(request: web.Request) -> web.StreamResponse:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
+        report_id = request.match_info["report_id"]
+        owners = (await asyncio.to_thread(server.task_store.report_owners)).get(
+            report_id, set()
+        )
+        if owners and principal["chat_owner_id"] not in owners:
+            raise web.HTTPNotFound(text="report not found")
         try:
-            path = server.report_library.resolve(request.match_info["report_id"])
+            path = server.report_library.resolve(report_id)
         except FileNotFoundError:
             raise web.HTTPNotFound(text="report not found")
         except ValueError as exc:
@@ -767,8 +1340,7 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         return response
 
     async def tasks(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         try:
             limit = int(request.query.get("limit", "100"))
             status_filter = request.query.get("status", "").strip()
@@ -776,6 +1348,7 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 server.task_store.list_tasks,
                 limit=limit,
                 status=status_filter,
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -784,14 +1357,16 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 "schema": "riverbank.tasks/v1",
                 "count": len(records),
                 "tasks": records,
-                "counts": await asyncio.to_thread(server.task_store.counts),
+                "counts": await asyncio.to_thread(
+                    server.task_store.counts,
+                    owner_user_id=principal["chat_owner_id"],
+                ),
                 "updated_at": time.time(),
             }
         )
 
     async def create_task(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         try:
             payload = await request.json()
             if not isinstance(payload, dict):
@@ -805,9 +1380,11 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 prompt=payload.get("prompt"),
                 title=payload.get("title", ""),
                 kind=payload.get("kind", "research"),
+                output_format=payload.get("output_format", "text"),
                 source=payload.get("source", "api"),
                 device_name=payload.get("device_name", ""),
                 idempotency_key=idempotency_key,
+                owner_user_id=principal["chat_owner_id"],
             )
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -821,12 +1398,12 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def task_detail(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         try:
             record = await asyncio.to_thread(
                 server.task_store.get_task,
                 request.match_info["task_id"],
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -834,9 +1411,40 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
             raise web.HTTPNotFound(text="task not found")
         return web.json_response({"schema": "riverbank.task/v1", "task": record})
 
+    async def task_artifact(request: web.Request) -> web.StreamResponse:
+        principal = server.require_principal(request)
+        try:
+            record = await asyncio.to_thread(
+                server.task_store.get_task,
+                request.match_info["task_id"],
+                owner_user_id=principal["chat_owner_id"],
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if record is None:
+            raise web.HTTPNotFound(text="task not found")
+        filename = str(record.get("artifact_filename") or "")
+        if not filename:
+            raise web.HTTPNotFound(text="task has no generated file")
+        try:
+            path = server.task_artifact_store.resolve(record["id"], filename)
+        except FileNotFoundError:
+            raise web.HTTPNotFound(text="generated file not found")
+        except TaskArtifactError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        response = web.FileResponse(path)
+        response.content_type = str(record.get("artifact_media_type") or "").strip() or (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
+        disposition = "inline" if response.content_type.startswith("image/") else "attachment"
+        response.headers["Content-Disposition"] = (
+            f"{disposition}; filename*=UTF-8''{quote(path.name)}"
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
     async def answer_task(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         try:
             payload = await request.json()
             if not isinstance(payload, dict):
@@ -845,6 +1453,7 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 server.task_store.answer,
                 request.match_info["task_id"],
                 payload.get("answer"),
+                owner_user_id=principal["chat_owner_id"],
             )
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -853,25 +1462,25 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         return web.json_response({"schema": "riverbank.task/v1", "task": record})
 
     async def cancel_task(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_principal(request)
         record = await asyncio.to_thread(
             server.task_store.request_cancel,
             request.match_info["task_id"],
+            owner_user_id=principal["chat_owner_id"],
         )
         if record is None:
             raise web.HTTPNotFound(text="task not found")
         return web.json_response({"schema": "riverbank.task/v1", "task": record})
 
     async def chat_conversations(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         try:
             limit = int(request.query.get("limit", "100"))
             records = await asyncio.to_thread(
                 server.chat_store.list_conversations,
                 limit=limit,
                 include_internal=request.query.get("include_internal", "") == "1",
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -885,14 +1494,14 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def create_chat_conversation(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         try:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise ValueError("JSON object required")
             conversation = await asyncio.to_thread(
                 server.chat_store.create_conversation,
+                owner_user_id=principal["chat_owner_id"],
                 title=payload.get("title", ""),
                 source=payload.get("source", "api"),
                 device_name=payload.get("device_name", ""),
@@ -905,19 +1514,20 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def delete_chat_conversation(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         conversation_id = request.match_info["conversation_id"]
         try:
             messages = await asyncio.to_thread(
                 server.chat_store.list_messages,
                 conversation_id,
+                owner_user_id=principal["chat_owner_id"],
             )
             if any(item["state"] in {"queued", "running"} for item in messages):
                 raise web.HTTPConflict(text="stop the active response before deleting")
             deleted = await asyncio.to_thread(
                 server.chat_store.delete_conversation,
                 conversation_id,
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -930,19 +1540,20 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         return web.json_response({"ok": True, "deleted": conversation_id})
 
     async def chat_messages(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         conversation_id = request.match_info["conversation_id"]
         try:
             conversation = await asyncio.to_thread(
                 server.chat_store.get_conversation,
                 conversation_id,
+                owner_user_id=principal["chat_owner_id"],
             )
             if conversation is None:
                 raise web.HTTPNotFound(text="conversation not found")
             records = await asyncio.to_thread(
                 server.chat_store.list_messages,
                 conversation_id,
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -957,11 +1568,17 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def create_chat_message(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         conversation_id = request.match_info["conversation_id"]
         saved_attachments: list[dict[str, Any]] = []
         try:
+            conversation = await asyncio.to_thread(
+                server.chat_store.get_conversation,
+                conversation_id,
+                owner_user_id=principal["chat_owner_id"],
+            )
+            if conversation is None:
+                raise web.HTTPNotFound(text="conversation not found")
             if request.content_type.startswith("multipart/"):
                 reader = await request.multipart()
                 content = ""
@@ -1008,6 +1625,7 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
                 conversation_id,
                 content=content,
                 attachments=saved_attachments,
+                owner_user_id=principal["chat_owner_id"],
             )
         except KeyError:
             await asyncio.to_thread(
@@ -1037,14 +1655,14 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         )
 
     async def chat_attachment(request: web.Request) -> web.StreamResponse:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         try:
             attachment = await asyncio.to_thread(
                 server.chat_store.get_attachment,
                 request.match_info["conversation_id"],
                 request.match_info["attachment_id"],
                 include_private=True,
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -1067,12 +1685,12 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         return response
 
     async def cancel_chat_message(request: web.Request) -> web.Response:
-        if not server.authorized(request):
-            raise web.HTTPUnauthorized(text="pairing token required")
+        principal = server.require_chat_principal(request)
         try:
             message = await asyncio.to_thread(
                 server.chat_store.request_cancel,
                 request.match_info["message_id"],
+                owner_user_id=principal["chat_owner_id"],
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
@@ -1086,6 +1704,29 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
         await server.shutdown()
 
     app.router.add_get("/healthz", healthz)
+    app.router.add_get("/api/v1/auth/config", auth_config)
+    app.router.add_post("/api/v1/auth/bootstrap", auth_bootstrap)
+    app.router.add_post("/api/v1/auth/login", auth_login)
+    app.router.add_post("/api/v1/auth/register", auth_register)
+    app.router.add_get("/api/v1/auth/me", auth_me)
+    app.router.add_post("/api/v1/auth/logout", auth_logout)
+    app.router.add_post("/api/v1/auth/change-password", auth_change_password)
+    app.router.add_get("/api/v1/auth/users", auth_users)
+    app.router.add_post("/api/v1/auth/users", auth_create_user)
+    app.router.add_patch("/api/v1/auth/users/{user_id}", auth_update_user)
+    app.router.add_get("/api/v1/admin/users", admin_users)
+    app.router.add_post(
+        "/api/v1/admin/users/{user_id}/revoke-sessions", admin_revoke_sessions
+    )
+    app.router.add_delete(
+        "/api/v1/admin/users/{user_id}/cache", admin_clear_cache
+    )
+    app.router.add_delete(
+        "/api/v1/admin/users/{user_id}/tasks", admin_clear_tasks
+    )
+    app.router.add_get("/admin", admin_page)
+    app.router.add_get("/admin/", admin_page)
+    app.router.add_get("/admin/{name}", admin_asset)
     app.router.add_get("/api/v1/status", status)
     app.router.add_post("/api/v1/activate", activate)
     app.router.add_post("/api/v1/offer", offer)
@@ -1097,6 +1738,7 @@ def create_app(server: RiverBankVideoCallServer) -> web.Application:
     app.router.add_get("/api/v1/tasks", tasks)
     app.router.add_post("/api/v1/tasks", create_task)
     app.router.add_get("/api/v1/tasks/{task_id}", task_detail)
+    app.router.add_get("/api/v1/tasks/{task_id}/artifact", task_artifact)
     app.router.add_post("/api/v1/tasks/{task_id}/answer", answer_task)
     app.router.add_post("/api/v1/tasks/{task_id}/cancel", cancel_task)
     app.router.add_get("/api/v1/chats", chat_conversations)
@@ -1163,6 +1805,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REPORTS_DIR,
     )
     parser.add_argument(
+        "--task-artifact-root",
+        type=Path,
+        default=DEFAULT_TASK_ARTIFACT_ROOT,
+    )
+    parser.add_argument(
         "--task-db",
         type=Path,
         default=DEFAULT_TASK_DB,
@@ -1173,9 +1820,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CHAT_DB,
     )
     parser.add_argument(
+        "--auth-db",
+        type=Path,
+        default=DEFAULT_AUTH_DB,
+    )
+    parser.add_argument(
+        "--registration-passcode-file",
+        type=Path,
+        default=DEFAULT_REGISTRATION_PASSCODE_FILE,
+    )
+    parser.add_argument(
+        "--initial-admin-username",
+        default=os.environ.get(
+            "RIVERBANK_INITIAL_ADMIN_USERNAME",
+            DEFAULT_INITIAL_ADMIN_USERNAME,
+        ),
+    )
+    parser.add_argument(
         "--attachment-root",
         type=Path,
         default=DEFAULT_ATTACHMENT_ROOT,
+    )
+    parser.add_argument(
+        "--admin-web-root",
+        type=Path,
+        default=DEFAULT_ADMIN_WEB_ROOT,
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -1203,11 +1872,19 @@ def main() -> int:
                     "video_size": [args.video_width, args.video_height],
                     "scope": "LAN-or-tailnet",
                     "reports_dir": str(args.reports_dir),
+                    "task_artifact_root": str(args.task_artifact_root),
                     "task_db": str(args.task_db),
                     "chat_db": str(args.chat_db),
                     "chat": True,
+                    "auth_db": str(args.auth_db),
+                    "multi_user_accounts": True,
+                    "registration_passcode_file": str(
+                        args.registration_passcode_file
+                    ),
+                    "initial_admin_username": args.initial_admin_username,
                     "attachment_root": str(args.attachment_root),
                     "chat_attachments": True,
+                    "admin_web_root": str(args.admin_web_root),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -1224,9 +1901,14 @@ def main() -> int:
         video_width=max(320, min(args.video_width, 1280)),
         video_height=max(180, min(args.video_height, 720)),
         reports_dir=args.reports_dir,
+        task_artifact_root=args.task_artifact_root,
         task_db=args.task_db,
         chat_db=args.chat_db,
+        auth_db=args.auth_db,
+        registration_passcode_file=args.registration_passcode_file,
+        initial_admin_username=args.initial_admin_username,
         attachment_root=args.attachment_root,
+        admin_web_root=args.admin_web_root,
     )
     app = create_app(server)
     web.run_app(

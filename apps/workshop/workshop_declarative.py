@@ -21,6 +21,13 @@ MAX_PIPELINE_NODES = 12
 SOURCE_FIELDS: dict[str, set[str]] = {
     "app.lifecycle.foreground": {"source"},
     "camera.stream": {"source", "leaseSeconds", "privacyIndicator"},
+    "microphone.stream": {
+        "source",
+        "leaseSeconds",
+        "sampleRate",
+        "frameMilliseconds",
+        "privacyIndicator",
+    },
     "timer.interval": {"source", "seconds", "repeat"},
 }
 OPERATOR_FIELDS: dict[str, set[str]] = {
@@ -31,7 +38,8 @@ OPERATOR_FIELDS: dict[str, set[str]] = {
         "minimumConfidence",
         "maximumFps",
     },
-    "counter.increment": {"operator", "key", "whenClass"},
+    "audio.level": {"operator", "minimumDbfs", "holdMilliseconds"},
+    "counter.increment": {"operator", "key", "whenClass", "whenSound"},
     "text.compose": {"operator", "template"},
     "assistant.query": {"operator", "prompt"},
 }
@@ -44,6 +52,7 @@ SINK_FIELDS: dict[str, set[str]] = {
 
 NODE_CAPABILITY: dict[tuple[str, str], str] = {
     ("source", "camera.stream"): "camera.stream",
+    ("source", "microphone.stream"): "microphone.stream",
     ("operator", "vision.detect"): "vision.inference",
     ("operator", "counter.increment"): "storage.app",
     ("operator", "assistant.query"): "assistant.query",
@@ -57,6 +66,7 @@ CAPABILITY_REASON = {
     "ui.surface": "在圆屏显示这个应用的受控界面。",
     "storage.app": "只在该应用自己的私有目录保存状态。",
     "camera.stream": "应用位于前台时读取 Camera Hub 画面。",
+    "microphone.stream": "应用位于前台时读取不落盘的麦克风音量分析流。",
     "vision.inference": "调用宿主白名单视觉模型进行推理。",
     "notifications.local": "在设备本地显示限频提示。",
     "assistant.query": "在用户可见会话中请求 Daily 助手处理内容。",
@@ -152,6 +162,48 @@ def _validate_source(node: Mapping[str, Any], index: int) -> dict[str, Any]:
                 "privacyIndicator": True,
             }
         )
+    elif name == "microphone.stream":
+        if node.get("privacyIndicator") is not True:
+            raise ContractError(
+                "privacy_indicator_required",
+                "麦克风数据源必须持续显示隐私指示。",
+                f"{field}.privacyIndicator",
+            )
+        sample_rate = node.get("sampleRate", 16000)
+        if isinstance(sample_rate, bool) or sample_rate not in {16000, 48000}:
+            raise ContractError(
+                "invalid_microphone_sample_rate",
+                "麦克风采样率只允许 16000 或 48000 Hz。",
+                f"{field}.sampleRate",
+            )
+        frame_milliseconds = node.get("frameMilliseconds", 100)
+        if (
+            isinstance(frame_milliseconds, bool)
+            or not isinstance(frame_milliseconds, int)
+            or frame_milliseconds < 20
+            or frame_milliseconds > 500
+        ):
+            raise ContractError(
+                "invalid_microphone_frame",
+                "麦克风分析窗口必须是 20 到 500 毫秒的整数。",
+                f"{field}.frameMilliseconds",
+            )
+        result.update(
+            {
+                "leaseSeconds": round(
+                    _number(
+                        node.get("leaseSeconds", 30),
+                        f"{field}.leaseSeconds",
+                        1,
+                        300,
+                    ),
+                    3,
+                ),
+                "sampleRate": int(sample_rate),
+                "frameMilliseconds": frame_milliseconds,
+                "privacyIndicator": True,
+            }
+        )
     elif name == "timer.interval":
         result.update(
             {
@@ -220,11 +272,49 @@ def _validate_operator(node: Mapping[str, Any], index: int) -> dict[str, Any]:
                 ),
             }
         )
+    elif name == "audio.level":
+        result.update(
+            {
+                "minimumDbfs": round(
+                    _number(
+                        node.get("minimumDbfs", -38),
+                        f"{field}.minimumDbfs",
+                        -80,
+                        -3,
+                    ),
+                    2,
+                ),
+                "holdMilliseconds": round(
+                    _number(
+                        node.get("holdMilliseconds", 300),
+                        f"{field}.holdMilliseconds",
+                        0,
+                        5000,
+                    ),
+                    1,
+                ),
+            }
+        )
     elif name == "counter.increment":
         result["key"] = _safe_name(node.get("key", "count"), f"{field}.key")
         when_class = str(node.get("whenClass") or "").strip().lower()
+        when_sound = node.get("whenSound", False)
+        if not isinstance(when_sound, bool):
+            raise ContractError(
+                "invalid_sound_condition",
+                "whenSound 必须是布尔值。",
+                f"{field}.whenSound",
+            )
+        if when_class and when_sound:
+            raise ContractError(
+                "ambiguous_counter_condition",
+                "计数器不能同时使用视觉类别和声音触发条件。",
+                field,
+            )
         if when_class:
             result["whenClass"] = _safe_name(when_class, f"{field}.whenClass", 40)
+        if when_sound:
+            result["whenSound"] = True
     elif name == "text.compose":
         result["template"] = _text(
             node.get("template", "{value}"),
@@ -326,10 +416,30 @@ def validate_declarative_app(value: Mapping[str, Any]) -> dict[str, Any]:
             "pipeline 必须恰好有一个数据源且至少有一个输出。",
             "pipeline",
         )
+    source_name = str(pipeline[0].get("source") or "")
+    has_audio_level = any(
+        node.get("operator") == "audio.level" for node in pipeline
+    )
+    has_sound_counter = any(
+        node.get("operator") == "counter.increment" and node.get("whenSound") is True
+        for node in pipeline
+    )
+    if (has_audio_level or has_sound_counter) and source_name != "microphone.stream":
+        raise ContractError(
+            "microphone_source_required",
+            "声音分析节点只能连接受控麦克风数据源。",
+            "pipeline",
+        )
+    if has_sound_counter and not has_audio_level:
+        raise ContractError(
+            "audio_level_required",
+            "声音触发计数器前必须先加入 audio.level 节点。",
+            "pipeline",
+        )
     safety = dict(_mapping(root.get("safety", {}), "safety"))
     _reject_unknown(
         safety,
-        {"runOnlyInForeground", "stopOnUserExit", "retainImages"},
+        {"runOnlyInForeground", "stopOnUserExit", "retainImages", "retainAudio"},
         "safety",
     )
     if safety.get("runOnlyInForeground", True) is not True:
@@ -342,7 +452,14 @@ def validate_declarative_app(value: Mapping[str, Any]) -> dict[str, Any]:
         "runOnlyInForeground": True,
         "stopOnUserExit": bool(safety.get("stopOnUserExit", True)),
         "retainImages": bool(safety.get("retainImages", False)),
+        "retainAudio": False,
     }
+    if safety.get("retainAudio", False) is not False:
+        raise ContractError(
+            "audio_retention_forbidden",
+            "声明式工坊应用不能保存原始麦克风音频。",
+            "safety.retainAudio",
+        )
     return {
         "schema": DECLARATIVE_SCHEMA,
         "title": title,
@@ -370,7 +487,7 @@ def permissions_for_app(app: Mapping[str, Any]) -> list[dict[str, Any]]:
     permissions: list[dict[str, Any]] = []
     for capability in capabilities:
         constraints: dict[str, Any] = {}
-        if capability == "camera.stream":
+        if capability in {"camera.stream", "microphone.stream"}:
             constraints["privacyIndicator"] = True
         permissions.append(
             {

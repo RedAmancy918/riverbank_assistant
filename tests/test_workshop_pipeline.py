@@ -8,6 +8,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -29,7 +30,7 @@ if not FACE_TRACKER_DIR.is_dir():
             break
 sys.path.insert(0, str(FACE_TRACKER_DIR))
 
-from workshop_contract import ContractError  # noqa: E402
+from workshop_contract import ContractError, validate_manifest  # noqa: E402
 from workshop_declarative import (  # noqa: E402
     permissions_for_app,
     validate_declarative_app,
@@ -42,6 +43,7 @@ from workshop_generator import (  # noqa: E402
 from workshop_host import (  # noqa: E402
     HailoObjectDetector,
     HailoResourceCoordinator,
+    PipeWireMicrophoneCapture,
     WorkshopHostBroker,
 )
 from workshop_manager import (  # noqa: E402
@@ -96,7 +98,160 @@ class FakeGenerator:
         return fallback_plan(requirement)
 
 
+class FakeMicrophoneCapture:
+    def __init__(self, source: str, sample_rate: int) -> None:
+        self.source = source
+        self.sample_rate = sample_rate
+        self.started = False
+        self.closed = False
+        self.reads = 0
+
+    def start(self) -> None:
+        self.started = True
+
+    def read_level(self, frame_milliseconds: int) -> dict:
+        self.reads += 1
+        return {
+            "rms": 0.25,
+            "peak": 0.5,
+            "dbfs": -18.0,
+            "sampleRate": self.sample_rate,
+            "frameMilliseconds": frame_milliseconds,
+            "samplesAnalyzed": round(self.sample_rate * frame_milliseconds / 1000),
+        }
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class WorkshopPipelineTests(unittest.TestCase):
+    def test_microphone_pcm_is_reduced_to_metrics_without_payload(self) -> None:
+        result = PipeWireMicrophoneCapture._level_metrics(
+            b"\x00\x40" * 1600,
+            16000,
+            100,
+        )
+        self.assertEqual(result["rms"], 0.5)
+        self.assertEqual(result["peak"], 0.5)
+        self.assertAlmostEqual(result["dbfs"], -6.02, places=2)
+        self.assertEqual(result["samplesAnalyzed"], 1600)
+        self.assertNotIn("payload", result)
+        self.assertNotIn("pcm", result)
+
+    def test_sound_meter_example_manifest_matches_declarative_permissions(self) -> None:
+        example = APP_DIR / "examples" / "sound-meter"
+        manifest = validate_manifest(
+            json.loads((example / "manifest.json").read_text(encoding="utf-8"))
+        )
+        app = validate_declarative_app(
+            json.loads((example / "app" / "main.json").read_text(encoding="utf-8"))
+        )
+        declared = {
+            item["capability"] for item in manifest["spec"]["permissions"]
+        }
+        required = {
+            item["capability"] for item in permissions_for_app(app)
+        }
+        self.assertEqual(declared, required)
+
+    def test_microphone_plan_runs_metrics_only_and_releases_lease(self) -> None:
+        requirement = "做一个麦克风声音计数应用"
+        plan = fallback_plan(requirement)
+        self.assertEqual(plan["pipeline"][0]["source"], "microphone.stream")
+        plan["pipeline"][0]["leaseSeconds"] = 2
+        manifest, app = build_candidate(requirement, plan)
+        capabilities = {
+            item["capability"] for item in manifest["spec"]["permissions"]
+        }
+        self.assertEqual(
+            capabilities,
+            {"microphone.stream", "storage.app", "ui.surface"},
+        )
+        self.assertFalse(app["safety"]["retainAudio"])
+
+        captures: list[FakeMicrophoneCapture] = []
+
+        def microphone_factory(source: str, sample_rate: int) -> FakeMicrophoneCapture:
+            capture = FakeMicrophoneCapture(source, sample_rate)
+            captures.append(capture)
+            return capture
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = write_unsigned_package(root / "microphone.rbapp", manifest, app)
+            manager = WorkshopManager(root / "data", root / "trust")
+            store = WorkshopStore(root / "data")
+            record = manager.install(package, allow_unsigned_local=True)
+            app_id = str(record["id"])
+            manager.approve(app_id, sorted(capabilities))
+            broker = WorkshopHostBroker(
+                manager,
+                store,
+                runtime_root=root / "run",
+                task_token_file=root / "missing-token",
+                microphone_factory=microphone_factory,
+            )
+            runtime = DeclarativeRuntime(
+                manager,
+                broker,
+                store,
+                state_path=root / "run" / "runtime.json",
+            )
+            broker.ui_callback = runtime.ui_update
+            with mock.patch("workshop_host.send_expression") as indicator:
+                runtime.launch(app_id)
+                deadline = time.monotonic() + 2.0
+                snapshot = runtime.snapshot()
+                while time.monotonic() < deadline:
+                    snapshot = runtime.snapshot()
+                    data = snapshot.get("surface", {}).get("data", {})
+                    if captures and captures[0].reads and "dbfs" in data:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(captures)
+                self.assertTrue(captures[0].started)
+                self.assertGreater(captures[0].reads, 0)
+                data = snapshot["surface"]["data"]
+                self.assertEqual(data["dbfs"], -18.0)
+                self.assertTrue(data["soundActive"])
+                self.assertNotIn("pcm", data)
+                self.assertNotIn("audio", data)
+                runtime.stop(reason="test")
+                self.assertTrue(captures[0].closed)
+                self.assertFalse(broker.microphone_leases)
+                commands = [call.args[0] for call in indicator.call_args_list]
+                self.assertTrue(
+                    any(
+                        item.get("command") == "audio_activity" and item.get("active")
+                        for item in commands
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        item.get("command") == "audio_activity" and not item.get("active")
+                        for item in commands
+                    )
+                )
+
+    def test_microphone_activity_indicator_has_distinct_and_combined_modes(self) -> None:
+        try:
+            from expression_display_persistent import PersistentExpressionDisplay
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"expression renderer dependency unavailable: {exc}")
+        display = PersistentExpressionDisplay.__new__(PersistentExpressionDisplay)
+        display.runtime_audio_sources = {"workshop:test": time.monotonic() + 2}
+        display.runtime_vision_sources = {}
+        display.system_status = SimpleNamespace(camera_active_sources=())
+        display.camera_view_active = False
+        display.gallery_active = False
+        display.video_call_active = False
+        display.video_call_status = {}
+        display.pomodoro = SimpleNamespace(status="idle")
+        display.pomodoro_active = False
+        self.assertEqual(display.activity_indicator_mode(), "microphone")
+        display.runtime_vision_sources = {"camera:test": time.monotonic() + 2}
+        self.assertEqual(display.activity_indicator_mode(), "camera_microphone")
+
     def test_single_owner_supervisor_never_grants_face_and_external_together(self) -> None:
         supervisor = FaceTrackerSupervisor()
         with (

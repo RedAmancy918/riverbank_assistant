@@ -35,7 +35,6 @@ TEXT_TYPES = {
     ".txt": "text/plain",
     ".md": "text/markdown",
     ".markdown": "text/markdown",
-    ".csv": "text/csv",
 }
 
 
@@ -147,7 +146,7 @@ class AttachmentStore:
             extracted_text = _normalize_text(_decode_text(payload))
         else:
             raise AttachmentValidationError(
-                "仅支持 JPG、PNG、WebP、PDF、Markdown、TXT 和 CSV"
+                "仅支持 JPG、PNG、WebP、PDF、Markdown 和 TXT"
             )
 
         attachment_id = uuid.uuid4().hex

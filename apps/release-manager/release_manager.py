@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal and verify RiverBank Assistant system releases."""
+"""Seal and verify RiverBank Edge System releases."""
 
 from __future__ import annotations
 
@@ -129,6 +129,8 @@ COMPONENTS = (
             repository_file("apps/workshop/examples/minimal-app/app/main.json"),
             repository_file("apps/workshop/examples/cat-watcher/manifest.json"),
             repository_file("apps/workshop/examples/cat-watcher/app/main.json"),
+            repository_file("apps/workshop/examples/sound-meter/manifest.json"),
+            repository_file("apps/workshop/examples/sound-meter/app/main.json"),
             repository_file("tests/test_workshop_contract.py"),
             repository_file("tests/test_workshop_pipeline.py"),
             repository_file("apps/workshop/README.md"),
@@ -147,15 +149,23 @@ COMPONENTS = (
         ),
         "files": (
             repository_file("apps/video-call/video_call_server.py"),
+            repository_file("apps/video-call/auth_store.py"),
+            repository_file("apps/video-call/attachment_store.py"),
             repository_file("apps/video-call/chat_store.py"),
             repository_file("apps/video-call/chat_worker.py"),
+            repository_file("apps/video-call/image_generation.py"),
+            repository_file("apps/video-call/paper_context.py"),
             repository_file("apps/video-call/report_library.py"),
             repository_file("apps/video-call/task_store.py"),
+            repository_file("apps/video-call/task_artifact_store.py"),
             repository_file("apps/video-call/task_worker.py"),
             repository_file("apps/video-call/riverbank_task.py"),
             repository_file("apps/video-call/video_callctl.py"),
             repository_file("apps/video-call/video_call_smoke.py"),
             repository_file("apps/video-call/requirements.txt"),
+            repository_file("apps/video-call/admin-web/index.html"),
+            repository_file("apps/video-call/admin-web/styles.css"),
+            repository_file("apps/video-call/admin-web/app.js"),
             repository_file("apps/video-call/windows-client/package.json"),
             repository_file("apps/video-call/windows-client/package-lock.json"),
             repository_file("apps/video-call/windows-client/main.js"),
@@ -165,6 +175,14 @@ COMPONENTS = (
             repository_file("apps/video-call/windows-client/styles.css"),
             repository_file("tests/test_report_library.py"),
             repository_file("tests/test_chat_store.py"),
+            repository_file("tests/test_chat_attachments.py"),
+            repository_file("tests/test_chat_worker_image_generation.py"),
+            repository_file("tests/test_image_generation.py"),
+            repository_file("tests/test_paper_qa.py"),
+            repository_file("tests/test_chat_worker_paper_enrichment.py"),
+            repository_file("tests/test_auth_store.py"),
+            repository_file("tests/test_task_artifact_store.py"),
+            repository_file("docs/AUTHENTICATION.zh-CN.md"),
             repository_file("apps/video-call/windows-client/build.ps1"),
             repository_file("apps/video-call/windows-client/build-mac.sh"),
             repository_file("apps/video-call/windows-client/build-mac-icon.mjs"),
@@ -172,6 +190,7 @@ COMPONENTS = (
             repository_file("apps/video-call/windows-client/assets/riverbank-mark-1024.png"),
             repository_file("apps/video-call/windows-client/assets/riverbank-call.ico"),
             repository_file("apps/video-call/windows-client/assets/riverbank-call.icns"),
+            repository_file("config/systemd/riverbank-chat-worker.service"),
             "/etc/systemd/system/riverbank-video-call.service",
             "/etc/systemd/system/riverbank-task-worker.service",
             "/etc/systemd/system/riverbank-chat-worker.service",
@@ -212,10 +231,15 @@ COMPONENTS = (
             repository_file("apps/paper-radar/scripts/collect.py"),
             repository_file("apps/paper-radar/scripts/finalize_run.py"),
             repository_file("apps/paper-radar/scripts/render.py"),
+            repository_file("apps/paper-radar/scripts/paper_qa.py"),
+            repository_file("apps/paper-radar/scripts/paper_enrich.py"),
+            repository_file("apps/paper-radar/scripts/paper_chat_proxy.py"),
+            repository_file("apps/paper-radar/scripts/fetch_html.py"),
             repository_file("apps/paper-radar/scripts/special_focus.py"),
             repository_file("apps/paper-radar/scripts/web_server.py"),
             repository_file("apps/paper-radar/scripts/health_check.py"),
             repository_file("apps/paper-radar/static/site.js"),
+            repository_file("apps/paper-radar/templates/report.html"),
             "/etc/systemd/system/paper-radar-web.service",
         ),
     },
@@ -297,6 +321,24 @@ def read_text(path: Path, default: str = "unknown") -> str:
         return default
 
 
+def base_os_record(path: Path = Path("/etc/os-release")) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "=" not in line or line.lstrip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            values[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    return {
+        "name": values.get("PRETTY_NAME", values.get("NAME", "unknown")),
+        "version_id": values.get("VERSION_ID", "unknown"),
+        "ownership": "upstream",
+        "version_source": str(path),
+    }
+
+
 def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -320,6 +362,8 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             {
                 "id": component["id"],
                 "name": component["name"],
+                "versioning": "edge-lockstep",
+                "included_in": display_version(version, channel),
                 "version": version,
                 "services": list(component["services"]),
                 "files": records,
@@ -327,7 +371,11 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
         )
     return {
         "schema": SCHEMA,
-        "product": "RiverBank Assistant",
+        "product": "RiverBank Edge",
+        "artifact": {
+            "kind": "device-system-software",
+            "name": "RiverBank Edge System",
+        },
         "version": version,
         "display_version": display_version(version, channel),
         "channel": channel,
@@ -339,6 +387,7 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "hardware_model": read_text(Path("/proc/device-tree/model")),
             "architecture": platform.machine(),
             "kernel": platform.release(),
+            "base_operating_system": base_os_record(),
         },
         "compatibility": {
             "release_manifest": 1,
@@ -351,6 +400,9 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "offline_provisioning": 1,
             "workshop_declarative": 1,
             "workshop_host": 1,
+            "workshop_microphone_metrics": 1,
+            "multi_user_accounts": 1,
+            "chat_owner_isolation": 1,
         },
         "runtime_contracts": {
             "paper_web_port": 19732,
@@ -359,6 +411,8 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "video_call_port": 19734,
             "video_call_scope": "LAN-or-tailnet",
             "task_database": "/var/lib/riverbank-tasks/tasks.db",
+            "auth_database": "/var/lib/riverbank-tasks/auth.db",
+            "chat_database": "/var/lib/riverbank-tasks/chat.db",
             "task_https_path": "/assistant",
             "face_tracker_control": "/run/riverbank-face-tracker/control.sock",
             "expression_control": "/run/riverbank-expression/control.sock",
@@ -370,6 +424,7 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "workshop_control": "/run/riverbank-workshop/control.sock",
             "workshop_runtime": "/run/riverbank-workshop/runtime.json",
             "workshop_execution_policy": "validated-declarative-only",
+            "workshop_microphone_transport": "pipewire-shared-metrics-only",
         },
         "components": components,
     }

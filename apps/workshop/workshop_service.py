@@ -108,6 +108,7 @@ class WorkshopService:
         except queue.Full:
             pass
         self.runtime.stop(reason="service_stopping")
+        self.broker.close()
         if self.worker.is_alive():
             self.worker.join(timeout=5)
         self.write_status()
@@ -115,6 +116,7 @@ class WorkshopService:
     def write_status(self) -> None:
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         pending = self.store.pending_review()
+        microphone = self.broker.microphone_status()
         payload = {
             "schema": "riverbank.workshop-service/v1",
             "ok": True,
@@ -126,6 +128,7 @@ class WorkshopService:
             "runtime": self.runtime.snapshot(),
             "executionPolicy": "validated-declarative-only",
             "pythonSandboxEnabled": False,
+            "microphone": microphone,
             "updatedAt": time.time(),
         }
         atomic_write_json(self.status_path, payload, mode=0o640)
@@ -336,14 +339,16 @@ class WorkshopService:
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         command = str(request.get("command") or "health")
         if command == "health":
+            microphone = self.broker.microphone_status()
             return {
-                "ok": True,
+                "ok": bool(microphone.get("ready")),
                 "schema": "riverbank.workshop-service/v1",
                 "counts": self.store.counts(),
                 "installed": len(self.manager.list_apps()),
                 "runtime": self.runtime.snapshot(),
                 "declarativeRuntime": True,
                 "pythonSandbox": False,
+                "microphone": microphone,
             }
         if command == "create":
             return {

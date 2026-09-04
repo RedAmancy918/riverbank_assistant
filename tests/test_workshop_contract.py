@@ -143,6 +143,56 @@ class WorkshopContractTests(unittest.TestCase):
             validate_manifest(manifest(permission("camera.stream")))
         self.assertEqual(context.exception.code, "privacy_indicator_required")
 
+    def test_microphone_stream_is_bounded_and_requires_foreground_presence(self) -> None:
+        app_manifest = manifest(
+            permission("microphone.stream", privacyIndicator=True)
+        )
+        session = {
+            "app_id": "tech.riverbank.testapp",
+            "foreground": True,
+            "user_present": True,
+        }
+        opened = authorize_request(
+            app_manifest,
+            {"microphone.stream": True},
+            request(
+                "microphone.stream.open",
+                {
+                    "leaseSeconds": 30,
+                    "sampleRate": 16000,
+                    "frameMilliseconds": 100,
+                    "privacyIndicator": True,
+                },
+            ),
+            session=session,
+        )
+        self.assertTrue(opened.allowed)
+        self.assertEqual(opened.sanitized_params["sampleRate"], 16000)
+
+        background = authorize_request(
+            app_manifest,
+            {"microphone.stream": True},
+            request(
+                "microphone.stream.open",
+                {"leaseSeconds": 30, "sampleRate": 16000},
+            ),
+            session={**session, "foreground": False},
+        )
+        self.assertFalse(background.allowed)
+        self.assertEqual(background.code, "foreground_required")
+
+        invalid_read = authorize_request(
+            app_manifest,
+            {"microphone.stream": True},
+            request(
+                "microphone.stream.read",
+                {"leaseId": "not-a-lease", "frameMilliseconds": 100},
+            ),
+            session=session,
+        )
+        self.assertFalse(invalid_read.allowed)
+        self.assertEqual(invalid_read.code, "invalid_microphone_lease_id")
+
     def test_network_requires_exact_domains_without_wildcards(self) -> None:
         with self.assertRaises(ContractError) as context:
             validate_manifest(

@@ -1,0 +1,34 @@
+{
+  "schema": "riverbank.declarative-app/v1",
+  "title": "声音计数器",
+  "pipeline": [
+    {
+      "source": "microphone.stream",
+      "leaseSeconds": 120,
+      "sampleRate": 16000,
+      "frameMilliseconds": 100,
+      "privacyIndicator": true
+    },
+    {
+      "operator": "audio.level",
+      "minimumDbfs": -38,
+      "holdMilliseconds": 300
+    },
+    {
+      "operator": "counter.increment",
+      "key": "sound_events",
+      "whenSound": true
+    },
+    {
+      "sink": "ui.present",
+      "view": "sound-meter",
+      "title": "声音计数器"
+    }
+  ],
+  "safety": {
+    "runOnlyInForeground": true,
+    "stopOnUserExit": true,
+    "retainImages": false,
+    "retainAudio": false
+  }
+}

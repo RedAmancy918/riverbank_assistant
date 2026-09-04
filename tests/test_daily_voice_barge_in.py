@@ -11,6 +11,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 for dependency in ("edge_tts", "numpy", "sounddevice"):
@@ -136,6 +137,30 @@ class WakeBargeInTests(unittest.TestCase):
         with self.assertRaises(voice.InteractionInterrupted):
             assistant.transcribe_interruptibly(Path("unused.wav"))
         self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_workshop_name_alone_opens_creation_flow(self) -> None:
+        self.assertEqual(
+            voice.parse_local_device_command("工坊"),
+            {"action": "open_workshop"},
+        )
+        self.assertEqual(
+            voice.parse_local_device_command("唤醒工坊"),
+            {"action": "open_workshop"},
+        )
+
+    def test_open_workshop_defers_requirement_recording_until_after_tts(self) -> None:
+        assistant = voice.DailyVoiceAssistant.__new__(voice.DailyVoiceAssistant)
+        assistant.pending_workshop_requirement = False
+        assistant.last_local_command = None
+        assistant.last_result = "waiting"
+        assistant.write_state = lambda: None
+
+        with mock.patch.object(voice, "send_expression_command", return_value=True):
+            response = assistant.run_local_device_command("打开工坊")
+
+        self.assertIn("告诉我你想做一个什么应用", response)
+        self.assertTrue(assistant.pop_pending_workshop_requirement())
+        self.assertFalse(assistant.pop_pending_workshop_requirement())
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from workshop_contract import (
+    METHOD_CAPABILITY,
     PACKAGE_MAX_BYTES,
     PACKAGE_MAX_FILES,
     PACKAGE_MAX_UNCOMPRESSED_BYTES,
@@ -559,10 +560,50 @@ def self_test() -> dict[str, Any]:
         },
     }
     normalized = validate_manifest(manifest)
+    microphone_app = validate_declarative_app(
+        {
+            "schema": "riverbank.declarative-app/v1",
+            "title": "Microphone Self Test",
+            "pipeline": [
+                {
+                    "source": "microphone.stream",
+                    "leaseSeconds": 5,
+                    "sampleRate": 16000,
+                    "frameMilliseconds": 100,
+                    "privacyIndicator": True,
+                },
+                {
+                    "operator": "audio.level",
+                    "minimumDbfs": -38,
+                    "holdMilliseconds": 300,
+                },
+                {"sink": "ui.present", "view": "sound-meter"},
+            ],
+            "safety": {
+                "runOnlyInForeground": True,
+                "stopOnUserExit": True,
+                "retainAudio": False,
+            },
+        }
+    )
+    microphone_methods = {
+        method
+        for method, capability in METHOD_CAPABILITY.items()
+        if capability == "microphone.stream"
+    }
+    expected_microphone_methods = {
+        "microphone.stream.open",
+        "microphone.stream.read",
+        "microphone.stream.close",
+    }
+    if microphone_methods != expected_microphone_methods:
+        raise RuntimeError("Workshop microphone Host methods are incomplete")
     return {
         "ok": True,
         "manifest_api": normalized["apiVersion"],
         "host_protocol": normalized["spec"]["runtime"]["protocol"],
         "capability_count": len(capability_catalog()),
         "default_install_state": "installed_disabled",
+        "microphone_metrics": microphone_app["pipeline"][1]["operator"],
+        "microphone_raw_audio_persisted": False,
     }

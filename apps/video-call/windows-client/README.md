@@ -2,15 +2,20 @@
 
 这里是 macOS 与 Windows 共用的 Electron 桌面客户端源码。目录名 `windows-client` 是早期命名，macOS 构建并不是另一份未上传的工程。
 
+当前客户端版本为 `v0.25.1 beta`，包版本 `0.25.1-beta.1`。它是独立的配套客户端，不属于 Raspberry Pi OS 或 RiverBank Edge System；兼容的 Edge 版本范围由仓库根目录 `config/version-catalog.json` 管理。
+
 ## 开发运行
 
 1. 安装 Node.js 20 或更新版本。
 2. 在本目录运行 `npm ci`。
 3. 运行 `npm start`。
 
-默认连接 `http://riverbank-tech:19734`，可由 Tailscale MagicDNS 解析；也可以手动填写树莓派的局域网或 Tailscale IP。首次启动需要填入树莓派生成的配对令牌，并允许摄像头和麦克风权限。
+默认连接 `https://riverbank-tech.tail0acdab.ts.net/assistant`。使用 RiverBank 用户名和密码
+登录，服务端按用户隔离 Chat 与附件；会话由 macOS Keychain 或 Windows DPAPI 保存，
+密码不落盘。设备第一次启用账号时额外填写一次性设备凭据，创建首位管理员。摄像头和
+麦克风权限只在进入视频通话时请求。
 
-顶部可在“视频通话”和“任务报告”之间切换。报告页从树莓派指定归档目录读取 Markdown，支持列表、内置预览、打开来源链接与使用系统保存窗口下载到本机。客户端不会浏览报告目录以外的文件，也不提供远程删除和修改。
+顶部可在 Chat、“视频通话”和“任务报告”之间切换。Chat 第一版允许随消息上传 JPG/JPEG、PNG、WebP、PDF、Markdown 和 TXT；报告页从树莓派指定归档目录读取 Markdown，支持列表、内置预览、打开来源链接与使用系统保存窗口下载到本机。客户端不会浏览报告目录以外的文件，也不提供远程删除和修改。
 
 ## 打包 Windows 软件
 

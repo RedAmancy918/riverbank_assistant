@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 from workshop_contract import ContractError, capability_catalog, validate_manifest
+from workshop_host import PipeWireMicrophoneCapture, send_expression
 from workshop_manager import WorkshopManager, inspect_package, self_test
 
 
@@ -41,6 +44,41 @@ def print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def microphone_smoke(seconds: float) -> dict:
+    """Perform an explicit on-device PipeWire check with a visible indicator."""
+
+    seconds = max(0.5, min(float(seconds), 5.0))
+    source = os.environ.get("RIVERBANK_AUDIO_SOURCE", "").strip()
+    capture = PipeWireMicrophoneCapture(source, 16000)
+    indicator = {
+        "command": "audio_activity",
+        "source": "workshop:diagnostic",
+    }
+    levels: list[dict] = []
+    send_expression({**indicator, "active": True, "ttl_seconds": seconds + 1.0})
+    try:
+        capture.start()
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            levels.append(capture.read_level(100))
+    finally:
+        capture.close()
+        send_expression({**indicator, "active": False, "ttl_seconds": 0.5})
+    if not levels:
+        raise RuntimeError("麦克风自检没有收到分析窗口")
+    return {
+        "ok": True,
+        "transport": "pipewire-shared",
+        "source": source or "default-input",
+        "windows": len(levels),
+        "minimumDbfs": min(float(item["dbfs"]) for item in levels),
+        "maximumDbfs": max(float(item["dbfs"]) for item in levels),
+        "maximumPeak": max(float(item["peak"]) for item in levels),
+        "rawAudioPersisted": False,
+        "indicatorReleased": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="RiverBank Workshop manager")
     parser.add_argument("--data-root", type=Path)
@@ -63,6 +101,8 @@ def main() -> int:
     subparsers.add_parser("capabilities")
     subparsers.add_parser("self-test")
     subparsers.add_parser("service-health")
+    microphone_parser = subparsers.add_parser("microphone-smoke")
+    microphone_parser.add_argument("--seconds", type=float, default=1.5)
     create_parser = subparsers.add_parser("create")
     create_parser.add_argument("requirement")
     create_parser.add_argument("--source", default="cli")
@@ -117,6 +157,8 @@ def main() -> int:
             result = service_request({"command": "health"}, args.service_socket)
             print_json(result)
             return 0 if result.get("ok") else 1
+        elif args.command == "microphone-smoke":
+            print_json(microphone_smoke(args.seconds))
         elif args.command == "create":
             result = service_request(
                 {
@@ -179,7 +221,7 @@ def main() -> int:
             print_json(result)
             return 0 if result.get("ok") else 1
         return 0
-    except (OSError, ValueError, json.JSONDecodeError, ContractError) as exc:
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError, ContractError) as exc:
         if isinstance(exc, ContractError):
             error = exc.as_dict()
         else:

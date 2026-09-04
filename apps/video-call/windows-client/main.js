@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, net, safeStorage, session, shell } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
 
@@ -11,9 +11,10 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 920,
-    minHeight: 620,
-    backgroundColor: '#05090d',
+    minWidth: 960,
+    minHeight: 720,
+    useContentSize: true,
+    backgroundColor: '#000000',
     title: 'RiverBank Call',
     autoHideMenuBar: true,
     webPreferences: {
@@ -35,11 +36,61 @@ function safeDownloadName(value) {
   return cleaned || 'RiverBank-report.md';
 }
 
+function authSessionPath() {
+  return path.join(app.getPath('userData'), 'riverbank-session.bin');
+}
+
+ipcMain.handle('app-version', () => {
+  const packageVersion = app.getVersion();
+  const match = packageVersion.match(/^(\d+\.\d+\.\d+)(?:-(beta|stable)(?:\.\d+)?)?$/);
+  return {
+    packageVersion,
+    displayVersion: match ? `v${match[1]} ${match[2] || 'stable'}` : packageVersion
+  };
+});
+
+ipcMain.handle('auth-session-load', async () => {
+  if (!safeStorage.isEncryptionAvailable()) return null;
+  try {
+    const encrypted = await fs.readFile(authSessionPath());
+    const decoded = safeStorage.decryptString(encrypted);
+    const record = JSON.parse(decoded);
+    if (!record || typeof record.token !== 'string') return null;
+    return record;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    await fs.unlink(authSessionPath()).catch(() => {});
+    return null;
+  }
+});
+
+ipcMain.handle('auth-session-save', async (_event, record) => {
+  if (!safeStorage.isEncryptionAvailable()) return { persisted: false };
+  const payload = {
+    server: String(record?.server || '').slice(0, 500),
+    username: String(record?.username || '').slice(0, 80),
+    token: String(record?.token || ''),
+  };
+  if (!payload.token.startsWith('rbs_')) throw new Error('账号会话无效');
+  const encrypted = safeStorage.encryptString(JSON.stringify(payload));
+  await fs.mkdir(path.dirname(authSessionPath()), { recursive: true });
+  await fs.writeFile(authSessionPath(), encrypted, { mode: 0o600 });
+  await fs.chmod(authSessionPath(), 0o600).catch(() => {});
+  return { persisted: true };
+});
+
+ipcMain.handle('auth-session-clear', async () => {
+  await fs.unlink(authSessionPath()).catch((error) => {
+    if (error?.code !== 'ENOENT') throw error;
+  });
+  return { ok: true };
+});
+
 ipcMain.handle('download-report', async (_event, request) => {
   const target = new URL(String(request?.url || ''));
   if (!['http:', 'https:'].includes(target.protocol)) throw new Error('不支持的下载地址');
   const token = String(request?.token || '').trim();
-  if (token.length < 16) throw new Error('配对令牌无效');
+  if (!token.startsWith('rbs_')) throw new Error('账号会话无效');
   const filename = safeDownloadName(request?.filename);
   const response = await net.fetch(target.toString(), {
     headers: { Authorization: `Bearer ${token}` }
@@ -61,7 +112,7 @@ ipcMain.handle('download-attachment', async (_event, request) => {
   const target = new URL(String(request?.url || ''));
   if (!['http:', 'https:'].includes(target.protocol)) throw new Error('不支持的下载地址');
   const token = String(request?.token || '').trim();
-  if (token.length < 16) throw new Error('配对令牌无效');
+  if (!token.startsWith('rbs_')) throw new Error('账号会话无效');
   const filename = safeDownloadName(request?.filename || 'RiverBank-attachment');
   const response = await net.fetch(target.toString(), {
     headers: { Authorization: `Bearer ${token}` }

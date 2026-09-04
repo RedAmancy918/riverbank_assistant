@@ -15,7 +15,7 @@ RiverBank Edge 采用多个小型 systemd 服务，而不是一个持有全部�
 | Recovery Controller | `riverbank-recovery.service` | `/run/riverbank-recovery/control.sock`、`status.json` |
 | Offline Provisioning | `riverbank-provisioning.service` | `:19735`、`/run/riverbank-provisioning/status.json` |
 | Paper Radar | `paper-radar-web.service` | `:19732` 网页与焦点输入 API |
-| Background Tasks | `riverbank-task-worker.service` | `:19734/api/v1/tasks`、`/var/lib/riverbank-tasks/tasks.db` |
+| Background Tasks | `riverbank-task-worker.service` | `:19734/api/v1/tasks`、`/var/lib/riverbank-tasks/tasks.db`、私有成果目录 `artifacts/<task-id>/` |
 | Workshop | `riverbank-workshop.service` | `/run/riverbank-workshop/control.sock`、`riverbank.workshop/v1`、`riverbank.app-host/v1`、`.rbapp` |
 
 运行时文件只包含经过筛选的状态，不应写入密钥、完整语音、模型回复历史或摄像头原始流。
@@ -44,8 +44,8 @@ USB 摄像头由 `ustreamer` 单独持有。其他服务读取本地 MJPEG 流�
 - 原“休眠”入口替换为番茄钟：默认 25 分钟专注、5 分钟短休、每完成 4 轮进入 15 分钟长休；倒计时以确定性圆弧呈现，专注使用番茄红、休息使用叶片绿，支持开始/暂停、重置、跳过和右滑返回；专注、短休和长休在待开始或暂停时都可长按右上角秒表表冠，主圆环收缩并展开 72 条高密度环形刻度，指针角度连续跟随手指，时间以 1 分钟步长吸附在 1–180 分钟，长按后的拖动死区仅保留 3 px 触摸防抖，手指附近约 20 条刻度使用余弦包络从最短连续过渡到最长；松手后为当前阶段保存一次性时长但不自动开始，阶段结束后清除并恢复默认值，休息阶段的自定义时长不得把状态切回专注；右上角统计按钮进入专注统计，今日环图与近 7 天柱形趋势分别渲染在两个预缓存页面，通过左右滑动切换；Daily 语音助手通过本地快速通道创建和控制番茄钟，不经过大模型，并支持 1–180 分钟的一次性专注时长；
 - 应用二级菜单提供“性能”应用：`performance_monitor.py` 只从 procfs、sysfs、NVMe 文件系统和健康状态快照读取指标，CPU 与网络采用相邻采样差值计算；独立单线程执行器每秒异步采样，渲染线程只消费不可变快照，因此监控采样不得阻塞圆屏动画；页面关闭后停止周期采样；页面显示 CPU、温度、频率、系统负载、内存、NVMe、默认网卡吞吐、Hailo-8 READY/ACTIVE、整机健康、DSI 刷新率、进程 RSS 与系统运行时间，并复用统一返回按钮、圆角卡片、4× 抗锯齿和水平过场动画；CPU、内存和 NVMe 百分比使用统一字号，CPU 卡片只因额外承载温度、频率与负载而略高。
 - 应用二级菜单提供“音乐”应用：`music_player.py` 负责递归扫描 `/mnt/nvme64/Music`、通过 FFprobe 读取标题/艺术家/专辑/时长，并以单个 VLC RC 子进程管理低延迟播放、暂停、上一首、下一首与自动续播；播放器状态机提供持久化的列表循环、单曲循环和乱序播放，自动换曲与手动运输控制遵循当前模式且乱序时避免立即重复当前曲；右上模式按钮单击循环切换三种模式，长按约 750 ms 手动刷新音乐库，进入音乐页也会发起异步扫描；扫描在线程池执行，渲染线程不接触磁盘探测；封面按“同名图片 → 目录中的 cover/folder/front/album → 音频内嵌图”选择，内嵌图由 FFmpeg 提取到 SSD 缓存，Pillow 在后台线程完成 EXIF 修正、居中裁切和圆形蒙版；中央默认显示封面，单击以 300 ms 交叉渐变切换到屏幕水平轴上的无框同步歌词，歌词层不继承封面圆环，并将曲名和艺术家随封面淡出；上一句、当前句和下一句以纵向位移动画更新，再次单击歌词带返回封面，没有素材时分别降级为粗体双音符或“暂无歌词”。歌曲开始播放或自动换曲后，歌词子系统先查找同名 `.lrc`，本地缺失时由独立单线程执行器顺序访问 LRCLIB：优先以标题、歌手、专辑和时长调用 `/api/get`，404 后节流约 300 ms 再以结构化关键词调用 `/api/search`，按标题/歌手相似度和时长差筛选同步歌词，原子保存到音频旁；每首歌每次服务运行最多联网一次，429 和网络错误不自动重试，所有请求与解析均不进入渲染线程。圆屏不再提供手动歌词开关，歌词显示始终启用；同名 `.lrc` 解析支持 offset、多时间戳和毫秒精度；圆屏页面显示曲目信息、进度、运输控制、播放模式与右侧边缘音量组件；待机图层仅保留细弧和位置点，触摸后在约 220 ms 内交叉渐变为缓存的宽滑轨，拖动通过 `wpctl` 修改默认系统音频输出，松手停留约 800 ms 后自动收回，拖到底部即可静音，因此播放器与语音播报保持同一音量源，同时不占用中央播放区；页面继续复用统一返回按钮和水平过场。播放模式持久化；离开音乐页后只用约 50 px 字号渲染当前句，不绘制边框或底板，显示范围根据歌词带上下边缘与 800 px 圆的交点计算为安全弦宽，短句居中，溢出句以固定速度在左右端点间连续横向滚动，滚动时间直接来自播放器 elapsed，因此暂停时自动冻结；播放器和表情页两处歌词带均在左右边缘应用平滑透明度遮罩；歌词层继续主动避让语音气泡、菜单及其他页面。离开页面后音乐继续播放，渲染服务退出时播放器子进程与歌词任务一并停止。
-- 主环形菜单的“应用”进入二级应用环，提供番茄钟、性能、音乐、通话和工坊；原“开心”位置成为可持久化应用固定槽，默认显示“空位”。选中未固定应用后继续向外滑会把选中弧线展开为“固定到桌面”；同样操作当前已固定应用时外弧显示“取消固定”。只有指针进入与该可见外弧一致的环形扇区命中区域、保持满行程约 0.35 秒并在其上松手才确认；独立“清空”扇区已经移除。应用模型由 `app_menu.py` 管理，选择结果原子写入 `RIVERBANK_DATA/ui/app-pin.json`。工坊提供“创建应用、我的应用、导入应用”入口，并以 `riverbank.workshop/v1` 清单、`riverbank.app-host/v1` Host API、15 项能力目录、逐请求授权、`.rbapp` SHA-256/Ed25519 校验和事务化 disabled 注册构成安全基础层；清单永远不能申请 Shell、系统服务、凭据、宿主文件、软件包、内核和直接设备访问。语音创建只生成声明式候选，权限由可信代码反推；设备签名复检后仍须在圆屏逐项审核，批准后才由受信任解释器运行。v0.24.2 beta 的审核主体是物理操作圆屏的人，系统尚未通过账户、声纹、PIN 或可信手机确认其是否为提案发起者或设备所有者；超级开发者负责在签名系统版本中定义 capability 和硬边界，不负责自动代审每个用户应用。目标权限模型采用“平台能力发布 + 设备所有者授权”双门，并把普通请求者、设备所有者和平台开发者分离。当前 Host Broker 已接通 UI、私有存储、限频通知、Camera Hub/Hailo、后台任务和报告库；Python 运行时以及麦克风、扬声器、云台工坊适配仍禁用。完整契约见 `docs/WORKSHOP_PROTOCOL.zh-CN.md`。Daily 在进入 Hermes 前解析明确的应用控制语句：现有四个运行型应用均可用语音进入，番茄钟支持完整计时控制，性能支持打开/关闭，音乐支持播放运输、显式播放模式与主页歌词开关，通话支持打开与挂断；明确的“创建/开发一个应用”进入工坊提案而不是开放式工具调用。音乐控制直接复用常驻渲染器与播放器实例，因此离开音乐页或播放中再次唤醒后仍能立即切换下一首；媒体库尚未扫描时，“播放音乐”设置一次性待播放标记，扫描完成后自动启动，避免首用命令丢失；
-- 应用二级菜单中的“通话”连接 `riverbank-video-call.service`。服务以 WebRTC 交换 H.264/Opus，树莓派发送 Camera Hub 共享帧与 PipeWire 六麦阵列音频，并把桌面端音频送入默认 PipeWire 扬声器；对端视频只在内存保留最近帧，由 loopback 快照提供给圆屏。19734 端口同时承载信令、任务队列与只读报告 API，非本机请求必须使用同一配对令牌；报告 API 仅暴露 Daily workspace 的 `reports/` 中非隐藏 Markdown，拒绝软链接、越界路径、上传、修改和删除。任务 API 只接收有限长度的标题、描述和类型，使用幂等键防止网络重试产生重复任务；状态固定为 queued、running、waiting_input、completed、failed、cancelled。`riverbank-task-worker.service` 以独立进程认领任务，客户端退出、锁屏或断线不影响执行；SQLite 使用回滚日志而非 WAL，以适配设备当前 SQLite 3.40.1。Worker 只向 Hermes 开放 browser、web、skills、file 四组工具，完成后必须把 Markdown 原子归档到同一报告库；真正缺少关键信息时暂停为 waiting_input，由手机或终端补充后重新排队。Daily 对明确要求“后台任务”或“整理并生成报告/Markdown”的语音请求只做快速入队并立即口头确认，不在语音线程同步执行长任务。ICE 仅发布主机候选，因此同一可信局域网和同一 Tailscale tailnet 可直连，媒体由 DTLS-SRTP 加密，不依赖公网 STUN/TURN。macOS / Windows 应用共享 Electron 代码；SwiftUI iOS 客户端与 `riverbank-task` CLI 共享任务、追问、取消、报告预览和下载契约。Tailscale Serve 保留论文站根路径，并将 `/assistant` 代理到 19734；
+- 主环形菜单的“应用”进入二级应用环，提供番茄钟、性能、音乐、通话和工坊；原“开心”位置成为可持久化应用固定槽，默认显示“空位”。选中未固定应用后继续向外滑会把选中弧线展开为“固定到桌面”；同样操作当前已固定应用时外弧显示“取消固定”。只有指针进入与该可见外弧一致的环形扇区命中区域、保持满行程约 0.35 秒并在其上松手才确认；独立“清空”扇区已经移除。应用模型由 `app_menu.py` 管理，选择结果原子写入 `RIVERBANK_DATA/ui/app-pin.json`。工坊提供“创建应用、我的应用、导入应用”入口，并以 `riverbank.workshop/v1` 清单、`riverbank.app-host/v1` Host API、15 项能力目录、逐请求授权、`.rbapp` SHA-256/Ed25519 校验和事务化 disabled 注册构成安全基础层；清单永远不能申请 Shell、系统服务、凭据、宿主文件、软件包、内核和直接设备访问。语音创建只生成声明式候选，权限由可信代码反推；设备签名复检后仍须在圆屏逐项审核，批准后才由受信任解释器运行。v0.24.2 beta 的审核主体是物理操作圆屏的人，系统尚未通过账户、声纹、PIN 或可信手机确认其是否为提案发起者或设备所有者；超级开发者负责在签名系统版本中定义 capability 和硬边界，不负责自动代审每个用户应用。目标权限模型采用“平台能力发布 + 设备所有者授权”双门，并把普通请求者、设备所有者和平台开发者分离。当前 Host Broker 已接通 UI、私有存储、限频通知、Camera Hub/Hailo、PipeWire 共享麦克风音量分析、后台任务和报告库；麦克风数据源带前台用户在场校验、1–300 秒租约、橙色隐私指示和异常自动回收，只向声明式应用提供 RMS、峰值与 dBFS，不保存原始 PCM。Python 运行时以及扬声器、云台工坊适配仍禁用。完整契约见 `docs/WORKSHOP_PROTOCOL.zh-CN.md`。Daily 在进入 Hermes 前解析明确的应用控制语句：现有四个运行型应用均可用语音进入，番茄钟支持完整计时控制，性能支持打开/关闭，音乐支持播放运输、显式播放模式与主页歌词开关，通话支持打开与挂断；明确的“创建/开发一个应用”进入工坊提案而不是开放式工具调用。音乐控制直接复用常驻渲染器与播放器实例，因此离开音乐页或播放中再次唤醒后仍能立即切换下一首；媒体库尚未扫描时，“播放音乐”设置一次性待播放标记，扫描完成后自动启动，避免首用命令丢失；
+- 应用二级菜单中的“通话”连接 `riverbank-video-call.service`。服务以 WebRTC 交换 H.264/Opus，树莓派发送 Camera Hub 共享帧与 PipeWire 六麦阵列音频，并把桌面端音频送入默认 PipeWire 扬声器；对端视频只在内存保留最近帧，由 loopback 快照提供给圆屏。19734 端口同时承载本地账号、信令、任务队列、Chat 与只读报告 API。远端 macOS、Windows 和 iOS 客户端经 Tailscale Serve HTTPS 使用用户名密码换取可撤销会话；密码以 Argon2id 为首选算法保存，会话服务端只存摘要。旧设备凭据只用于首次管理员设置和受限内部服务，远端不能用它访问 Chat。Chat 会话、消息、附件与后台任务通过 `owner_user_id` 在服务端隔离。报告 API 仅暴露 Daily workspace 的 `reports/` 中非隐藏 Markdown，拒绝软链接、越界路径、上传、修改和删除。任务 API 只接收有限长度的标题、描述、类型和 `text|image|illustrated` 成果格式，使用幂等键防止网络重试产生重复任务；状态固定为 queued、running、waiting_input、completed、failed、cancelled。`riverbank-task-worker.service` 以独立进程认领任务，客户端退出、锁屏或断线不影响执行；文字和图文任务先由 Hermes 原子归档 Markdown，图片与图文配图复用 Qwen Image，二进制成果写入按任务 ID 隔离的私有目录并通过任务所有权鉴权下载；图文主成果为内嵌图片的离线单文件，可直接打印为 PDF。ICE 仅发布主机候选，媒体由 DTLS-SRTP 加密，不依赖公网 STUN/TURN。Tailscale Serve 保留论文站根路径，并将 `/assistant` 代理到 19734；完整身份协议见 `docs/AUTHENTICATION.zh-CN.md`；
 - 音量、重启、屏保和 Token 弹层；
 - 相机实时画面、拍照与相册；
 - 相册左右滑动、长按删除/设为屏保；
@@ -121,6 +121,13 @@ collect.py → candidate JSON → Hermes 按 AGENTS.md 精读/撰写
 
 网页只默认展示最新日报，但保留历史归档入口。“明日焦点”请求写入原子化队列，只有成功完成下一次渲染后才标记为已消费。
 
+每次成功日报还会原子替换 `data/paper-qa/current.json`，保存当日精选文章的结构化精读笔记
+与正文分块。逐篇文章对话首先检索这份缓存；当问题要求具体型号、参数、实验设置或明确要求
+进一步核实时，Chat Worker 不让通用模型自由上网，而是调用 `paper_enrich.py` 受控读取该文
+自身的 arXiv PDF，PDF 不可用时才降级到 arXiv HTML。新证据写回同一个当日缓存并供后续
+问答复用，不产生按日期归档的全文或向量库；次日成功日报整体替换缓存，长期对话仍保存在
+独立 Chat 数据库中。这样日常回答保留精读成果，缓存缺口也能回到一手原文继续核对。
+
 ## 7. 健康监控
 
 检查器由 JSON 配置扩展，支持：
@@ -142,10 +149,18 @@ SYSTEM 详情页提供“恢复全部服务”。UI 仅向权限受限的 Unix S
 
 ## 8. 多端 Chat
 
-iOS、macOS 和 Windows 客户端共用 `19734` 上的配对鉴权 API。`video_call_server.py` 只负责会话与消息入队、读取和停止请求；Chat 历史使用独立 `/var/lib/riverbank-tasks/chat.db`，避免与后台任务库的 SQLite 模式互相锁定。`riverbank-chat-worker.service` 独立领取回复，显式绑定 Daily profile，并以 `riverbank-chat-<conversation_id>` 命名 Hermes 会话保持多轮上下文。Worker 会持续写入当前输出，客户端活动回复期间约每 550 ms 刷新，因此重开 App 或短时断网后仍可恢复当前对话。停止生成通过数据库取消位驱动子进程终止，不依赖客户端保持长连接。
+iOS、macOS 和 Windows 客户端共用 `19734` 上的账号鉴权 API。用户名与密码只用于换取可撤销会话，Chat、消息与附件查询始终在服务端匹配 `owner_user_id`；一次性设备凭据只负责首次管理员建立和本机内部服务。第一版附件白名单统一为 JPG/JPEG、PNG、WebP、PDF、Markdown 和 TXT：服务端依据扩展名与真实魔数/解码结果双重校验，拒绝 CSV、Office、压缩包和程序；单文件最多 15 MB、单条消息总计 30 MB、最多 4 个文件且最多 1 张图片。iOS 相册素材在端侧归一化为 JPEG，以兼容 HEIC 照片且限制像素和上传体积。`video_call_server.py` 只负责鉴权、会话与消息入队、读取和停止请求；Chat 历史使用独立 `/var/lib/riverbank-tasks/chat.db`，避免与后台任务库的 SQLite 模式互相锁定。`riverbank-chat-worker.service` 独立领取回复，显式绑定 Daily profile，并以 `riverbank-chat-<conversation_id>` 命名 Hermes 会话保持多轮上下文。Worker 会持续写入当前输出，客户端活动回复期间约每 550 ms 刷新，因此重开 App 或短时断网后仍可恢复当前对话。停止生成通过数据库取消位驱动子进程终止，不依赖客户端保持长连接。
 
 文字 Chat 默认只开放浏览、搜索和技能工具，不开放任意文件或系统修改；长时间调研、文件整理和报告生成继续进入持久化后台任务队列。两个 Worker 使用不同数据库和进程，Chat 不得阻塞既有任务。
 
+Worker 在进入 Hermes 之前先做窄范围能力路由：明确的文生图请求调用阿里云中国区
+DashScope 原生 Qwen Image API，默认使用 `qwen-image-3.0-pro`；上传图片的理解请求仍由
+Hermes 配置的 Qwen VLM 处理。Qwen Image 返回的 OSS URL 仅用于即时下载，图片经过格式、
+尺寸和大小校验后进入 `/var/lib/riverbank-tasks/chat-attachments/`，再作为 assistant 附件
+写回消息。客户端只通过带账号会话的附件 API 展示或下载，不直接持有供应商临时地址。
+
 ## 9. 版本与发布完整性
 
-RiverBank 自有组件统一显示为 `vMAJOR.MINOR.PATCH beta|stable`。`apps/release-manager/release_manager.py` 在封存时先确认全部输入存在，再写入整机版本和包含组件、服务、文件大小与 SHA-256 的原子清单。健康守护器周期验证清单；未重新封存的直接修改会被报告为发布漂移，而不会被静默接受为正式版本。
+版本边界分为 RiverBank 产品发布列车、RiverBank Edge 硬件、RiverBank Edge System 设备软件、Raspberry Pi OS 上游基础系统、iOS 客户端、macOS/Windows 客户端和独立工坊应用。客户端属于 RiverBank 产品套件，但不是 Raspberry Pi OS 的一部分，也不继承 Edge System 的版本号。硬件用产品代次与 Revision，RiverBank 自有软件统一显示 `vMAJOR.MINOR.PATCH beta|stable`，上游系统保留原版本。
+
+`config/version-catalog.json` 是当前版本组合与兼容范围的唯一清单；`scripts/versionctl.py check` 校验圆屏、Xcode 和 Electron 工程中的原生版本入口。发布列车只是联合验收后的 BOM 映射，各独立产物可以使用不同版本号。`apps/release-manager/release_manager.py` 只封存 RiverBank Edge System：先确认全部输入存在，再写入 Edge 系统版本、基础 OS 信息，以及包含组件、服务、文件大小与 SHA-256 的原子清单。健康守护器周期验证清单；未重新封存的直接修改会被报告为发布漂移，而不会被静默接受为正式版本。完整规则见 `apps/expression-ui/VERSIONING.md`。

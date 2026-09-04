@@ -36,6 +36,7 @@ class DeclarativeRuntime:
         self.active_app: dict[str, Any] | None = None
         self.counter_state: dict[str, int] = {}
         self.presence_state: dict[str, bool] = {}
+        self.audio_hold_until = 0.0
         self.state: dict[str, Any] = {
             "schema": "riverbank.workshop-runtime/v1",
             "active": False,
@@ -102,6 +103,7 @@ class DeclarativeRuntime:
             self.active_app = app
             self.counter_state = {}
             self.presence_state = {}
+            self.audio_hold_until = 0.0
             self.state = {
                 "schema": "riverbank.workshop-runtime/v1",
                 "active": True,
@@ -139,6 +141,7 @@ class DeclarativeRuntime:
             thread.join(timeout=6.0)
         if app_id:
             self.broker.stop_vision(app_id)
+            self.broker.stop_microphone(app_id)
         with self.lock:
             self.thread = None
             self.active_app_id = None
@@ -198,6 +201,10 @@ class DeclarativeRuntime:
             )
             increment = present and not self.presence_state.get(when_class, False)
             self.presence_state[when_class] = present
+        elif bool(node.get("whenSound")):
+            present = bool(context.get("soundActive"))
+            increment = present and not self.presence_state.get("audio.sound", False)
+            self.presence_state["audio.sound"] = present
         if increment:
             self.counter_state[key] = self.counter_state.get(key, 0) + 1
             self._host(
@@ -207,6 +214,16 @@ class DeclarativeRuntime:
             )
         context["counters"] = dict(self.counter_state)
         context["value"] = self.counter_state.get(key, 0)
+
+    def _audio_level(self, node: dict[str, Any], context: dict[str, Any]) -> None:
+        dbfs = float(context.get("dbfs", -96.0))
+        threshold = float(node["minimumDbfs"])
+        now = time.monotonic()
+        above_threshold = dbfs >= threshold
+        if above_threshold:
+            self.audio_hold_until = now + float(node["holdMilliseconds"]) / 1000.0
+        context["minimumDbfs"] = threshold
+        context["soundActive"] = above_threshold or now < self.audio_hold_until
 
     def _execute_nodes(
         self,
@@ -231,6 +248,8 @@ class DeclarativeRuntime:
                 )
                 context.update(result)
                 context["detections"] = result.get("detections", [])
+            elif operator == "audio.level":
+                self._audio_level(node, context)
             elif operator == "counter.increment":
                 self._counter(app_id, node, context)
             elif operator == "text.compose":
@@ -256,7 +275,13 @@ class DeclarativeRuntime:
                     },
                 )
             elif sink == "notifications.show":
-                should_notify = "detections" not in context or bool(context.get("detections"))
+                should_notify = (
+                    bool(context.get("detections"))
+                    if "detections" in context
+                    else bool(context.get("soundActive"))
+                    if "soundActive" in context
+                    else True
+                )
                 if should_notify:
                     self._host(
                         app_id,
@@ -333,6 +358,71 @@ class DeclarativeRuntime:
                     "camera.stream.close",
                     {"leaseId": lease.get("leaseId", "")},
                 )
+            elif source["source"] == "microphone.stream":
+                lease: dict[str, Any] = {}
+                started = time.monotonic()
+                lease_seconds = float(source["leaseSeconds"])
+                frame_milliseconds = int(source["frameMilliseconds"])
+                try:
+                    lease = self._host(
+                        app_id,
+                        "microphone.stream.open",
+                        {
+                            "leaseSeconds": lease_seconds,
+                            "sampleRate": source["sampleRate"],
+                            "frameMilliseconds": frame_milliseconds,
+                            "privacyIndicator": True,
+                        },
+                    )
+                    with self.lock:
+                        self.state["status"] = "running"
+                    self.write_state()
+                    while not stop_event.is_set():
+                        if time.monotonic() - started >= lease_seconds:
+                            with self.lock:
+                                self.state["status"] = "lease_expired"
+                            self.write_state()
+                            break
+                        frame_started = time.monotonic()
+                        try:
+                            level = self._host(
+                                app_id,
+                                "microphone.stream.read",
+                                {
+                                    "leaseId": lease.get("leaseId", ""),
+                                    "frameMilliseconds": frame_milliseconds,
+                                },
+                            )
+                        except RuntimeError:
+                            if time.monotonic() - started >= lease_seconds:
+                                with self.lock:
+                                    self.state["status"] = "lease_expired"
+                                self.write_state()
+                                break
+                            raise
+                        if stop_event.is_set():
+                            break
+                        context = {
+                            "event": "microphone.level",
+                            "timestamp": time.time(),
+                            **level,
+                        }
+                        self._execute_nodes(app_id, nodes, context)
+                        elapsed = time.monotonic() - frame_started
+                        remaining = frame_milliseconds / 1000.0 - elapsed
+                        if remaining > 0 and stop_event.wait(remaining):
+                            break
+                finally:
+                    lease_id = str(lease.get("leaseId") or "")
+                    if lease_id:
+                        try:
+                            self._host(
+                                app_id,
+                                "microphone.stream.close",
+                                {"leaseId": lease_id},
+                            )
+                        except RuntimeError:
+                            self.broker.stop_microphone(app_id)
             with self.lock:
                 if not stop_event.is_set() and self.state.get("status") not in {"lease_expired", "error"}:
                     self.state["status"] = "completed"
@@ -345,3 +435,4 @@ class DeclarativeRuntime:
             self.store.audit("runtime.failed", app_id=app_id, error=str(exc)[:500])
         finally:
             self.broker.stop_vision(app_id)
+            self.broker.stop_microphone(app_id)

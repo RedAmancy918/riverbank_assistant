@@ -16,6 +16,7 @@
     "camera.stream.open": "camera.stream",
     "camera.stream.close": "camera.stream",
     "microphone.stream.open": "microphone.stream",
+    "microphone.stream.read": "microphone.stream",
     "microphone.stream.close": "microphone.stream",
     "speaker.play": "speaker.playback",
     "speaker.stop": "speaker.playback",

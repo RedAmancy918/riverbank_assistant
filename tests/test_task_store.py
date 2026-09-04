@@ -63,6 +63,7 @@ class TaskStoreTests(unittest.TestCase):
         assert completed is not None
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["progress"], 1)
+        self.assertEqual(completed["output_format"], "text")
         self.assertEqual(self.store.counts()["completed"], 1)
 
     def test_cancel_and_recover(self) -> None:
@@ -85,6 +86,86 @@ class TaskStoreTests(unittest.TestCase):
             self.store.create_task(prompt="x")
         with self.assertRaises(ValueError):
             self.store.create_task(prompt="valid prompt", kind="shell")
+        with self.assertRaises(ValueError):
+            self.store.create_task(prompt="valid prompt", output_format="video")
+
+    def test_generated_artifact_metadata_is_persisted(self) -> None:
+        task, _ = self.store.create_task(
+            prompt="生成一张产品概念图",
+            output_format="image",
+        )
+        claimed = self.store.claim_next()
+        assert claimed is not None
+        self.store.complete(
+            task["id"],
+            summary="图片已生成",
+            artifact_filename="riverbank-image.png",
+            artifact_media_type="image/png",
+            artifact_size_bytes=1024,
+        )
+        completed = self.store.get_task(task["id"])
+        assert completed is not None
+        self.assertEqual(completed["output_format"], "image")
+        self.assertEqual(completed["artifact_filename"], "riverbank-image.png")
+        self.assertEqual(completed["artifact_size_bytes"], 1024)
+
+    def test_tasks_are_isolated_and_cleanup_refuses_active_work(self) -> None:
+        alice, _ = self.store.create_task(
+            prompt="Alice private task",
+            owner_user_id="alice-user-id",
+            idempotency_key="same-key",
+        )
+        bob, _ = self.store.create_task(
+            prompt="Bob private task",
+            owner_user_id="bob-user-id",
+            idempotency_key="same-key",
+        )
+        self.assertNotEqual(alice["id"], bob["id"])
+        self.assertIsNone(
+            self.store.get_task(alice["id"], owner_user_id="bob-user-id")
+        )
+        self.assertEqual(
+            self.store.counts(owner_user_id="alice-user-id")["queued"], 1
+        )
+        with self.assertRaises(RuntimeError):
+            self.store.delete_owner_tasks("alice-user-id")
+        cancelled = self.store.request_cancel(
+            alice["id"], owner_user_id="alice-user-id"
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(
+            self.store.delete_owner_tasks("alice-user-id")["deleted"], 1
+        )
+        self.assertEqual(
+            self.store.list_tasks(owner_user_id="alice-user-id"), []
+        )
+
+    def test_task_report_owner_index_preserves_account_isolation(self) -> None:
+        task, _ = self.store.create_task(
+            prompt="private report task",
+            owner_user_id="alice-user-id",
+        )
+        claimed = self.store.claim_next()
+        assert claimed is not None
+        self.store.complete(
+            task["id"],
+            summary="done",
+            report_id="private-report-id",
+            report_filename="private.md",
+        )
+        self.assertEqual(
+            self.store.report_owners(),
+            {"private-report-id": {"alice-user-id"}},
+        )
+
+    def test_first_admin_can_claim_legacy_tasks(self) -> None:
+        legacy, _ = self.store.create_task(prompt="Legacy device task")
+        self.assertEqual(self.store.claim_unowned_tasks("first-admin-id"), 1)
+        self.assertIsNotNone(
+            self.store.get_task(
+                legacy["id"], owner_user_id="first-admin-id"
+            )
+        )
 
 
 if __name__ == "__main__":

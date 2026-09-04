@@ -1072,6 +1072,7 @@ class PersistentExpressionDisplay:
         self.frame_render_peak_ms = 0.0
         self.camera_view_active = False
         self.runtime_vision_sources: dict[str, float] = {}
+        self.runtime_audio_sources: dict[str, float] = {}
         self.camera_snapshot_url = str(
             config.get("camera_snapshot_url", "http://127.0.0.1:19733/snapshot")
         )
@@ -6043,7 +6044,7 @@ class PersistentExpressionDisplay:
             "starting": "正在启动",
             "running": "运行中",
             "completed": "已完成",
-            "lease_expired": "相机授权已到期",
+            "lease_expired": "本次授权已到期",
             "error": "运行失败",
         }.get(status, status)
         status_color = (119, 224, 174) if status in {"running", "completed"} else (255, 131, 110) if status == "error" else (112, 198, 225)
@@ -6055,10 +6056,15 @@ class PersistentExpressionDisplay:
         self.draw_aa_ring(self.screen, (26, 100, 126), (400, 390), 150, 2)
         detection_count = int(data.get("detectionCount") or 0)
         counters = data.get("counters") if isinstance(data.get("counters"), dict) else {}
-        value = next(iter(counters.values()), detection_count) if counters else detection_count
+        if "dbfs" in data:
+            value = f"{float(data.get('dbfs') or -96.0):.0f}"
+            value_label = "环境音量 dBFS"
+        else:
+            value = next(iter(counters.values()), detection_count) if counters else detection_count
+            value_label = "当前计数" if "counter" in view or counters else "应用状态"
         self.draw_centered_text(str(value), self.font_large, (104, 224, 245), (400, 374))
         self.draw_centered_text(
-            "当前计数" if "counter" in view or counters else "应用状态",
+            value_label,
             self.font_small,
             (109, 158, 174),
             (400, 438),
@@ -6212,12 +6218,10 @@ class PersistentExpressionDisplay:
                 {"command": "workshop_create", "source": "workshop"}
             )
             if sent:
-                self.workshop_active = False
-                self.workshop_transition_active = False
-                self.workshop_transition_source = None
-                self.workshop_transition_target = None
-                self.workshop_transition_exits_page = False
                 self.workshop_pointer_target = None
+                self.workshop_notice = "请说出你的应用需求"
+                self.workshop_notice_until = now + 10.0
+                self.needs_redraw = True
                 log("workshop requirement conversation requested")
             else:
                 self.workshop_notice = "语音助手暂时不可用"
@@ -8389,7 +8393,7 @@ class PersistentExpressionDisplay:
             (
                 "version",
                 "版本",
-                f"RiverBank Edge · {status.app_version}",
+                f"Edge 系统 · {status.app_version}",
                 True,
             ),
             ("system", "系统", f"{status.hostname} · {health}", True),
@@ -8421,8 +8425,8 @@ class PersistentExpressionDisplay:
         if section == "version":
             return "版本", (
                 ("产品", "RiverBank Edge"),
-                ("版本", status.app_version),
-                ("系统", status.os_name),
+                ("Edge 系统", status.app_version),
+                ("基础系统", status.os_name),
                 ("内核", status.kernel_version or "—"),
             )
         health = (
@@ -8923,7 +8927,7 @@ class PersistentExpressionDisplay:
         target: object | None = None,
         scale: int = 1,
     ) -> None:
-        """Draw camera green, Pomodoro red, or a red/green shared pulse."""
+        """Draw smooth camera, microphone, Pomodoro, or shared activity pulses."""
 
         canvas = target or self.screen
         period = 3.2
@@ -8935,6 +8939,36 @@ class PersistentExpressionDisplay:
         if mode == "pomodoro":
             glow_color = (glow, 8, 8)
             core_color = (brightness, 44, 38)
+        elif mode == "microphone":
+            glow_color = (glow, round(glow * 0.55), 4)
+            core_color = (brightness, round(brightness * 0.62), 26)
+        elif mode in {
+            "camera_microphone",
+            "microphone_pomodoro",
+            "camera_microphone_pomodoro",
+        }:
+            palettes = {
+                "camera_microphone": ((35, 255, 100), (255, 159, 26)),
+                "microphone_pomodoro": ((255, 159, 26), (232, 55, 48)),
+                "camera_microphone_pomodoro": (
+                    (35, 255, 100),
+                    (255, 159, 26),
+                    (232, 55, 48),
+                ),
+            }
+            palette = palettes[mode]
+            progress = (now % period) / period * len(palette)
+            index = int(progress) % len(palette)
+            fraction = progress - int(progress)
+            blend = 0.5 - 0.5 * math.cos(math.pi * fraction)
+            start = palette[index]
+            end = palette[(index + 1) % len(palette)]
+            shared_brightness = 0.58 + 0.42 * wave
+            core_color = tuple(
+                round((start[channel] * (1.0 - blend) + end[channel] * blend) * shared_brightness)
+                for channel in range(3)
+            )
+            glow_color = tuple(max(3, round(value * 0.18)) for value in core_color)
         elif mode == "combined":
             green_ratio = 0.5 + 0.5 * math.cos(angle)
             red_ratio = 1.0 - green_ratio
@@ -8978,16 +9012,31 @@ class PersistentExpressionDisplay:
     def camera_indicator_active(self) -> bool:
         return bool(self.camera_indicator_sources())
 
+    def microphone_indicator_sources(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(self.runtime_audio_sources))
+
+    def microphone_indicator_active(self) -> bool:
+        return bool(self.microphone_indicator_sources())
+
     def pomodoro_background_indicator_active(self) -> bool:
         return self.pomodoro.status == "running" and not self.pomodoro_active
 
     def activity_indicator_mode(self) -> str | None:
         camera_active = self.camera_indicator_active()
+        microphone_active = self.microphone_indicator_active()
         pomodoro_active = self.pomodoro_background_indicator_active()
+        if camera_active and microphone_active and pomodoro_active:
+            return "camera_microphone_pomodoro"
+        if camera_active and microphone_active:
+            return "camera_microphone"
+        if microphone_active and pomodoro_active:
+            return "microphone_pomodoro"
         if camera_active and pomodoro_active:
             return "combined"
         if pomodoro_active:
             return "pomodoro"
+        if microphone_active:
+            return "microphone"
         if camera_active:
             return "camera"
         return None
@@ -9029,6 +9078,44 @@ class PersistentExpressionDisplay:
         self.needs_redraw = True
         self.write_state()
         log(f"vision activity expired sources={expired}")
+
+    def set_audio_activity(
+        self,
+        source: str,
+        active: bool,
+        ttl_seconds: float = 2.0,
+    ) -> dict:
+        source = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", str(source)).strip("_")
+        if not source:
+            return {"ok": False, "error": "audio activity source is required"}
+        if active:
+            ttl_seconds = max(0.5, min(float(ttl_seconds), 300.0))
+            self.runtime_audio_sources[source] = time.monotonic() + ttl_seconds
+        else:
+            self.runtime_audio_sources.pop(source, None)
+        self.needs_redraw = True
+        self.write_state()
+        log(f"audio activity source={source} active={active}")
+        return {
+            "ok": True,
+            "source": source,
+            "active": active,
+            "microphone_indicator_active": self.microphone_indicator_active(),
+        }
+
+    def prune_audio_activity(self, now: float) -> None:
+        expired = [
+            source
+            for source, deadline in self.runtime_audio_sources.items()
+            if now >= deadline
+        ]
+        if not expired:
+            return
+        for source in expired:
+            self.runtime_audio_sources.pop(source, None)
+        self.needs_redraw = True
+        self.write_state()
+        log(f"audio activity expired sources={expired}")
 
     def expression_camera_indicator_position(self) -> tuple[int, int]:
         display_radius = min(self.width, self.height) / 2.0
@@ -12823,6 +12910,8 @@ class PersistentExpressionDisplay:
                     self.pomodoro_background_indicator_active()
                 ),
                 "camera_active": self.camera_indicator_active(),
+                "microphone_active": self.microphone_indicator_active(),
+                "microphone_sources": list(self.microphone_indicator_sources()),
                 "position": list(
                     self.application_camera_indicator_position()
                     if self.application_page_active()
@@ -12901,6 +12990,7 @@ class PersistentExpressionDisplay:
         self.update_camera_capture(now)
         self.update_gallery_page_transition(now)
         self.prune_vision_activity(now)
+        self.prune_audio_activity(now)
         self.update_restart_request(now)
         if self.update_token_balance(now):
             self.write_state()
@@ -13718,6 +13808,12 @@ def main() -> int:
                             str(request.get("source", "")),
                             bool(request.get("active", True)),
                             float(request.get("ttl_seconds", 180.0)),
+                        )
+                    elif request.get("command") == "audio_activity":
+                        display.set_audio_activity(
+                            str(request.get("source", "")),
+                            bool(request.get("active", True)),
+                            float(request.get("ttl_seconds", 2.0)),
                         )
                     else:
                         display.set_state(

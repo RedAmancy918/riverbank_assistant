@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct TaskListView: View {
     @EnvironmentObject private var store: AppStore
@@ -68,6 +69,9 @@ struct TaskRow: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            Label(task.outputLabel, systemImage: task.outputSymbol)
+                .font(.caption)
+                .foregroundStyle(.cyan)
             if task.isActive {
                 ProgressView(value: task.progress)
                     .tint(.cyan)
@@ -86,6 +90,7 @@ struct NewTaskView: View {
     @State private var title = ""
     @State private var prompt = ""
     @State private var kind = "research"
+    @State private var outputFormat = "text"
     @State private var submitting = false
     @State private var localError = ""
 
@@ -115,6 +120,17 @@ struct NewTaskView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                Section("交付成果") {
+                    Picker("输出", selection: $outputFormat) {
+                        Text("文字").tag("text")
+                        Text("图片").tag("image")
+                        Text("图文").tag("illustrated")
+                    }
+                    .pickerStyle(.segmented)
+                    Label(outputDescription, systemImage: outputSymbol)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 if !localError.isEmpty {
                     Section { Text(localError).foregroundStyle(.red) }
                 }
@@ -139,10 +155,31 @@ struct NewTaskView: View {
         submitting = true
         defer { submitting = false }
         do {
-            let task = try await store.createTask(title: title, prompt: prompt, kind: kind)
+            let task = try await store.createTask(
+                title: title,
+                prompt: prompt,
+                kind: kind,
+                outputFormat: outputFormat
+            )
             onCreated(task)
         } catch {
             localError = error.localizedDescription
+        }
+    }
+
+    private var outputDescription: String {
+        switch outputFormat {
+        case "image": "生成一张可预览、保存和分享的原创图片。"
+        case "illustrated": "先完成内容，再生成配图与可离线打开的图文文件。"
+        default: "生成结构化 Markdown 文字报告。"
+        }
+    }
+
+    private var outputSymbol: String {
+        switch outputFormat {
+        case "image": "photo"
+        case "illustrated": "doc.richtext"
+        default: "doc.text"
         }
     }
 }
@@ -153,6 +190,9 @@ struct TaskDetailView: View {
     @State private var answer = ""
     @State private var localError = ""
     @State private var working = false
+    @State private var artifactURL: URL?
+    @State private var artifactImage: UIImage?
+    @State private var artifactLoading = false
 
     init(initialTask: RemoteTask) {
         _task = State(initialValue: initialTask)
@@ -194,6 +234,47 @@ struct TaskDetailView: View {
                 if !task.error.isEmpty {
                     InfoCard(title: "错误", text: task.error, color: .red)
                 }
+                if task.hasArtifact {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Label(task.outputLabel, systemImage: task.outputSymbol)
+                                .font(.headline)
+                            Spacer()
+                            if artifactLoading { ProgressView() }
+                        }
+                        if let artifactImage {
+                            Image(uiImage: artifactImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 430)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                        } else if task.resolvedOutputFormat == "illustrated" {
+                            Label(
+                                "图文内容和配图已封装为可离线打开、打印为 PDF 的单文件报告。",
+                                systemImage: "safari"
+                            )
+                            .foregroundStyle(.secondary)
+                        }
+                        if let artifactURL {
+                            ShareLink(item: artifactURL) {
+                                Label("保存或分享成果文件", systemImage: "square.and.arrow.up")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.cyan)
+                        } else {
+                            Button { Task { await loadArtifact() } } label: {
+                                Label("下载成果文件", systemImage: "arrow.down.circle")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.cyan)
+                            .disabled(artifactLoading)
+                        }
+                    }
+                    .padding()
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                }
                 if !task.reportId.isEmpty {
                     NavigationLink {
                         ReportDetailView(
@@ -209,7 +290,10 @@ struct TaskDetailView: View {
                             )
                         )
                     } label: {
-                        Label("打开生成的报告", systemImage: "doc.text.magnifyingglass")
+                        Label(
+                            task.resolvedOutputFormat == "text" ? "打开生成的报告" : "查看文字记录",
+                            systemImage: "doc.text.magnifyingglass"
+                        )
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -244,6 +328,9 @@ struct TaskDetailView: View {
                     }
                 }
             }
+            if task.hasArtifact && artifactURL == nil {
+                await loadArtifact()
+            }
         }
         .alert("操作失败", isPresented: .constant(!localError.isEmpty)) {
             Button("好") { localError = "" }
@@ -268,6 +355,23 @@ struct TaskDetailView: View {
         defer { working = false }
         do { task = try await store.cancel(taskID: task.id) }
         catch {
+            if !error.isRiverBankCancellation {
+                localError = error.localizedDescription
+            }
+        }
+    }
+
+    private func loadArtifact() async {
+        guard task.hasArtifact, !artifactLoading else { return }
+        artifactLoading = true
+        defer { artifactLoading = false }
+        do {
+            let url = try await store.downloadArtifact(task: task)
+            artifactURL = url
+            if (task.artifactMediaType ?? "").hasPrefix("image/") {
+                artifactImage = UIImage(data: try Data(contentsOf: url))
+            }
+        } catch {
             if !error.isRiverBankCancellation {
                 localError = error.localizedDescription
             }

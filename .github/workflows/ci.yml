@@ -1,0 +1,113 @@
+name: RiverBank CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    name: Version, naming and release checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate release tree
+        run: ./scripts/validate-release.sh
+      - name: Validate artifact version catalog
+        run: python3 -m unittest tests.test_version_catalog -v
+
+  python-tests:
+    name: Edge Python unit tests
+    runs-on: ubuntu-24.04
+    env:
+      PYTHONPATH: ${{ github.workspace }}/apps/expression-ui:${{ github.workspace }}/apps/video-call:${{ github.workspace }}/apps/paper-radar/scripts:${{ github.workspace }}/apps/provisioning:${{ github.workspace }}/apps/recovery:${{ github.workspace }}/apps/face-tracker:${{ github.workspace }}/apps/workshop:${{ github.workspace }}/apps/release-manager
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install test dependencies
+        run: python3 -m pip install --disable-pip-version-check -r requirements-ci.txt
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  desktop-build:
+    name: ${{ matrix.label }} build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS client
+            script: dist:mac
+            artifact: riverbank-call-macos-unsigned
+          - os: windows-2022
+            label: Windows client
+            script: dist:win
+            artifact: riverbank-call-windows-unsigned
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/video-call/windows-client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/video-call/windows-client/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Check desktop source
+        run: node --check main.js && node --check preload.js && node --check renderer.js
+      - name: Build unsigned beta package
+        run: npm run ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: apps/video-call/windows-client/dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  ios-build:
+    name: iOS client build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build without distribution signing
+        run: >-
+          xcodebuild
+          -project apps/ios/RiverBankMobile/RiverBankMobile.xcodeproj
+          -scheme RiverBankMobile
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/riverbank-ios"
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Package CI build
+        run: |
+          ios_version=$(python3 -c 'import json; print(json.load(open("config/version-catalog.json"))["clients"]["ios"]["version"])')
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/riverbank-ios/Build/Products/Release-iphoneos/RiverBank.app" \
+            "$RUNNER_TEMP/RiverBank-iOS-${ios_version}-unsigned.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: riverbank-ios-unsigned
+          path: ${{ runner.temp }}/RiverBank-iOS-*-unsigned.app.zip
+          if-no-files-found: error
+          retention-days: 14

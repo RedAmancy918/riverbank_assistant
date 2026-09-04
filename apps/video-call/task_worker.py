@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import html
 import json
 import logging
 import os
@@ -15,8 +17,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+from image_generation import DashScopeImageGenerator, GeneratedImage
 from report_library import ReportLibrary
+from task_artifact_store import DEFAULT_TASK_ARTIFACT_ROOT, TaskArtifactStore
 from task_store import TaskStore
 
 
@@ -68,18 +73,166 @@ def render_fallback_report(task: dict[str, Any], response: str) -> str:
     )
 
 
+def build_image_prompt(task: dict[str, Any], report_content: str = "") -> str:
+    context = report_content.strip()[:5_000]
+    context_block = f"\n以下是已经完成的内容提要，配图需与其事实一致：\n{context}" if context else ""
+    return (
+        "请为 RiverBank 用户任务生成一张原创、高完成度、可直接交付的图片。"
+        "画面干净、主体明确、构图完整、无水印；除非任务明确要求，否则避免在图中堆叠文字。\n"
+        f"标题：{task['title']}\n"
+        f"用户要求：{task['prompt']}"
+        f"{context_block}"
+    )
+
+
+LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^\s)]+)\)")
+
+
+def render_inline_markdown(value: str) -> str:
+    parts: list[str] = []
+    offset = 0
+    for match in LINK_RE.finditer(value):
+        parts.append(html.escape(value[offset : match.start()]))
+        url = match.group(2)
+        parsed = urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            parts.append(
+                f'<a href="{html.escape(url, quote=True)}">'
+                f"{html.escape(match.group(1))}</a>"
+            )
+        else:
+            parts.append(html.escape(match.group(0)))
+        offset = match.end()
+    parts.append(html.escape(value[offset:]))
+    rendered = "".join(parts)
+    rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
+    rendered = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", rendered)
+    return rendered
+
+
+def markdown_to_safe_html(source: str) -> str:
+    rendered: list[str] = []
+    list_kind = ""
+    in_code = False
+    code_lines: list[str] = []
+
+    def close_list() -> None:
+        nonlocal list_kind
+        if list_kind:
+            rendered.append(f"</{list_kind}>")
+            list_kind = ""
+
+    for raw_line in source.splitlines():
+        line = raw_line.rstrip()
+        if line.strip().startswith("```"):
+            close_list()
+            if in_code:
+                rendered.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            close_list()
+            continue
+        heading = re.match(r"^(#{1,4})\s+(.+)$", stripped)
+        if heading:
+            close_list()
+            level = len(heading.group(1))
+            rendered.append(f"<h{level}>{render_inline_markdown(heading.group(2))}</h{level}>")
+            continue
+        unordered = re.match(r"^[-*+]\s+(.+)$", stripped)
+        ordered = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        if unordered or ordered:
+            wanted = "ul" if unordered else "ol"
+            if list_kind != wanted:
+                close_list()
+                list_kind = wanted
+                rendered.append(f"<{wanted}>")
+            item = (unordered or ordered).group(1)
+            rendered.append(f"<li>{render_inline_markdown(item)}</li>")
+            continue
+        close_list()
+        if stripped.startswith(">"):
+            rendered.append(
+                f"<blockquote>{render_inline_markdown(stripped[1:].strip())}</blockquote>"
+            )
+        elif stripped in {"---", "***"}:
+            rendered.append("<hr>")
+        else:
+            rendered.append(f"<p>{render_inline_markdown(stripped)}</p>")
+    close_list()
+    if in_code:
+        rendered.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+    return "\n".join(rendered)
+
+
+def render_illustrated_document(
+    task: dict[str, Any],
+    report_content: str,
+    generated: GeneratedImage,
+) -> bytes:
+    image_data = base64.b64encode(generated.payload).decode("ascii")
+    title = html.escape(str(task["title"]))
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    document = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+:root {{ color-scheme: light; --ink:#111712; --muted:#657068; --cyan:#28bfe8; --line:#d9dfda; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:#f4f2eb; color:var(--ink); font:17px/1.75 -apple-system,BlinkMacSystemFont,"Noto Sans SC","PingFang SC",sans-serif; }}
+main {{ width:min(920px,calc(100% - 32px)); margin:32px auto 80px; background:#fff; border:1px solid var(--line); box-shadow:0 18px 60px #18251a16; }}
+header {{ padding:42px 7% 30px; border-bottom:1px solid var(--line); }}
+.brand {{ color:#148bae; font-size:12px; font-weight:800; letter-spacing:.18em; }}
+h1 {{ margin:.35em 0 .25em; font-size:clamp(30px,5vw,54px); line-height:1.12; }}
+.meta {{ color:var(--muted); font-size:13px; }}
+figure {{ margin:0; padding:0; background:#071014; }}
+figure img {{ display:block; width:100%; max-height:720px; object-fit:contain; }}
+figcaption {{ padding:10px 7%; color:#c5d5d8; background:#071014; font-size:12px; }}
+article {{ padding:38px 7% 64px; }}
+article h1 {{ font-size:34px; }} article h2 {{ margin-top:1.8em; font-size:25px; }} article h3 {{ margin-top:1.5em; font-size:20px; }}
+p {{ margin:.8em 0; }} li {{ margin:.35em 0; }} a {{ color:#087d9d; }}
+blockquote {{ margin:1.2em 0; padding:.5em 1em; border-left:4px solid var(--cyan); background:#effafd; }}
+pre {{ overflow:auto; padding:18px; border-radius:12px; background:#081216; color:#d8edf2; }}
+code {{ font-family:"SFMono-Regular",Consolas,monospace; }} hr {{ border:0; border-top:1px solid var(--line); margin:2em 0; }}
+@media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; border:0; box-shadow:none; }} }}
+</style>
+</head>
+<body><main>
+<header><div class="brand">RIVERBANK</div><h1>{title}</h1><div class="meta">生成于 {html.escape(generated_at)}</div></header>
+<figure><img src="data:{html.escape(generated.media_type, quote=True)};base64,{image_data}" alt="{title}"><figcaption>AI 生成配图 · {html.escape(generated.model)}</figcaption></figure>
+<article>{markdown_to_safe_html(report_content)}</article>
+</main></body></html>"""
+    return document.encode("utf-8")
+
+
 def build_prompt(task: dict[str, Any], report_path: Path) -> str:
     answers = task.get("answers") or []
+    output_label = {
+        "text": "文字报告",
+        "image": "原创图片（同时保留内容依据）",
+        "illustrated": "图文报告（同时生成原创配图）",
+    }.get(str(task.get("output_format") or "text"), "文字报告")
     answer_text = "\n".join(
         f"- 问题：{item.get('question', '')}\n  用户补充：{item.get('answer', '')}"
         for item in answers
     ) or "- 暂无"
     return f"""
-你是 RiverBank Assistant 的后台任务执行 Agent。该任务来自已鉴权设备，执行不依赖客户端保持在线。
+你是 RiverBank 旗下智能产品“小灰”的后台任务执行 Agent。该任务来自已鉴权设备，执行不依赖客户端保持在线。
 
 [任务]
 标题：{task['title']}
 类型：{task['kind']}
+最终成果：{output_label}
 原始要求：
 {task['prompt']}
 
@@ -200,12 +353,18 @@ class TaskWorker:
         store: TaskStore,
         runner: HermesProcessRunner,
         reports_dir: Path,
+        artifacts_dir: Path | None = None,
+        image_generator: DashScopeImageGenerator | None = None,
         poll_seconds: float = 1.0,
     ) -> None:
         self.store = store
         self.runner = runner
         self.reports_dir = reports_dir
         self.report_library = ReportLibrary(reports_dir)
+        self.artifact_store = TaskArtifactStore(
+            artifacts_dir if artifacts_dir is not None else reports_dir / ".task-artifacts"
+        )
+        self.image_generator = image_generator or DashScopeImageGenerator()
         self.poll_seconds = max(0.2, poll_seconds)
         self.running = True
 
@@ -214,6 +373,10 @@ class TaskWorker:
 
     def process(self, task: dict[str, Any]) -> None:
         report_path = self.reports_dir / f"{safe_report_stem(task['title'], task['id'])}.md"
+        output_format = str(task.get("output_format") or "text")
+        artifact_filename = ""
+        artifact_media_type = ""
+        artifact_size_bytes = 0
         LOGGER.info("task started id=%s title=%s", task["id"], task["title"])
         try:
             self.store.update_progress(task["id"], 0.1, "正在启动 Hermes")
@@ -229,6 +392,34 @@ class TaskWorker:
                 return
             if not report_path.is_file():
                 atomic_write_text(report_path, render_fallback_report(task, response))
+            if output_format in {"image", "illustrated"}:
+                status = "正在生成图片" if output_format == "image" else "正在生成配图与排版"
+                self.store.update_progress(task["id"], 0.78, status)
+                report_content = report_path.read_text(encoding="utf-8")
+                generated = self.image_generator.generate(
+                    build_image_prompt(task, report_content)
+                )
+                if output_format == "image":
+                    artifact_filename = f"riverbank-image-{task['id'][:8]}.png"
+                    artifact_payload = generated.payload
+                    artifact_media_type = generated.media_type
+                    generation_note = (
+                        "\n\n## 生成成果\n\n"
+                        "已生成可在任务详情中预览和下载的原创图片。\n\n"
+                        f"- 图片模型：`{generated.model}`\n"
+                        f"- 请求 ID：`{generated.request_id or '未提供'}`\n"
+                    )
+                    atomic_write_text(report_path, report_content.rstrip() + generation_note)
+                else:
+                    artifact_filename = f"riverbank-report-{task['id'][:8]}.html"
+                    artifact_payload = render_illustrated_document(
+                        task, report_content, generated
+                    )
+                    artifact_media_type = "text/html"
+                artifact_path = self.artifact_store.save(
+                    task["id"], artifact_filename, artifact_payload
+                )
+                artifact_size_bytes = artifact_path.stat().st_size
             self.store.update_progress(task["id"], 0.92, "正在归档报告")
             relative = report_path.resolve().relative_to(self.reports_dir.resolve()).as_posix()
             report_id = self.report_library.encode_id(relative)
@@ -243,6 +434,9 @@ class TaskWorker:
                 summary=summary,
                 report_id=report_id,
                 report_filename=report_path.name,
+                artifact_filename=artifact_filename,
+                artifact_media_type=artifact_media_type,
+                artifact_size_bytes=artifact_size_bytes,
             )
             LOGGER.info("task completed id=%s report=%s", task["id"], report_path)
         except InterruptedError:
@@ -274,6 +468,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS_DIR)
+    parser.add_argument(
+        "--artifacts-dir", type=Path, default=DEFAULT_TASK_ARTIFACT_ROOT
+    )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument(
         "--hermes-bin",
@@ -307,6 +504,8 @@ def main() -> int:
                     "schema": "riverbank.task-worker/v1",
                     "db": str(args.db),
                     "reports_dir": str(args.reports_dir),
+                    "artifacts_dir": str(args.artifacts_dir),
+                    "image_generation": DashScopeImageGenerator().available,
                     "workspace": str(args.workspace),
                     "hermes_bin": str(args.hermes_bin),
                     "counts": store.counts(),
@@ -324,6 +523,7 @@ def main() -> int:
             toolsets=args.toolsets,
         ),
         reports_dir=args.reports_dir,
+        artifacts_dir=args.artifacts_dir,
         poll_seconds=args.poll,
     )
     signal.signal(signal.SIGTERM, worker.stop)

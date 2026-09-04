@@ -120,6 +120,7 @@ def render_task(task: dict[str, Any], *, detail: bool = False) -> str:
         lines.extend(
             [
                 f"  类型: {task.get('kind')}  来源: {task.get('source')}",
+                f"  成果: {task.get('output_format') or 'text'}",
                 f"  创建: {task.get('created_at')}  更新: {task.get('updated_at')}",
                 f"  任务: {task.get('prompt')}",
             ]
@@ -128,6 +129,8 @@ def render_task(task: dict[str, Any], *, detail: bool = False) -> str:
             lines.append(f"  需要补充: {task['question']}")
         if task.get("report_filename"):
             lines.append(f"  报告: {task['report_filename']}")
+        if task.get("artifact_filename"):
+            lines.append(f"  成果文件: {task['artifact_filename']}")
         if task.get("result_summary"):
             lines.append(f"  结果: {task['result_summary']}")
         if task.get("error"):
@@ -164,6 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--file", type=Path, help="read task prompt from UTF-8 file")
     submit.add_argument("--title", default="")
     submit.add_argument("--kind", choices=("research", "general", "file"), default="research")
+    submit.add_argument(
+        "--output-format",
+        choices=("text", "image", "illustrated"),
+        default="text",
+        help="deliver Markdown text, PNG image, or a self-contained illustrated HTML file",
+    )
     submit.add_argument("--device", default="terminal")
     submit.add_argument("--wait", action="store_true")
     submit.add_argument("--poll", type=float, default=2.0)
@@ -240,6 +249,7 @@ def main() -> int:
                     "prompt": prompt,
                     "title": args.title,
                     "kind": args.kind,
+                    "output_format": args.output_format,
                     "source": "terminal",
                     "device_name": args.device,
                 },
@@ -298,16 +308,26 @@ def main() -> int:
             return 0
         if args.command == "download":
             report_id = args.identifier
+            artifact_task_id = ""
             if args.task:
                 task = client.request("GET", f"/api/v1/tasks/{report_id}")["task"]
+                if task.get("artifact_filename"):
+                    artifact_task_id = str(task["id"])
                 report_id = str(task.get("report_id") or "")
-                if not report_id:
+                if not report_id and not artifact_task_id:
                     raise APIError("task has no report")
-            data, headers = client.request(
-                "GET",
-                f"/api/v1/reports/{urllib.parse.quote(report_id)}/download",
-                raw=True,
-            )
+            if artifact_task_id:
+                data, headers = client.request(
+                    "GET",
+                    f"/api/v1/tasks/{urllib.parse.quote(artifact_task_id)}/artifact",
+                    raw=True,
+                )
+            else:
+                data, headers = client.request(
+                    "GET",
+                    f"/api/v1/reports/{urllib.parse.quote(report_id)}/download",
+                    raw=True,
+                )
             output = args.output
             if output is None:
                 disposition = headers.get("Content-Disposition", "")

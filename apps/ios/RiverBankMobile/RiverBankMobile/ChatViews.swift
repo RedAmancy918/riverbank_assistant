@@ -1,13 +1,28 @@
 import SwiftUI
 import UIKit
+import PhotosUI
+import UniformTypeIdentifiers
 
 private let chatCyan = Color(red: 0.337, green: 0.847, blue: 1.0)
+private let maxChatAttachmentBytes = 15 * 1024 * 1024
+private let maxChatAttachmentTotalBytes = 30 * 1024 * 1024
+private let maxChatAttachments = 4
+private let chatImportTypes: [UTType] = {
+    var types: [UTType] = [.pdf, .plainText]
+    if let markdown = UTType(filenameExtension: "md") { types.append(markdown) }
+    if let markdownLong = UTType(filenameExtension: "markdown") { types.append(markdownLong) }
+    return types
+}()
 
 struct ChatView: View {
     @EnvironmentObject private var store: AppStore
     @State private var draft = ""
     @State private var showHistory = false
     @State private var localError = ""
+    @State private var pendingAttachments: [ChatUploadAttachment] = []
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showFileImporter = false
+    @State private var isSubmitting = false
     @FocusState private var composerFocused: Bool
 
     private var isResponding: Bool {
@@ -21,7 +36,10 @@ struct ChatView: View {
 
     var body: some View {
         NavigationStack {
-            ChatTranscript(messages: store.chatMessages) { content in
+            ChatTranscript(
+                messages: store.chatMessages,
+                dismissKeyboard: { composerFocused = false }
+            ) { content in
                 Task { await retry(content) }
             }
             .navigationTitle(activeTitle)
@@ -39,12 +57,20 @@ struct ChatView: View {
                     }
                     .accessibilityLabel("新对话")
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("收起") { composerFocused = false }
+                }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ChatComposer(
                     text: $draft,
+                    attachments: $pendingAttachments,
+                    selectedPhoto: $selectedPhoto,
                     focused: $composerFocused,
                     isResponding: isResponding,
+                    isSubmitting: isSubmitting,
+                    openFiles: { showFileImporter = true },
                     send: { Task { await send() } },
                     stop: { Task { await stop() } }
                 )
@@ -52,6 +78,17 @@ struct ChatView: View {
             .sheet(isPresented: $showHistory) {
                 ChatHistoryView(isPresented: $showHistory)
                     .environmentObject(store)
+            }
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: chatImportTypes,
+                allowsMultipleSelection: true
+            ) { result in
+                Task { await importDocuments(result) }
+            }
+            .onChange(of: selectedPhoto) { _, item in
+                guard let item else { return }
+                Task { await importPhoto(item) }
             }
             .task {
                 await store.refreshChats(showLoading: true)
@@ -78,6 +115,7 @@ struct ChatView: View {
         do {
             _ = try await store.newChat()
             draft = ""
+            pendingAttachments = []
             composerFocused = true
         } catch {
             if !error.isRiverBankCancellation { localError = error.localizedDescription }
@@ -86,12 +124,16 @@ struct ChatView: View {
 
     private func send() async {
         let content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty, !isResponding else { return }
-        draft = ""
+        guard (!content.isEmpty || !pendingAttachments.isEmpty),
+              !isResponding,
+              !isSubmitting else { return }
+        isSubmitting = true
+        defer { isSubmitting = false }
         do {
-            try await store.sendChat(content)
+            try await store.sendChat(content, attachments: pendingAttachments)
+            draft = ""
+            pendingAttachments = []
         } catch {
-            draft = content
             if !error.isRiverBankCancellation { localError = error.localizedDescription }
         }
     }
@@ -112,41 +154,94 @@ struct ChatView: View {
             if !error.isRiverBankCancellation { localError = error.localizedDescription }
         }
     }
+
+    private func appendAttachment(_ attachment: ChatUploadAttachment) {
+        guard pendingAttachments.count < maxChatAttachments else {
+            localError = "单条消息最多上传 4 个附件"
+            return
+        }
+        guard !attachment.data.isEmpty, attachment.data.count <= maxChatAttachmentBytes else {
+            localError = "单个附件不能为空或超过 15 MB"
+            return
+        }
+        guard pendingAttachments.reduce(0, { $0 + $1.data.count }) + attachment.data.count
+                <= maxChatAttachmentTotalBytes else {
+            localError = "单条消息附件总计不能超过 30 MB"
+            return
+        }
+        guard !attachment.isImage || !pendingAttachments.contains(where: \.isImage) else {
+            localError = "单条消息最多上传 1 张图片"
+            return
+        }
+        pendingAttachments.append(attachment)
+    }
+
+    private func importPhoto(_ item: PhotosPickerItem) async {
+        defer { selectedPhoto = nil }
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else {
+                throw ChatUploadError.unreadable
+            }
+            appendAttachment(try normalizedPhotoUpload(data))
+        } catch {
+            if !error.isRiverBankCancellation { localError = error.localizedDescription }
+        }
+    }
+
+    private func importDocuments(_ result: Result<[URL], Error>) async {
+        do {
+            let urls = try result.get()
+            for url in urls {
+                let attachment = try await Task.detached(priority: .userInitiated) {
+                    try documentUpload(url)
+                }.value
+                appendAttachment(attachment)
+            }
+        } catch {
+            if !error.isRiverBankCancellation { localError = error.localizedDescription }
+        }
+    }
 }
 
 private struct ChatTranscript: View {
     let messages: [ChatMessage]
+    let dismissKeyboard: () -> Void
     let retry: (String) -> Void
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                if messages.isEmpty {
-                    ChatWelcomeView()
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 88)
-                } else {
-                    LazyVStack(spacing: 22) {
-                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                            ChatMessageView(
-                                message: message,
-                                retryContent: precedingUserContent(at: index),
-                                retry: retry
-                            )
-                                .id(message.id)
+        GeometryReader { viewport in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    if messages.isEmpty {
+                        ChatWelcomeView()
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: viewport.size.height, alignment: .center)
+                    } else {
+                        LazyVStack(spacing: 22) {
+                            ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                                ChatMessageView(
+                                    message: message,
+                                    retryContent: precedingUserContent(at: index),
+                                    retry: retry
+                                )
+                                    .id(message.id)
+                            }
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 18)
+                        .padding(.bottom, 18)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 18)
-                    .padding(.bottom, 18)
                 }
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: messages) { _, updated in
-                guard let last = updated.last else { return }
-                withAnimation(.easeOut(duration: 0.22)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
+                .scrollDismissesKeyboard(.interactively)
+                .simultaneousGesture(
+                    TapGesture().onEnded { dismissKeyboard() }
+                )
+                .defaultScrollAnchor(.bottom)
+                .onChange(of: messages) { _, updated in
+                    guard let last = updated.last else { return }
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
                 }
             }
         }
@@ -192,11 +287,16 @@ private struct ChatMessageView: View {
         if message.role == "user" {
             HStack {
                 Spacer(minLength: 46)
-                Text(message.content)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 15)
-                    .padding(.vertical, 11)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
+                VStack(alignment: .trailing, spacing: 8) {
+                    ChatAttachmentList(attachments: message.attachmentList)
+                    if !message.content.isEmpty {
+                        Text(message.content)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 15)
+                            .padding(.vertical, 11)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 20))
+                    }
+                }
             }
         } else {
             HStack(alignment: .top, spacing: 11) {
@@ -222,6 +322,7 @@ private struct ChatMessageView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    ChatAttachmentList(attachments: message.attachmentList)
                     if ["failed", "cancelled"].contains(message.state), let retryContent {
                         Button("重试") { retry(retryContent) }
                             .font(.caption.weight(.medium))
@@ -239,6 +340,61 @@ private struct ChatMessageView: View {
                     }
                 }
                 Spacer(minLength: 12)
+            }
+        }
+    }
+}
+
+private struct ChatAttachmentList: View {
+    let attachments: [ChatAttachment]
+
+    var body: some View {
+        ForEach(attachments) { attachment in
+            if attachment.kind == "image" {
+                AuthenticatedChatImage(attachment: attachment)
+            } else {
+                Label(attachment.originalName, systemImage: "doc.text")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color(.secondarySystemBackground), in: Capsule())
+            }
+        }
+    }
+}
+
+private struct AuthenticatedChatImage: View {
+    @EnvironmentObject private var store: AppStore
+    let attachment: ChatAttachment
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else if failed {
+                Label("图片加载失败", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 90)
+            } else {
+                ProgressView("正在读取图片…")
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            }
+        }
+        .frame(maxWidth: 320)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .task(id: attachment.id) {
+            do {
+                let data = try await store.chatAttachmentData(attachment)
+                image = UIImage(data: data)
+                failed = image == nil
+            } catch {
+                if !error.isRiverBankCancellation { failed = true }
             }
         }
     }
@@ -267,38 +423,102 @@ private struct ThinkingIndicator: View {
 
 private struct ChatComposer: View {
     @Binding var text: String
+    @Binding var attachments: [ChatUploadAttachment]
+    @Binding var selectedPhoto: PhotosPickerItem?
     var focused: FocusState<Bool>.Binding
     let isResponding: Bool
+    let isSubmitting: Bool
+    let openFiles: () -> Void
     let send: () -> Void
     let stop: () -> Void
 
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("询问任何问题", text: $text, axis: .vertical)
-                .lineLimit(1...6)
-                .focused(focused)
-                .padding(.leading, 6)
-                .padding(.vertical, 8)
-                .submitLabel(.send)
-                .onSubmit {
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        send()
-                    }
-                }
+    private var canSend: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
 
-            Button(action: isResponding ? stop : send) {
-                Image(systemName: isResponding ? "stop.fill" : "arrow.up")
-                    .font(.system(size: 15, weight: .bold))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { attachment in
+                            HStack(spacing: 6) {
+                                if attachment.isImage, let image = UIImage(data: attachment.data) {
+                                    Image(uiImage: image)
+                                        .resizable()
+                                        .scaledToFill()
+                                        .frame(width: 34, height: 34)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                } else {
+                                    Image(systemName: attachment.mediaType == "application/pdf" ? "doc.richtext" : "doc.text")
+                                        .foregroundStyle(chatCyan)
+                                }
+                                Text(attachment.filename)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: 150)
+                                Button {
+                                    attachments.removeAll { $0.id == attachment.id }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("移除 \(attachment.filename)")
+                            }
+                            .padding(6)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+
+            HStack(alignment: .bottom, spacing: 9) {
+                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Image(systemName: "photo")
+                        .frame(width: 30, height: 34)
+                }
+                .disabled(isResponding || isSubmitting || attachments.count >= maxChatAttachments)
+                .accessibilityLabel("选择图片")
+
+                Button(action: openFiles) {
+                    Image(systemName: "paperclip")
+                        .frame(width: 30, height: 34)
+                }
+                .disabled(isResponding || isSubmitting || attachments.count >= maxChatAttachments)
+                .accessibilityLabel("选择 PDF 或文本文件")
+
+                TextField("询问任何问题", text: $text, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused(focused)
+                    .padding(.leading, 2)
+                    .padding(.vertical, 8)
+                    .submitLabel(.send)
+                    .disabled(isSubmitting)
+                    .onSubmit {
+                        if canSend && !isSubmitting { send() }
+                    }
+
+                Button(action: isResponding ? stop : send) {
+                    Group {
+                        if isSubmitting {
+                            ProgressView().tint(.black)
+                        } else {
+                            Image(systemName: isResponding ? "stop.fill" : "arrow.up")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                    }
                     .foregroundStyle(.black)
                     .frame(width: 34, height: 34)
                     .background(
-                        isResponding || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            ? chatCyan : Color.secondary.opacity(0.25),
+                        isResponding || canSend ? chatCyan : Color.secondary.opacity(0.25),
                         in: Circle()
                     )
+                }
+                .disabled(isSubmitting || (!isResponding && !canSend))
+                .accessibilityLabel(isResponding ? "停止生成" : "发送")
             }
-            .disabled(!isResponding && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .accessibilityLabel(isResponding ? "停止生成" : "发送")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -312,6 +532,76 @@ private struct ChatComposer: View {
         .padding(.bottom, 6)
         .background(.bar)
     }
+}
+
+private enum ChatUploadError: LocalizedError {
+    case unreadable
+    case unsupported
+    case tooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable: "无法读取所选文件"
+        case .unsupported: "第一版仅支持图片、PDF、Markdown 和 TXT"
+        case .tooLarge: "单个附件不能超过 15 MB"
+        }
+    }
+}
+
+private func normalizedPhotoUpload(_ source: Data) throws -> ChatUploadAttachment {
+    guard let image = UIImage(data: source), image.size.width > 0, image.size.height > 0 else {
+        throw ChatUploadError.unreadable
+    }
+    let maximumDimension: CGFloat = 4096
+    let scale = min(1, maximumDimension / max(image.size.width, image.size.height))
+    let target = CGSize(
+        width: max(1, floor(image.size.width * scale)),
+        height: max(1, floor(image.size.height * scale))
+    )
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    let normalized = UIGraphicsImageRenderer(size: target, format: format).image { _ in
+        image.draw(in: CGRect(origin: .zero, size: target))
+    }
+    guard let data = normalized.jpegData(compressionQuality: 0.88),
+          !data.isEmpty else {
+        throw ChatUploadError.unreadable
+    }
+    guard data.count <= maxChatAttachmentBytes else { throw ChatUploadError.tooLarge }
+    return ChatUploadAttachment(
+        filename: "RiverBank-Photo-\(UUID().uuidString.prefix(8)).jpg",
+        mediaType: "image/jpeg",
+        data: data,
+        isImage: true
+    )
+}
+
+private func documentUpload(_ url: URL) throws -> ChatUploadAttachment {
+    let accessed = url.startAccessingSecurityScopedResource()
+    defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+    let extensionName = url.pathExtension.lowercased()
+    let mediaType: String
+    switch extensionName {
+    case "pdf": mediaType = "application/pdf"
+    case "md", "markdown": mediaType = "text/markdown"
+    case "txt": mediaType = "text/plain"
+    default: throw ChatUploadError.unsupported
+    }
+    let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+    guard values.isRegularFile == true else { throw ChatUploadError.unreadable }
+    if let size = values.fileSize, size > maxChatAttachmentBytes {
+        throw ChatUploadError.tooLarge
+    }
+    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+    guard !data.isEmpty else { throw ChatUploadError.unreadable }
+    guard data.count <= maxChatAttachmentBytes else { throw ChatUploadError.tooLarge }
+    return ChatUploadAttachment(
+        filename: url.lastPathComponent,
+        mediaType: mediaType,
+        data: data,
+        isImage: false
+    )
 }
 
 private struct ChatHistoryView: View {

@@ -123,8 +123,12 @@ CAPABILITY_CATALOG: dict[str, CapabilitySpec] = {
             "microphone.stream",
             "high",
             "session",
-            ("microphone.stream.open", "microphone.stream.close"),
-            "读取受控麦克风流，并持续显示录音状态。",
+            (
+                "microphone.stream.open",
+                "microphone.stream.read",
+                "microphone.stream.close",
+            ),
+            "读取受控麦克风分析流，并持续显示录音状态。",
         ),
         _capability(
             "speaker.playback",
@@ -768,6 +772,96 @@ def _authorize_motor(
     return sanitized
 
 
+def _authorize_microphone(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the bounded, metrics-only microphone session protocol."""
+
+    sanitized = dict(params)
+    if method == "microphone.stream.open":
+        allowed = {
+            "leaseSeconds",
+            "sampleRate",
+            "frameMilliseconds",
+            "privacyIndicator",
+        }
+        _reject_unknown(sanitized, allowed, "params")
+        lease = sanitized.get("leaseSeconds", 30)
+        if isinstance(lease, bool) or not isinstance(lease, (int, float)):
+            raise ContractError(
+                "invalid_microphone_lease",
+                "麦克风租约必须是秒数。",
+                "params.leaseSeconds",
+            )
+        lease = float(lease)
+        if not math.isfinite(lease) or lease < 1 or lease > 300:
+            raise ContractError(
+                "invalid_microphone_lease",
+                "麦克风租约必须在 1 到 300 秒之间。",
+                "params.leaseSeconds",
+            )
+        sample_rate = sanitized.get("sampleRate", 16000)
+        if sample_rate not in {16000, 48000}:
+            raise ContractError(
+                "invalid_microphone_sample_rate",
+                "麦克风采样率只允许 16000 或 48000 Hz。",
+                "params.sampleRate",
+            )
+        frame_ms = _bounded_integer(
+            sanitized.get("frameMilliseconds", 100),
+            "params.frameMilliseconds",
+            20,
+            500,
+        )
+        if sanitized.get("privacyIndicator", True) is not True:
+            raise ContractError(
+                "privacy_indicator_required",
+                "麦克风会话必须持续显示宿主隐私指示。",
+                "params.privacyIndicator",
+            )
+        return {
+            "leaseSeconds": round(lease, 3),
+            "sampleRate": int(sample_rate),
+            "frameMilliseconds": frame_ms,
+            "privacyIndicator": True,
+        }
+    if method == "microphone.stream.read":
+        _reject_unknown(sanitized, {"leaseId", "frameMilliseconds"}, "params")
+        lease_id = _require_text(
+            sanitized.get("leaseId"), "params.leaseId", maximum=64
+        )
+        if not re.fullmatch(r"[a-f0-9]{32}", lease_id):
+            raise ContractError(
+                "invalid_microphone_lease_id",
+                "麦克风租约标识无效。",
+                "params.leaseId",
+            )
+        return {
+            "leaseId": lease_id,
+            "frameMilliseconds": _bounded_integer(
+                sanitized.get("frameMilliseconds", 100),
+                "params.frameMilliseconds",
+                20,
+                500,
+            ),
+        }
+    if method == "microphone.stream.close":
+        _reject_unknown(sanitized, {"leaseId"}, "params")
+        lease_id = _require_text(
+            sanitized.get("leaseId"), "params.leaseId", maximum=64
+        )
+        if not re.fullmatch(r"[a-f0-9]{32}", lease_id):
+            raise ContractError(
+                "invalid_microphone_lease_id",
+                "麦克风租约标识无效。",
+                "params.leaseId",
+            )
+        return {"leaseId": lease_id}
+    raise ContractError(
+        "unknown_host_method",
+        "未知麦克风 Host 方法。",
+        "method",
+    )
+
+
 def authorize_request(
     manifest: Mapping[str, Any],
     grants: Mapping[str, Any],
@@ -827,6 +921,8 @@ def authorize_request(
         constraints = _permission_constraints(permissions, capability)
         if capability == "network.outbound":
             params = _authorize_network(params, constraints)
+        elif capability == "microphone.stream":
+            params = _authorize_microphone(message["method"], params)
         elif capability == "storage.app":
             params["path"] = safe_package_path(
                 _require_text(params.get("path"), "params.path", maximum=240),

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RiverBank 管理后台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="brand-bar">
+      <div class="brand-mark" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      </div>
+      <div>
+        <p class="eyebrow">RIVERBANK EDGE</p>
+        <h1>账户管理</h1>
+      </div>
+      <button id="logoutButton" class="ghost hidden" type="button">退出登录</button>
+    </header>
+
+    <section id="loginPanel" class="login-panel">
+      <div class="login-copy">
+        <p class="eyebrow">ADMIN CONSOLE</p>
+        <h2 id="loginTitle">管理员登录</h2>
+        <p id="loginDescription">只有管理员账户可以读取或修改用户、会话、缓存和任务状态。</p>
+      </div>
+      <form id="loginForm" autocomplete="on">
+        <label>用户名
+          <input id="usernameInput" name="username" autocomplete="username" value="Geo" required>
+        </label>
+        <label>密码
+          <input id="passwordInput" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <div id="setupFields" class="hidden">
+          <label>确认密码
+            <input id="passwordConfirmationInput" name="password_confirmation" type="password" autocomplete="new-password">
+          </label>
+          <label>注册通行码
+            <input id="registrationPasscodeInput" name="registration_passcode" type="password" autocomplete="off">
+          </label>
+        </div>
+        <button id="loginSubmitButton" class="primary" type="submit">安全登录</button>
+        <p id="loginMessage" class="message" role="status"></p>
+      </form>
+    </section>
+
+    <section id="dashboard" class="dashboard hidden">
+      <div class="summary-row">
+        <div>
+          <p class="eyebrow">IDENTITY & STORAGE</p>
+          <h2>用户与数据</h2>
+          <p id="summaryText">正在读取账户状态…</p>
+        </div>
+        <button id="refreshButton" class="ghost" type="button">刷新</button>
+      </div>
+      <div id="notice" class="notice hidden" role="status"></div>
+      <div id="userList" class="user-list" aria-live="polite"></div>
+    </section>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

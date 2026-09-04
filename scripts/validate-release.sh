@@ -7,6 +7,7 @@ trap 'rm -rf "$cache_dir"' EXIT
 
 PYTHONPYCACHEPREFIX="$cache_dir" python3 -m compileall -q "$repo/apps" "$repo/scripts"
 python3 "$repo/scripts/scan_release.py"
+python3 "$repo/scripts/versionctl.py" check
 
 while IFS= read -r -d '' script; do
   bash -n "$script"

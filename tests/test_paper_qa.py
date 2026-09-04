@@ -12,7 +12,12 @@ sys.path.insert(0, str(ROOT / "apps" / "paper-radar" / "scripts"))
 sys.path.insert(0, str(ROOT / "apps" / "video-call"))
 
 from paper_chat_proxy import PaperChatProxy  # noqa: E402
-from paper_context import build_paper_prompt, retrieve_chunks  # noqa: E402
+from paper_context import (  # noqa: E402
+    build_paper_prompt,
+    paper_enrichment_plan,
+    retrieve_chunks,
+)
+from paper_enrich import PDF_SOURCE, enrich_current_paper  # noqa: E402
 from paper_qa import annotate_report, build_daily_knowledge, paper_qa_id  # noqa: E402
 
 
@@ -97,8 +102,83 @@ class PaperKnowledgeTests(unittest.TestCase):
         selected = retrieve_chunks(record, "消融实验验证了什么？")
         self.assertTrue(any("实验" in item["label"] for item in selected))
         prompt = build_paper_prompt("消融实验验证了什么？", paper_qa_id(paper), knowledge_path=path)
-        self.assertIn("只根据下方", prompt)
+        self.assertIn("优先复用下方", prompt)
         self.assertIn("实验包含三个机器人任务", prompt)
+
+    def test_specific_followup_requests_original_paper_enrichment(self) -> None:
+        paper = sample_paper("2609.00006", "Detailed hardware")
+        path = self.root / "current.json"
+        build_daily_knowledge(
+            {
+                "date": "2026-09-02",
+                "papers": [paper],
+                "potential_methods": [],
+                "special_focus": [],
+            },
+            fetch_full=False,
+            output_path=path,
+        )
+        paper_id = paper_qa_id(paper)
+        plan = paper_enrichment_plan(
+            "那你进一步确认一下，灵巧手用的是什么型号？",
+            paper_id,
+            knowledge_path=path,
+        )
+        self.assertTrue(plan["needed"])
+        self.assertIn(plan["reason"], {"explicit_followup", "specific_detail"})
+
+    def test_on_demand_pdf_is_written_to_current_day_only_and_reused(self) -> None:
+        paper = sample_paper("2609.00007", "Hardware details")
+        path = self.root / "current.json"
+        report = {
+            "date": "2026-09-02",
+            "papers": [paper],
+            "potential_methods": [],
+            "special_focus": [],
+        }
+        build_daily_knowledge(
+            report,
+            fetch_full=False,
+            output_path=path,
+        )
+        paper_id = paper_qa_id(paper)
+        result = enrich_current_paper(
+            paper_id,
+            knowledge_path=path,
+            pdf_loader=lambda _arxiv_id: b"%PDF-1.7 fake",
+            pdf_extractor=lambda _payload: [
+                {
+                    "label": "PDF 第 6 页",
+                    "text": "The platform uses two Shadow Robot Dexterous Hands with tactile fingertips.",
+                    "source": PDF_SOURCE,
+                }
+            ],
+        )
+        self.assertTrue(result["changed"])
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        record = payload["papers"][paper_id]
+        self.assertEqual(record["source_state"], PDF_SOURCE)
+        self.assertEqual(record["on_demand"]["retention"], "replace_on_next_successful_daily_run")
+        self.assertTrue(any(item["source"] == PDF_SOURCE for item in record["chunks"]))
+        with patch("paper_qa.CURRENT_PATH", path):
+            build_daily_knowledge(report, fetch_full=False, output_path=path)
+        rerendered = json.loads(path.read_text(encoding="utf-8"))["papers"][paper_id]
+        self.assertEqual(rerendered["source_state"], PDF_SOURCE)
+        self.assertTrue(any(item["source"] == PDF_SOURCE for item in rerendered["chunks"]))
+        followup = paper_enrichment_plan(
+            "它具体是哪种型号？",
+            paper_id,
+            knowledge_path=path,
+        )
+        self.assertFalse(followup["needed"])
+        prompt = build_paper_prompt(
+            "它具体是哪种型号？",
+            paper_id,
+            knowledge_path=path,
+            investigation_note="已按需重新读取论文 PDF。",
+        )
+        self.assertIn("Shadow Robot Dexterous Hands", prompt)
+        self.assertIn("已按需重新读取论文 PDF", prompt)
 
     def test_proxy_persists_mapping_and_returns_history(self) -> None:
         paper = sample_paper("2609.00005", "Chat")

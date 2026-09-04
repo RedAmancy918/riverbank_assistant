@@ -257,6 +257,14 @@
       "focus": "Gemini、Gemma、Veo、Genie、世界模型、通用多模态模型、Gemini Robotics 与具身推理"
     },
     {
+      "name": "World Labs",
+      "url": "https://www.worldlabs.ai/blog",
+      "additional_urls": [
+        "https://docs.worldlabs.ai/marble/release-notes"
+      ],
+      "focus": "Atlas、Marble、RTFM、空间智能、生成式三维世界模型、实时交互世界、世界模型 API、机器人仿真与 real-to-sim-to-real 训练"
+    },
+    {
       "name": "NVIDIA Robotics",
       "url": "https://developer.nvidia.com/blog/category/robotics/",
       "additional_urls": [

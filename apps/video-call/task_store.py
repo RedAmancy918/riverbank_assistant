@@ -22,6 +22,7 @@ TASK_STATUSES = {
 }
 ACTIVE_STATUSES = {"queued", "running", "waiting_input"}
 TASK_KINDS = {"research", "general", "file"}
+TASK_OUTPUT_FORMATS = {"text", "image", "illustrated"}
 MAX_TITLE_CHARS = 160
 MAX_PROMPT_CHARS = 12_000
 MAX_ANSWER_CHARS = 8_000
@@ -69,9 +70,11 @@ class TaskStore:
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     idempotency_key TEXT UNIQUE,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     kind TEXT NOT NULL,
+                    output_format TEXT NOT NULL DEFAULT 'text',
                     status TEXT NOT NULL,
                     source TEXT NOT NULL,
                     device_name TEXT NOT NULL,
@@ -82,6 +85,9 @@ class TaskStore:
                     result_summary TEXT NOT NULL DEFAULT '',
                     report_id TEXT NOT NULL DEFAULT '',
                     report_filename TEXT NOT NULL DEFAULT '',
+                    artifact_filename TEXT NOT NULL DEFAULT '',
+                    artifact_media_type TEXT NOT NULL DEFAULT '',
+                    artifact_size_bytes INTEGER NOT NULL DEFAULT 0,
                     error TEXT NOT NULL DEFAULT '',
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
                     attempt INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +100,31 @@ class TaskStore:
                     ON tasks(status, created_at);
                 CREATE INDEX IF NOT EXISTS tasks_updated
                     ON tasks(updated_at DESC);
+                """
+            )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "owner_user_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''"
+                )
+            migrations = {
+                "output_format": "TEXT NOT NULL DEFAULT 'text'",
+                "artifact_filename": "TEXT NOT NULL DEFAULT ''",
+                "artifact_media_type": "TEXT NOT NULL DEFAULT ''",
+                "artifact_size_bytes": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in migrations.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE tasks ADD COLUMN {name} {declaration}"
+                    )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS tasks_owner_updated
+                ON tasks(owner_user_id, updated_at DESC)
                 """
             )
 
@@ -117,9 +148,11 @@ class TaskStore:
         prompt: Any,
         title: Any = "",
         kind: Any = "research",
+        output_format: Any = "text",
         source: Any = "api",
         device_name: Any = "",
         idempotency_key: Any = "",
+        owner_user_id: Any = "",
     ) -> tuple[dict[str, Any], bool]:
         clean_prompt = clean_text(
             prompt,
@@ -137,6 +170,13 @@ class TaskStore:
         clean_kind = clean_text(kind, maximum=32, field="kind") or "research"
         if clean_kind not in TASK_KINDS:
             raise ValueError(f"kind must be one of {sorted(TASK_KINDS)}")
+        clean_output_format = (
+            clean_text(output_format, maximum=32, field="output format") or "text"
+        )
+        if clean_output_format not in TASK_OUTPUT_FORMATS:
+            raise ValueError(
+                f"output_format must be one of {sorted(TASK_OUTPUT_FORMATS)}"
+            )
         clean_source = clean_text(source, maximum=48, field="source") or "api"
         clean_device = clean_text(
             device_name,
@@ -148,15 +188,21 @@ class TaskStore:
             maximum=128,
             field="idempotency_key",
         )
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            field="owner user id",
+        )
+        stored_key = f"{clean_owner}:{clean_key}" if clean_owner and clean_key else clean_key
         timestamp = now_epoch()
         task_id = uuid.uuid4().hex
         try:
             with self.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                if clean_key:
+                if stored_key:
                     existing = connection.execute(
                         "SELECT * FROM tasks WHERE idempotency_key = ?",
-                        (clean_key,),
+                        (stored_key,),
                     ).fetchone()
                     if existing is not None:
                         connection.commit()
@@ -164,17 +210,20 @@ class TaskStore:
                 connection.execute(
                     """
                     INSERT INTO tasks (
-                        id, idempotency_key, title, prompt, kind, status,
+                        id, idempotency_key, owner_user_id, title, prompt, kind,
+                        output_format, status,
                         source, device_name, progress, status_message,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?)
                     """,
                     (
                         task_id,
-                        clean_key or None,
+                        stored_key or None,
+                        clean_owner,
                         clean_title,
                         clean_prompt,
                         clean_kind,
+                        clean_output_format,
                         clean_source,
                         clean_device,
                         "等待后台执行",
@@ -188,29 +237,49 @@ class TaskStore:
                 ).fetchone()
                 connection.commit()
         except sqlite3.IntegrityError:
-            if not clean_key:
+            if not stored_key:
                 raise
-            existing = self.find_by_idempotency_key(clean_key)
+            existing = self.find_by_idempotency_key(
+                clean_key,
+                owner_user_id=clean_owner,
+            )
             if existing is None:
                 raise
             return existing, False
         return self._record(row) or {}, True
 
-    def find_by_idempotency_key(self, key: str) -> dict[str, Any] | None:
+    def find_by_idempotency_key(
+        self,
+        key: str,
+        *,
+        owner_user_id: str = "",
+    ) -> dict[str, Any] | None:
+        stored_key = f"{owner_user_id}:{key}" if owner_user_id and key else key
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM tasks WHERE idempotency_key = ?",
-                (key,),
+                (stored_key,),
             ).fetchone()
         return self._record(row)
 
-    def get_task(self, task_id: str) -> dict[str, Any] | None:
+    def get_task(
+        self,
+        task_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         task_id = clean_text(task_id, maximum=64, minimum=8, field="task id")
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ? AND owner_user_id = ?",
+                    (task_id, str(owner_user_id)),
+                ).fetchone()
         return self._record(row)
 
     def list_tasks(
@@ -218,33 +287,64 @@ class TaskStore:
         *,
         limit: int = 100,
         status: str = "",
+        owner_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        parameters: tuple[Any, ...]
+        conditions: list[str] = []
+        parameters: list[Any] = []
         query = "SELECT * FROM tasks"
         if status:
             if status not in TASK_STATUSES:
                 raise ValueError("invalid task status")
-            query += " WHERE status = ?"
-            parameters = (status, limit)
-        else:
-            parameters = (limit,)
+            conditions.append("status = ?")
+            parameters.append(status)
+        if owner_user_id is not None:
+            conditions.append("owner_user_id = ?")
+            parameters.append(str(owner_user_id))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at DESC LIMIT ?"
+        parameters.append(limit)
         with self.connect() as connection:
-            rows = connection.execute(query, parameters).fetchall()
+            rows = connection.execute(query, tuple(parameters)).fetchall()
         return [record for row in rows if (record := self._record(row)) is not None]
 
-    def counts(self) -> dict[str, int]:
+    def counts(self, *, owner_user_id: str | None = None) -> dict[str, int]:
         counts = {status: 0 for status in TASK_STATUSES}
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"
-            ).fetchall()
+            if owner_user_id is None:
+                rows = connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM tasks GROUP BY status"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count FROM tasks
+                    WHERE owner_user_id = ? GROUP BY status
+                    """,
+                    (str(owner_user_id),),
+                ).fetchall()
         for row in rows:
             if row["status"] in counts:
                 counts[row["status"]] = int(row["count"])
         counts["active"] = sum(counts[status] for status in ACTIVE_STATUSES)
         return counts
+
+    def report_owners(self) -> dict[str, set[str]]:
+        """Return task-owned report IDs without exposing task contents."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_id, owner_user_id FROM tasks
+                WHERE report_id != '' AND owner_user_id != ''
+                """
+            ).fetchall()
+        owners: dict[str, set[str]] = {}
+        for row in rows:
+            owners.setdefault(str(row["report_id"]), set()).add(
+                str(row["owner_user_id"])
+            )
+        return owners
 
     def claim_next(self) -> dict[str, Any] | None:
         timestamp = now_epoch()
@@ -305,6 +405,9 @@ class TaskStore:
         summary: Any,
         report_id: Any = "",
         report_filename: Any = "",
+        artifact_filename: Any = "",
+        artifact_media_type: Any = "",
+        artifact_size_bytes: int = 0,
     ) -> None:
         timestamp = now_epoch()
         with self.connect() as connection:
@@ -314,6 +417,8 @@ class TaskStore:
                 SET status = 'completed', progress = 1,
                     status_message = '任务已完成', result_summary = ?,
                     report_id = ?, report_filename = ?, error = '',
+                    artifact_filename = ?, artifact_media_type = ?,
+                    artifact_size_bytes = ?,
                     completed_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -321,6 +426,17 @@ class TaskStore:
                     clean_text(summary, maximum=MAX_RESULT_CHARS, field="summary"),
                     clean_text(report_id, maximum=1024, field="report id"),
                     clean_text(report_filename, maximum=255, field="report filename"),
+                    clean_text(
+                        artifact_filename,
+                        maximum=255,
+                        field="artifact filename",
+                    ),
+                    clean_text(
+                        artifact_media_type,
+                        maximum=120,
+                        field="artifact media type",
+                    ),
+                    max(0, int(artifact_size_bytes)),
                     timestamp,
                     timestamp,
                     task_id,
@@ -364,7 +480,13 @@ class TaskStore:
                 (clean_question, now_epoch(), task_id),
             )
 
-    def answer(self, task_id: str, answer: Any) -> dict[str, Any] | None:
+    def answer(
+        self,
+        task_id: str,
+        answer: Any,
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         clean_answer = clean_text(
             answer,
             maximum=MAX_ANSWER_CHARS,
@@ -373,10 +495,16 @@ class TaskStore:
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ? AND owner_user_id = ?",
+                    (task_id, str(owner_user_id)),
+                ).fetchone()
             if row is None:
                 connection.rollback()
                 return None
@@ -411,14 +539,25 @@ class TaskStore:
             connection.commit()
         return self._record(updated)
 
-    def request_cancel(self, task_id: str) -> dict[str, Any] | None:
+    def request_cancel(
+        self,
+        task_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
         timestamp = now_epoch()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
+            if owner_user_id is None:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ? AND owner_user_id = ?",
+                    (task_id, str(owner_user_id)),
+                ).fetchone()
             if row is None:
                 connection.rollback()
                 return None
@@ -489,3 +628,62 @@ class TaskStore:
                 (now_epoch(), now_epoch()),
             )
         return int(result.rowcount)
+
+    def claim_unowned_tasks(self, owner_user_id: Any) -> int:
+        """Assign legacy client tasks to the first administrator."""
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            minimum=8,
+            field="owner user id",
+        )
+        with self.connect() as connection:
+            result = connection.execute(
+                "UPDATE tasks SET owner_user_id = ? WHERE owner_user_id = ''",
+                (clean_owner,),
+            )
+        return int(result.rowcount)
+
+    def delete_owner_tasks(self, owner_user_id: Any) -> dict[str, Any]:
+        """Delete one user's terminal tasks without disrupting active workers."""
+        clean_owner = clean_text(
+            owner_user_id,
+            maximum=64,
+            minimum=8,
+            field="owner user id",
+        )
+        placeholders = ",".join("?" for _status in ACTIVE_STATUSES)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            active = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*) FROM tasks
+                    WHERE owner_user_id = ? AND status IN ({placeholders})
+                    """,
+                    (clean_owner, *sorted(ACTIVE_STATUSES)),
+                ).fetchone()[0]
+            )
+            if active:
+                connection.rollback()
+                raise RuntimeError("user has active tasks; cancel them before cleanup")
+            artifact_task_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT id FROM tasks
+                    WHERE owner_user_id = ? AND artifact_filename != ''
+                    """,
+                    (clean_owner,),
+                ).fetchall()
+            ]
+            result = connection.execute(
+                "DELETE FROM tasks WHERE owner_user_id = ?",
+                (clean_owner,),
+            )
+            connection.commit()
+        return {
+            "deleted": int(result.rowcount),
+            "active": 0,
+            "artifact_task_ids": artifact_task_ids,
+        }

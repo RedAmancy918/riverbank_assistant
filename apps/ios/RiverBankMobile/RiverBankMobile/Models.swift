@@ -1,5 +1,59 @@
 import Foundation
 
+struct AuthUser: Codable, Identifiable, Hashable {
+    let id: String
+    let username: String
+    let displayName: String
+    let role: String
+    let disabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, username, role, disabled
+        case displayName = "display_name"
+    }
+}
+
+struct AuthConfigEnvelope: Codable {
+    let configured: Bool
+    let bootstrapRequired: Bool
+    let registrationEnabled: Bool?
+    let initialAdminUsername: String?
+    let passwordMinChars: Int
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case bootstrapRequired = "bootstrap_required"
+        case registrationEnabled = "registration_enabled"
+        case initialAdminUsername = "initial_admin_username"
+        case passwordMinChars = "password_min_chars"
+    }
+}
+
+struct AuthSessionEnvelope: Codable {
+    let token: String
+    let expiresAt: Double
+    let user: AuthUser
+
+    enum CodingKeys: String, CodingKey {
+        case token, user
+        case expiresAt = "expires_at"
+    }
+}
+
+struct AuthUserEnvelope: Codable {
+    let user: AuthUser
+    let expiresAt: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case user
+        case expiresAt = "expires_at"
+    }
+}
+
+struct OKEnvelope: Codable {
+    let ok: Bool
+}
+
 struct TaskAnswer: Codable, Hashable {
     let question: String
     let answer: String
@@ -16,6 +70,7 @@ struct RemoteTask: Codable, Identifiable, Hashable {
     let title: String
     let prompt: String
     let kind: String
+    let outputFormat: String?
     let status: String
     let source: String
     let deviceName: String
@@ -26,6 +81,9 @@ struct RemoteTask: Codable, Identifiable, Hashable {
     let resultSummary: String
     let reportId: String
     let reportFilename: String
+    let artifactFilename: String?
+    let artifactMediaType: String?
+    let artifactSizeBytes: Int?
     let error: String
     let cancelRequested: Bool
     let attempt: Int
@@ -36,11 +94,15 @@ struct RemoteTask: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, prompt, kind, status, source, progress, question, answers, error, attempt
+        case outputFormat = "output_format"
         case deviceName = "device_name"
         case statusMessage = "status_message"
         case resultSummary = "result_summary"
         case reportId = "report_id"
         case reportFilename = "report_filename"
+        case artifactFilename = "artifact_filename"
+        case artifactMediaType = "artifact_media_type"
+        case artifactSizeBytes = "artifact_size_bytes"
         case cancelRequested = "cancel_requested"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -50,6 +112,28 @@ struct RemoteTask: Codable, Identifiable, Hashable {
 
     var isActive: Bool {
         ["queued", "running", "waiting_input"].contains(status)
+    }
+
+    var resolvedOutputFormat: String { outputFormat ?? "text" }
+
+    var outputLabel: String {
+        switch resolvedOutputFormat {
+        case "image": "图片"
+        case "illustrated": "图文报告"
+        default: "文字报告"
+        }
+    }
+
+    var outputSymbol: String {
+        switch resolvedOutputFormat {
+        case "image": "photo"
+        case "illustrated": "doc.richtext"
+        default: "doc.text"
+        }
+    }
+
+    var hasArtifact: Bool {
+        !(artifactFilename ?? "").isEmpty
     }
 
     var statusLabel: String {
@@ -146,6 +230,50 @@ struct ChatConversation: Codable, Identifiable, Hashable {
     }
 }
 
+struct ChatAttachment: Codable, Identifiable, Hashable {
+    let id: String
+    let conversationId: String
+    let messageId: String
+    let originalName: String
+    let mediaType: String
+    let kind: String
+    let sizeBytes: Int
+    let sha256: String
+    let createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, sha256
+        case conversationId = "conversation_id"
+        case messageId = "message_id"
+        case originalName = "original_name"
+        case mediaType = "media_type"
+        case sizeBytes = "size_bytes"
+        case createdAt = "created_at"
+    }
+}
+
+struct ChatUploadAttachment: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let filename: String
+    let mediaType: String
+    let data: Data
+    let isImage: Bool
+
+    init(
+        id: UUID = UUID(),
+        filename: String,
+        mediaType: String,
+        data: Data,
+        isImage: Bool
+    ) {
+        self.id = id
+        self.filename = filename
+        self.mediaType = mediaType
+        self.data = data
+        self.isImage = isImage
+    }
+}
+
 struct ChatMessage: Codable, Identifiable, Hashable {
     let id: String
     let conversationId: String
@@ -156,9 +284,10 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     let cancelRequested: Bool
     let createdAt: Double
     let updatedAt: Double
+    let attachments: [ChatAttachment]?
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content, state, error
+        case id, role, content, state, error, attachments
         case conversationId = "conversation_id"
         case cancelRequested = "cancel_requested"
         case createdAt = "created_at"
@@ -167,6 +296,7 @@ struct ChatMessage: Codable, Identifiable, Hashable {
 
     var isAssistant: Bool { role == "assistant" }
     var isActive: Bool { ["queued", "running"].contains(state) }
+    var attachmentList: [ChatAttachment] { attachments ?? [] }
 }
 
 struct ChatConversationListEnvelope: Codable {
