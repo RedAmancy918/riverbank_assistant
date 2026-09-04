@@ -27,7 +27,7 @@ jobs:
       scope: ${{ steps.release.outputs.scope }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -53,7 +53,7 @@ jobs:
     if: needs.preflight.outputs.scope == 'edge-os' || needs.preflight.outputs.scope == 'suite'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build immutable source bundle
         shell: bash
         run: |
@@ -82,7 +82,7 @@ jobs:
       run:
         working-directory: apps/video-call/windows-client
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -110,7 +110,7 @@ jobs:
         working-directory: apps/video-call/windows-client
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -134,7 +134,7 @@ jobs:
     if: needs.preflight.outputs.scope == 'ios' || needs.preflight.outputs.scope == 'suite'
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build unsigned release candidate
         run: >-
           xcodebuild
