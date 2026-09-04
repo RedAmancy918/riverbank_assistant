@@ -232,6 +232,21 @@ FINAL_ASR_MIN_AGREEMENT = max(
     0.0,
     min(1.0, float(os.environ.get("RIVERBANK_FINAL_ASR_MIN_AGREEMENT", "0.22"))),
 )
+WORKSHOP_EXPLICIT_MIN_CENTERED_RMS = max(
+    0.0,
+    float(os.environ.get("RIVERBANK_WORKSHOP_EXPLICIT_MIN_CENTERED_RMS", "120")),
+)
+WORKSHOP_EXPLICIT_MIN_CENTERED_PEAK = max(
+    0.0,
+    float(os.environ.get("RIVERBANK_WORKSHOP_EXPLICIT_MIN_CENTERED_PEAK", "700")),
+)
+WORKSHOP_CREATE_REQUEST_MAX_AGE_SECONDS = max(
+    1.0,
+    min(
+        float(os.environ.get("RIVERBANK_WORKSHOP_CREATE_REQUEST_MAX_AGE", "3")),
+        10.0,
+    ),
+)
 VOICE_FOLLOW_UP_MARKER = "[[AWAITING_VOICE_REPLY]]"
 VOICE_DIALOGUE_PROTOCOL = f"""
 [语音连续对话协议]
@@ -1683,13 +1698,19 @@ class FinalASREnsemble:
             return zip_text, "zip-only", agreement
         return zip_text, "zip-chinese", agreement
 
-    def transcribe(self, wav_path: Path) -> tuple[str, dict]:
+    def transcribe(
+        self,
+        wav_path: Path,
+        *,
+        minimum_centered_rms: float = FINAL_ASR_MIN_CENTERED_RMS,
+        minimum_centered_peak: float = FINAL_ASR_MIN_CENTERED_PEAK,
+    ) -> tuple[str, dict]:
         self.ensure_ready()
         sample_rate, samples, signal = self.read_audio(wav_path)
         self.last_signal = signal
         if (
-            signal["centered_rms"] < FINAL_ASR_MIN_CENTERED_RMS
-            or signal["centered_peak"] < FINAL_ASR_MIN_CENTERED_PEAK
+            signal["centered_rms"] < minimum_centered_rms
+            or signal["centered_peak"] < minimum_centered_peak
         ):
             self.last_decision = "rejected-low-signal"
             self.rejected_count += 1
@@ -2052,15 +2073,20 @@ class DailyVoiceAssistant:
         *,
         follow_up: bool = False,
         no_speech_timeout: float = 10.0,
+        source_label: str | None = None,
     ) -> Path | None:
         if not follow_up:
             self.beep(880)
+            # The cue is intentionally audible, but it must not become the
+            # first "voice" frame in the same open microphone stream.
+            time.sleep(0.08)
+            self.microphone.discard_buffer()
         expression(
             "listening",
             stage="awaiting_follow_up" if follow_up else "recording",
         )
         self.publish_speech_bubble(True)
-        source = "follow-up" if follow_up else "hardware wake"
+        source = source_label or ("follow-up" if follow_up else "hardware wake")
         log(f"● Recording... ({source}, auto-stops on silence)")
         if follow_up:
             # Let the speaker tail decay, then discard it so TTS is not transcribed
@@ -2309,11 +2335,18 @@ class DailyVoiceAssistant:
         self,
         wav_path: Path,
         cancel_event: threading.Event | None = None,
+        *,
+        minimum_centered_rms: float = FINAL_ASR_MIN_CENTERED_RMS,
+        minimum_centered_peak: float = FINAL_ASR_MIN_CENTERED_PEAK,
     ) -> str:
         expression("thinking", stage=self.last_result)
         log("Transcribing with resident SenseVoice + Zipformer CTC ensemble...")
         self.raise_if_interrupted(cancel_event)
-        transcript, metadata = self.final_asr.transcribe(wav_path)
+        transcript, metadata = self.final_asr.transcribe(
+            wav_path,
+            minimum_centered_rms=minimum_centered_rms,
+            minimum_centered_peak=minimum_centered_peak,
+        )
         signal = metadata.get("signal") or {}
         log(
             "Final ASR decision "
@@ -2336,14 +2369,34 @@ class DailyVoiceAssistant:
             self.publish_speech_bubble(False)
         return transcript
 
-    def transcribe_interruptibly(self, wav_path: Path) -> str:
+    def transcribe_interruptibly(
+        self,
+        wav_path: Path,
+        *,
+        minimum_centered_rms: float | None = None,
+        minimum_centered_peak: float | None = None,
+    ) -> str:
         """Let a new wake proceed while stale native ASR calls finish safely."""
         cancel_event = self.interrupt_event
         result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
 
         def run() -> None:
             try:
-                result_queue.put(("result", self.transcribe(wav_path, cancel_event)))
+                threshold_overrides = {}
+                if minimum_centered_rms is not None:
+                    threshold_overrides["minimum_centered_rms"] = minimum_centered_rms
+                if minimum_centered_peak is not None:
+                    threshold_overrides["minimum_centered_peak"] = minimum_centered_peak
+                result_queue.put(
+                    (
+                        "result",
+                        self.transcribe(
+                            wav_path,
+                            cancel_event,
+                            **threshold_overrides,
+                        ),
+                    )
+                )
             except BaseException as exc:
                 result_queue.put(("error", exc))
 
@@ -3213,8 +3266,15 @@ class DailyVoiceAssistant:
             self.write_state()
             audio_activity(True, source="workshop_requirement", ttl_seconds=60.0)
             wav_path = self.record_until_silence(
-                follow_up=True,
+                # A screen tap is already an explicit invitation.  Start with
+                # the local cue immediately instead of making the user talk
+                # over a network-generated TTS prompt.  Voice-opened Workshop
+                # remains a natural follow-up after its spoken invitation.
+                follow_up=prompt_user,
                 no_speech_timeout=FOLLOW_UP_NO_SPEECH_SECONDS,
+                source_label=(
+                    "workshop screen" if not prompt_user else "workshop follow-up"
+                ),
             )
             audio_activity(False, source="workshop_requirement")
             if wav_path is None:
@@ -3222,7 +3282,19 @@ class DailyVoiceAssistant:
             else:
                 self.last_result = "workshop_transcribing"
                 self.write_state()
-                requirement = self.transcribe_interruptibly(wav_path).strip()
+                requirement = self.transcribe_interruptibly(
+                    wav_path,
+                    minimum_centered_rms=(
+                        FINAL_ASR_MIN_CENTERED_RMS
+                        if prompt_user
+                        else WORKSHOP_EXPLICIT_MIN_CENTERED_RMS
+                    ),
+                    minimum_centered_peak=(
+                        FINAL_ASR_MIN_CENTERED_PEAK
+                        if prompt_user
+                        else WORKSHOP_EXPLICIT_MIN_CENTERED_PEAK
+                    ),
+                ).strip()
                 self.raise_if_interrupted()
                 if not requirement:
                     response = "我没有识别清楚。你可以稍后再试一次。"
@@ -3366,7 +3438,23 @@ def main() -> int:
                             source=str(request.get("source", "screen_menu")),
                         )
                     elif request.get("command") == "workshop_create":
-                        assistant.interact_workshop_prompt()
+                        requested_at = float(request.get("requested_at") or 0.0)
+                        request_age = (
+                            time.time() - requested_at if requested_at else 0.0
+                        )
+                        if (
+                            requested_at
+                            and request_age > WORKSHOP_CREATE_REQUEST_MAX_AGE_SECONDS
+                        ):
+                            log(
+                                "stale Workshop create request ignored "
+                                f"age={request_age:.2f}s"
+                            )
+                        else:
+                            assistant.interact_workshop_prompt(
+                                prompt_user=bool(request.get("prompt_user", False)),
+                                bypass_debounce=True,
+                            )
                 except Exception as exc:
                     log(f"invalid voice control command: {exc}")
             if assistant.pop_pending_workshop_requirement():

@@ -932,6 +932,10 @@ class PersistentExpressionDisplay:
         self.workshop_status: dict = {}
         self.workshop_runtime_status: dict = {}
         self.workshop_status_next_read_at = 0.0
+        self.workshop_create_request_blocked_until = 0.0
+        self.workshop_emblem_surface: object | None = None
+        self.workshop_button_cache: OrderedDict[tuple, object] = OrderedDict()
+        self.workshop_button_cache_limit = 32
         self.workshop_action_future: Future[dict] | None = None
         self.workshop_action_kind = ""
         self.workshop_transition_active = False
@@ -5799,12 +5803,21 @@ class PersistentExpressionDisplay:
             return {}
         return value if isinstance(value, dict) else {}
 
-    def refresh_workshop_status(self, now: float, *, force: bool = False) -> None:
+    def refresh_workshop_status(self, now: float, *, force: bool = False) -> bool:
         if not force and now < self.workshop_status_next_read_at:
-            return
-        self.workshop_status = self.read_workshop_json(WORKSHOP_STATUS_PATH)
-        self.workshop_runtime_status = self.read_workshop_json(WORKSHOP_RUNTIME_PATH)
-        self.workshop_status_next_read_at = now + 0.5
+            return False
+        status = self.read_workshop_json(WORKSHOP_STATUS_PATH)
+        runtime_status = self.read_workshop_json(WORKSHOP_RUNTIME_PATH)
+        changed = (
+            status != self.workshop_status
+            or runtime_status != self.workshop_runtime_status
+        )
+        self.workshop_status = status
+        self.workshop_runtime_status = runtime_status
+        self.workshop_status_next_read_at = now + (
+            0.5 if self.workshop_section == "runtime" else 1.0
+        )
+        return changed
 
     def workshop_pending_review(self) -> dict | None:
         proposal = self.workshop_status.get("pendingReview")
@@ -5865,25 +5878,35 @@ class PersistentExpressionDisplay:
 
     def draw_workshop_emblem(self) -> None:
         center = (400, 310)
-        self.draw_aa_circle(self.screen, (4, 24, 33), center, 92)
-        self.draw_aa_ring(self.screen, (41, 137, 168), center, 92, 2)
-        colors = (
-            (112, 224, 246),
-            (71, 194, 230),
-            (35, 137, 182),
+        if self.workshop_emblem_surface is None:
+            size = 192
+            local_center = (size // 2, size // 2)
+            surface = self.pygame.Surface((size, size), self.pygame.SRCALPHA)
+            surface.fill((0, 0, 0, 0))
+            self.draw_aa_circle(surface, (4, 24, 33), local_center, 92)
+            self.draw_aa_ring(surface, (41, 137, 168), local_center, 92, 2)
+            colors = (
+                (112, 224, 246),
+                (71, 194, 230),
+                (35, 137, 182),
+            )
+            for row in range(3):
+                for column in range(3):
+                    x = local_center[0] - 36 + column * 36
+                    y = local_center[1] - 36 + row * 36
+                    color = colors[min(2, max(row, column))]
+                    self.draw_aa_round_line(
+                        surface,
+                        color,
+                        (x - 8, y),
+                        (x + 8, y),
+                        18,
+                    )
+            self.workshop_emblem_surface = surface
+        self.screen.blit(
+            self.workshop_emblem_surface,
+            self.workshop_emblem_surface.get_rect(center=center),
         )
-        for row in range(3):
-            for column in range(3):
-                x = center[0] - 36 + column * 36
-                y = center[1] - 36 + row * 36
-                color = colors[min(2, max(row, column))]
-                self.draw_aa_round_line(
-                    self.screen,
-                    color,
-                    (x - 8, y),
-                    (x + 8, y),
-                    18,
-                )
 
     def draw_workshop_button(
         self,
@@ -5893,20 +5916,40 @@ class PersistentExpressionDisplay:
         primary: bool = False,
         selected: bool = False,
     ) -> None:
+        cache_key = (
+            int(rect.width),
+            int(rect.height),
+            str(label),
+            bool(primary),
+            bool(selected),
+        )
+        cached = self.workshop_button_cache.get(cache_key)
+        if cached is not None:
+            self.workshop_button_cache.move_to_end(cache_key)
+            self.screen.blit(cached, rect.topleft)
+            return
         if primary:
             color = (83, 207, 238) if not selected else (126, 229, 249)
             text_color = (3, 27, 35)
         else:
             color = (19, 52, 67) if not selected else (28, 78, 98)
             text_color = (205, 236, 244)
+        surface = self.pygame.Surface(rect.size, self.pygame.SRCALPHA)
+        surface.fill((0, 0, 0, 0))
         self.draw_aa_round_line(
-            self.screen,
+            surface,
             color,
-            (rect.left + rect.height / 2, rect.centery),
-            (rect.right - rect.height / 2, rect.centery),
+            (rect.height / 2, rect.height / 2),
+            (rect.width - rect.height / 2, rect.height / 2),
             rect.height,
         )
-        self.draw_centered_text(label, self.font_medium, text_color, rect.center)
+        rendered = self.font_medium.render(label, True, text_color)
+        surface.blit(rendered, rendered.get_rect(center=surface.get_rect().center))
+        self.workshop_button_cache[cache_key] = surface
+        self.workshop_button_cache.move_to_end(cache_key)
+        while len(self.workshop_button_cache) > self.workshop_button_cache_limit:
+            self.workshop_button_cache.popitem(last=False)
+        self.screen.blit(surface, rect.topleft)
 
     @staticmethod
     def workshop_capability_label(capability: str) -> str:
@@ -6437,13 +6480,28 @@ class PersistentExpressionDisplay:
             return
         now = time.monotonic()
         if target == "create":
+            if now < self.workshop_create_request_blocked_until:
+                self.workshop_notice = "正在聆听，请直接说出需求"
+                self.workshop_notice_until = max(
+                    self.workshop_notice_until,
+                    self.workshop_create_request_blocked_until,
+                )
+                self.needs_redraw = True
+                return
             sent = self.send_voice_command(
-                {"command": "workshop_create", "source": "workshop"}
+                {
+                    "command": "workshop_create",
+                    "source": "workshop",
+                    "prompt_user": False,
+                    "requested_at": time.time(),
+                    "request_id": f"workshop-{time.time_ns()}",
+                }
             )
             if sent:
                 self.workshop_pointer_target = None
-                self.workshop_notice = "请说出你的应用需求"
-                self.workshop_notice_until = now + 10.0
+                self.workshop_create_request_blocked_until = now + 3.0
+                self.workshop_notice = "提示音后，请直接说出应用需求"
+                self.workshop_notice_until = now + 12.0
                 self.needs_redraw = True
                 log("workshop requirement conversation requested")
             else:
@@ -13258,8 +13316,8 @@ class PersistentExpressionDisplay:
             return
         if self.workshop_active:
             if now >= self.workshop_status_next_read_at:
-                self.refresh_workshop_status(now, force=True)
-                self.needs_redraw = True
+                if self.refresh_workshop_status(now, force=True):
+                    self.needs_redraw = True
             if self.workshop_action_future is not None and self.workshop_action_future.done():
                 self.needs_redraw = True
             if self.workshop_notice_until and now >= self.workshop_notice_until:

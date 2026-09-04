@@ -27,13 +27,13 @@ RiverBank 不再用一个名称或版本号同时代表硬件、树莓派基础�
 - 安装包使用 `产品名-版本-平台-架构`，例如 `RiverBank-Call-0.25.1-beta.1-mac-arm64.dmg`；
 - systemd 服务和内部 Python 模块继续采用小写连字符或下划线技术名，不直接作为用户可见产品名。
 
-机器可读命名统一为：产品/包 ID 使用小写 kebab-case，Python 模块使用 snake_case，Apple Bundle ID 使用反向域名且保留已发布身份，API Schema 使用 `riverbank.<domain>/vN`。Git 标签按独立产物加前缀，例如 `edge-os/v0.25.4-beta`、`ios/v0.25.2-beta`、`call/v0.25.1-beta`；禁止再使用无法判断目标产物的裸标签。历史 `edge-system/` 标签不改写，但不再用于新发布。量产设备型号建议使用 `RB-EDGE-G1`，硬件改版记为 `Rev A/B/...`，单机设备名使用 `RB-EDGE-<序列号后缀>`，不把主机名当产品型号。
+机器可读命名统一为：产品/包 ID 使用小写 kebab-case，Python 模块使用 snake_case，Apple Bundle ID 使用反向域名且保留已发布身份，API Schema 使用 `riverbank.<domain>/vN`。Git 标签按独立产物加前缀，例如 `edge-os/v0.25.5-beta`、`ios/v0.25.2-beta`、`call/v0.25.1-beta`；禁止再使用无法判断目标产物的裸标签。历史 `edge-system/` 标签不改写，但不再用于新发布。量产设备型号建议使用 `RB-EDGE-G1`，硬件改版记为 `Rev A/B/...`，单机设备名使用 `RB-EDGE-<序列号后缀>`，不把主机名当产品型号。
 
 ## 版本层级
 
 | 层级 | 如何编号 | 是否独立发布 |
 | --- | --- | --- |
-| RiverBank 产品套件 | 发布列车 `v0.25.4 beta` | 否，只描述一组经过验证的版本组合 |
+| RiverBank 产品套件 | 发布列车 `v0.25.5 beta` | 否，只描述一组经过验证的版本组合 |
 | RiverBank Edge 硬件 | 产品代次 + 硬件 Revision | 是硬件身份，不使用软件 SemVer |
 | RiverBank Edge OS | `vMAJOR.MINOR.PATCH beta|stable` | 是，当前可安装与封存；镜像发布后可整盘烧录与 A/B 回滚 |
 | Debian / Raspberry Pi OS / Linux 内核 | 保留上游版本 | 是上游依赖，不纳入 RiverBank 版本号 |
@@ -49,8 +49,8 @@ RiverBank 不再用一个名称或版本号同时代表硬件、树莓派基础�
 
 当前清单记录：
 
-- RiverBank 发布列车：`v0.25.4 beta`；
-- RiverBank Edge OS：`v0.25.4 beta`；
+- RiverBank 发布列车：`v0.25.5 beta`；
+- RiverBank Edge OS：`v0.25.5 beta`；
 - iOS 客户端：`v0.25.2 beta`，build 3；
 - macOS/Windows 客户端：`v0.25.1 beta`；
 - iOS 与桌面客户端兼容 Edge OS `>=0.25.0 <0.26.0`。

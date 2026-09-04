@@ -3,7 +3,7 @@
   "product_suite": {
     "name": "RiverBank",
     "product_id": "riverbank",
-    "release_train": "v0.25.4 beta",
+    "release_train": "v0.25.5 beta",
     "purpose": "Compatibility and shipment mapping; not an installable artifact"
   },
   "hardware": {
@@ -17,9 +17,9 @@
     "artifact_id": "riverbank-edge-os",
     "artifact_class": "device-operating-system",
     "distribution_mode": "managed-linux-system-layer",
-    "version": "0.25.4",
+    "version": "0.25.5",
     "channel": "beta",
-    "display_version": "v0.25.4 beta",
+    "display_version": "v0.25.5 beta",
     "base_operating_system": {
       "name": "Debian / Raspberry Pi OS",
       "ownership": "upstream",

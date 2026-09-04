@@ -1,6 +1,6 @@
 # 部署说明
 
-当前设备软件正式名称为 **RiverBank Edge OS**，本文对应 `v0.25.4 beta` 的受管 Linux 系统层安装方式。它不是可直接烧录的 `.img.xz`；镜像路线与分发边界见 `docs/EDGE_OS.zh-CN.md`。
+当前设备软件正式名称为 **RiverBank Edge OS**，本文对应 `v0.25.5 beta` 的受管 Linux 系统层安装方式。它不是可直接烧录的 `.img.xz`；镜像路线与分发边界见 `docs/EDGE_OS.zh-CN.md`。
 
 本说明面向与已验证原型相近的 Raspberry Pi 5。先在测试机验证，再部署到长期运行设备。
 
