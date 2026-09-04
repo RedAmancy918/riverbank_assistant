@@ -11,13 +11,26 @@ import logging
 import os
 import re
 import signal
-import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+AGENT_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "agent-runtime"
+if AGENT_RUNTIME_DIR.is_dir() and str(AGENT_RUNTIME_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_RUNTIME_DIR))
+
+from riverbank_agent import (
+    AgentCancelled,
+    AgentRunRequest,
+    DirectAgentRuntime,
+    HermesCLIAdapter,
+    SocketAgentRuntime,
+)
+from riverbank_agent.protocol import DEFAULT_SOCKET
 
 from image_generation import DashScopeImageGenerator, GeneratedImage
 from report_library import ReportLibrary
@@ -32,7 +45,6 @@ DEFAULT_REPORTS_DIR = Path(
     "/home/geo/.hermes/profiles/daily/workspace/reports"
 )
 DEFAULT_WORKSPACE = Path("/home/geo/.hermes/profiles/daily/workspace")
-ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
 def safe_report_stem(title: str, task_id: str) -> str:
@@ -69,7 +81,7 @@ def render_fallback_report(task: dict[str, Any], response: str) -> str:
         "## 补充信息\n\n"
         f"{answers}\n\n"
         "## 执行结果\n\n"
-        f"{response.strip() or 'Hermes 未返回正文。'}\n"
+        f"{response.strip() or 'Agent 未返回正文。'}\n"
     )
 
 
@@ -250,100 +262,64 @@ def build_prompt(task: dict[str, Any], report_path: Path) -> str:
 """.strip()
 
 
-class HermesProcessRunner:
+class AgentProcessRunner:
     def __init__(
         self,
         *,
-        hermes_bin: Path,
-        workspace: Path,
+        agent_runtime: SocketAgentRuntime | DirectAgentRuntime,
         timeout_seconds: float,
         toolsets: str,
     ) -> None:
-        self.hermes_bin = hermes_bin
-        self.workspace = workspace
+        self.agent_runtime = agent_runtime
         self.timeout_seconds = max(60.0, timeout_seconds)
         self.toolsets = toolsets
+        self.stopping = threading.Event()
 
     def run(self, task: dict[str, Any], report_path: Path, store: TaskStore) -> str:
-        command = [
-            str(self.hermes_bin),
-            "chat",
-            "--query",
-            build_prompt(task, report_path),
-            "--quiet",
-            "--toolsets",
-            self.toolsets,
-            "--reasoning",
-            "medium",
-            "--max-turns",
-            "32",
-            "--source",
-            "riverbank-task",
-            "--yolo",
-            "--in",
-            str(self.workspace),
-        ]
-        environment = os.environ.copy()
-        environment.setdefault("HERMES_ACCEPT_HOOKS", "1")
-        environment.setdefault("HERMES_YOLO_MODE", "1")
-        process = subprocess.Popen(
-            command,
-            cwd=self.workspace,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
+        request = AgentRunRequest(
+            purpose="task",
+            prompt=build_prompt(task, report_path),
+            workspace="daily",
+            toolsets=tuple(
+                item.strip() for item in self.toolsets.split(",") if item.strip()
+            ),
+            reasoning="medium",
+            max_turns=32,
+            timeout_seconds=self.timeout_seconds,
+            source="riverbank-task",
+            autonomy=True,
         )
         started = time.monotonic()
-        output = ""
-        while True:
-            if store.is_cancel_requested(task["id"]):
-                self.terminate(process)
-                raise InterruptedError("task cancelled")
-            elapsed = time.monotonic() - started
-            if elapsed >= self.timeout_seconds:
-                self.terminate(process)
-                raise TimeoutError(
-                    f"Hermes task exceeded {self.timeout_seconds / 60:.0f} minutes"
-                )
-            try:
-                output, _ = process.communicate(timeout=1.0)
-                break
-            except subprocess.TimeoutExpired:
-                if elapsed > 5:
-                    store.update_progress(
-                        task["id"],
-                        min(0.82, 0.15 + elapsed / self.timeout_seconds * 0.67),
-                        "Hermes 正在检索与整理",
-                    )
-        cleaned = ANSI_RE.sub("", output).strip()
-        if process.returncode != 0:
-            tail = cleaned[-4000:] if cleaned else f"exit code {process.returncode}"
-            raise RuntimeError(f"Hermes failed: {tail}")
-        if not cleaned and not report_path.is_file():
-            raise RuntimeError("Hermes returned no response and no report")
-        return cleaned
 
-    @staticmethod
-    def terminate(process: subprocess.Popen[str]) -> None:
-        if process.poll() is not None:
-            return
+        def publish_snapshot(_value: str) -> None:
+            elapsed = time.monotonic() - started
+            store.update_progress(
+                task["id"],
+                min(0.82, 0.15 + elapsed / self.timeout_seconds * 0.67),
+                "Agent 正在检索与整理",
+            )
+
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
+            result = self.agent_runtime.run_sync(
+                request,
+                on_snapshot=publish_snapshot,
+                should_cancel=lambda: self.stopping.is_set()
+                or store.is_cancel_requested(task["id"]),
+            )
+        except AgentCancelled as exc:
+            raise InterruptedError("task cancelled") from exc
+        response = result.text.strip()
+        if not response and not report_path.is_file():
+            raise RuntimeError("Agent returned no response and no report")
+        return response
+
+    def cancel_all(self) -> None:
+        self.stopping.set()
+        self.agent_runtime.cancel_all()
+
+
+# Compatibility name for third-party extensions that imported the old runner.
+HermesProcessRunner = AgentProcessRunner
 
 
 class TaskWorker:
@@ -351,7 +327,7 @@ class TaskWorker:
         self,
         *,
         store: TaskStore,
-        runner: HermesProcessRunner,
+        runner: AgentProcessRunner,
         reports_dir: Path,
         artifacts_dir: Path | None = None,
         image_generator: DashScopeImageGenerator | None = None,
@@ -370,6 +346,9 @@ class TaskWorker:
 
     def stop(self, _signum: int | None = None, _frame: object = None) -> None:
         self.running = False
+        cancel_all = getattr(self.runner, "cancel_all", None)
+        if callable(cancel_all):
+            cancel_all()
 
     def process(self, task: dict[str, Any]) -> None:
         report_path = self.reports_dir / f"{safe_report_stem(task['title'], task['id'])}.md"
@@ -379,7 +358,7 @@ class TaskWorker:
         artifact_size_bytes = 0
         LOGGER.info("task started id=%s title=%s", task["id"], task["title"])
         try:
-            self.store.update_progress(task["id"], 0.1, "正在启动 Hermes")
+            self.store.update_progress(task["id"], 0.1, "正在启动 Agent Runtime")
             response = self.runner.run(task, report_path, self.store)
             if self.store.is_cancel_requested(task["id"]):
                 self.store.mark_cancelled(task["id"])
@@ -483,6 +462,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--poll", type=float, default=1.0)
+    parser.add_argument(
+        "--agent-transport",
+        choices=("socket", "direct"),
+        default=os.environ.get("RIVERBANK_AGENT_TRANSPORT", "socket"),
+    )
+    parser.add_argument(
+        "--agent-socket",
+        type=Path,
+        default=Path(os.environ.get("RIVERBANK_AGENT_SOCKET", str(DEFAULT_SOCKET))),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -508,17 +497,32 @@ def main() -> int:
                     "image_generation": DashScopeImageGenerator().available,
                     "workspace": str(args.workspace),
                     "hermes_bin": str(args.hermes_bin),
+                    "agent_transport": args.agent_transport,
+                    "agent_socket": str(args.agent_socket),
                     "counts": store.counts(),
                 },
                 ensure_ascii=False,
             )
         )
         return 0
+    agent_runtime = (
+        SocketAgentRuntime(args.agent_socket)
+        if args.agent_transport == "socket"
+        else DirectAgentRuntime(
+            HermesCLIAdapter(
+                hermes_bin=args.hermes_bin,
+                profile_home=args.workspace.parent,
+                workspaces={"daily": args.workspace},
+                allowed_toolsets={
+                    item.strip() for item in args.toolsets.split(",") if item.strip()
+                },
+            )
+        )
+    )
     worker = TaskWorker(
         store=store,
-        runner=HermesProcessRunner(
-            hermes_bin=args.hermes_bin,
-            workspace=args.workspace,
+        runner=AgentProcessRunner(
+            agent_runtime=agent_runtime,
             timeout_seconds=args.timeout,
             toolsets=args.toolsets,
         ),

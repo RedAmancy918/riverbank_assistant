@@ -14,6 +14,7 @@
   "services": [
     "camera-hub.service",
     "listengo-mic.service",
+    "riverbank-agent-runtime.service",
     "hermes-gateway.service",
     "hermes-voice.service",
     "hermes-expression-bridge.service",
@@ -22,6 +23,7 @@
     "riverbank-video-call.service",
     "riverbank-task-worker.service",
     "riverbank-chat-worker.service",
+    "riverbank-workshop.service",
     "riverbank-health-monitor.service",
     "expression-display.service"
   ]

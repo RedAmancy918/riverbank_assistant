@@ -1,7 +1,8 @@
 [Unit]
 Description=RiverBank trusted user-application Workshop
-After=network-online.target camera-hub.service expression-display.service riverbank-face-tracker.service
+After=network-online.target camera-hub.service expression-display.service riverbank-face-tracker.service riverbank-agent-runtime.service
 Wants=network-online.target camera-hub.service expression-display.service riverbank-face-tracker.service
+Requires=riverbank-agent-runtime.service
 RequiresMountsFor=@RIVERBANK_DATA@
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -27,6 +28,7 @@ Environment="RIVERBANK_HAILO_YOLO_SCRIPT=@RIVERBANK_DATA@/ai/apps/hailo-rpi5-exa
 Environment="RIVERBANK_HAILO_YOLO_MODEL=@RIVERBANK_DATA@/ai/models/yolo/yolov11x_hailo8_v2.14.hef"
 Environment="RIVERBANK_HAILO_YOLO_OUTPUT=@RIVERBANK_DATA@/ai/output/workshop-yolo"
 Environment="PATH=@RIVERBANK_HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=@RIVERBANK_REPO@/apps/agent-runtime"
 Environment="PYTHONUNBUFFERED=1"
 Environment="http_proxy=http://127.0.0.1:15732"
 Environment="https_proxy=http://127.0.0.1:15732"
@@ -35,7 +37,7 @@ RuntimeDirectory=riverbank-workshop
 RuntimeDirectoryMode=0750
 StateDirectory=riverbank-workshop
 StateDirectoryMode=0700
-ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/workshop/workshop_service.py --data-root @RIVERBANK_DATA@/workshop
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/workshop/workshop_service.py --data-root @RIVERBANK_DATA@/workshop --agent-transport socket --agent-socket /run/riverbank-agent/runtime.sock
 Restart=on-failure
 RestartSec=4
 TimeoutStopSec=15

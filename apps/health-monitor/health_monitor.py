@@ -142,6 +142,23 @@ def nested_value(payload: Any, dotted_path: str) -> Any:
     return current
 
 
+def mounted_filesystem_for(target: str) -> Path | None:
+    """Return the nearest mount containing an existing data path.
+
+    Data is intentionally stored below the filesystem root (for example
+    ``/mnt/nvme64/riverbank-user``), so checking only the final directory with
+    ``ismount`` reports a false failure.  The root filesystem does not count as
+    an external data mount.
+    """
+    path = Path(target)
+    if not path.exists():
+        return None
+    for candidate in (path, *path.parents):
+        if os.path.ismount(candidate):
+            return None if candidate == Path("/") else candidate
+    return None
+
+
 def run_check(check: dict[str, Any]) -> tuple[bool, str]:
     check_type = check["type"]
     target = check.get("target", "")
@@ -176,8 +193,10 @@ def run_check(check: dict[str, Any]) -> tuple[bool, str]:
             return False, str(exc)
 
     if check_type == "mount":
-        mounted = os.path.ismount(target)
-        return mounted, "mounted" if mounted else "not mounted"
+        mountpoint = mounted_filesystem_for(target)
+        if mountpoint is None:
+            return False, "not on a dedicated mounted filesystem"
+        return True, f"mounted via {mountpoint}"
 
     if check_type == "path":
         exists = Path(target).exists()

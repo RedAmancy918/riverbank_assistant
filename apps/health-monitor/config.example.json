@@ -52,8 +52,28 @@
       "equals": true
     },
     {
+      "id": "agent-runtime",
+      "name": "RiverBank Agent Runtime 服务",
+      "type": "systemd_service",
+      "target": "riverbank-agent-runtime.service"
+    },
+    {
+      "id": "agent-runtime-backend",
+      "name": "Agent Runtime 协议与后端适配器",
+      "type": "command",
+      "command": [
+        "/usr/bin/python3",
+        "@RIVERBANK_REPO@/apps/agent-runtime/agentctl.py",
+        "--socket",
+        "/run/riverbank-agent/runtime.sock",
+        "health"
+      ],
+      "interval_seconds": 60,
+      "timeout_seconds": 10
+    },
+    {
       "id": "background-task-worker",
-      "name": "Hermes 后台任务 Worker",
+      "name": "RiverBank 后台任务 Worker",
       "type": "systemd_service",
       "target": "riverbank-task-worker.service"
     },
@@ -67,7 +87,7 @@
     },
     {
       "id": "chat-worker",
-      "name": "Hermes Daily 连续对话 Worker",
+      "name": "RiverBank 连续对话 Worker",
       "type": "systemd_service",
       "target": "riverbank-chat-worker.service"
     },

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+export RIVERBANK_REPO="@RIVERBANK_REPO@"
+export RIVERBANK_HOME="@RIVERBANK_HOME@"
+exec /usr/bin/python3 "@RIVERBANK_REPO@/apps/release-manager/release_manager.py" "$@"

@@ -4,7 +4,7 @@
 
 **RiverBank Edge OS** 是 RiverBank 为 RiverBank Edge 整机维护、验证、签名并发布的设备操作系统。它可以使用 Linux 内核、Debian、Raspberry Pi 固件和开源软件作为上游；“自己的系统”指 RiverBank 掌握整机镜像、硬件适配、安全策略、升级、恢复、版本和支持责任，不要求从零重写内核。
 
-当前 `v0.25.5 beta` 的分发模式是 `managed-linux-system-layer`：先安装受支持的 Debian/Raspberry Pi OS，再部署 RiverBank 服务、配置和资源。它已经是统一版本和封存的 Edge OS 软件栈，但**目前还不是可直接写入 SD/NVMe 的独立镜像**。
+当前 `v0.26.0 beta` 的分发模式是 `managed-linux-system-layer`：先安装受支持的 Debian/Raspberry Pi OS，再部署 RiverBank 服务、配置和资源。它已经是统一版本和封存的 Edge OS 软件栈，但**目前还不是可直接写入 SD/NVMe 的独立镜像**。
 
 内部版本清单继续使用历史键 `edge_system`，以兼容现有工具和已部署设备；对外名称、产物 ID、文件名和新标签统一使用 `RiverBank Edge OS`、`riverbank-edge-os` 与 `edge-os/`。
 
@@ -104,10 +104,10 @@ A/B 原子 OTA + 恢复分区
 ## 版本与发布边界
 
 - 硬件：`RiverBank Edge G1 · Rev A`；
-- 设备操作系统：`RiverBank Edge OS v0.25.5 beta`；
+- 设备操作系统：`RiverBank Edge OS v0.26.0 beta`；
 - 上游基础：按设备实际报告显示 Debian/Raspberry Pi OS、Linux 内核和固件版本；
 - 手机和桌面客户端：继续使用独立版本，只通过兼容清单与 Edge OS 对齐；
-- 发布标签：`edge-os/v0.25.5-beta`；
+- 发布标签：`edge-os/v0.26.0-beta`；
 - 发布列车：记录一组联合验收的 Edge OS 与客户端版本，不是一个安装包。
 
 从 `managed-linux-system-layer` 切换为 `flashable-system-image` 属于分发能力升级。只有镜像可复现构建、签名、首次启动、升级、回滚、恢复和真实硬件验收全部通过后，清单才可以宣告后者。

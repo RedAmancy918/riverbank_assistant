@@ -87,7 +87,7 @@ class WakeBargeInTests(unittest.TestCase):
         assistant.last_barge_in_at = None
         assistant.last_interrupted_stage = None
         assistant.last_result = "asking_hermes"
-        assistant.hermes = FakeHermes()
+        assistant.agent_runtime = FakeHermes()
         assistant.publish_speech_bubble = lambda *_args, **_kwargs: None
         assistant.write_state = lambda: None
         return assistant
@@ -96,11 +96,12 @@ class WakeBargeInTests(unittest.TestCase):
         assistant = self.assistant()
         wake = {"received_at": 123.0, "message_id": 9, "angle": 30}
 
-        self.assertTrue(assistant.request_barge_in(wake))
+        with mock.patch.object(voice, "expression"):
+            self.assertTrue(assistant.request_barge_in(wake))
         self.assertTrue(assistant.interrupt_event.is_set())
         self.assertTrue(assistant.active_speech_session.aborted)
         self.assertTrue(assistant.active_player.terminated)
-        self.assertTrue(assistant.hermes.interrupted)
+        self.assertTrue(assistant.agent_runtime.interrupted)
         self.assertEqual(assistant.pop_pending_wake(), wake)
         self.assertEqual(assistant.last_interrupted_stage, "asking_hermes")
         self.assertEqual(assistant.barge_in_count, 1)

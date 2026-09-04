@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export PYTHONPATH="@RIVERBANK_REPO@/apps/agent-runtime"
+exec /usr/bin/python3 "@RIVERBANK_REPO@/apps/agent-runtime/agentctl.py" "$@"

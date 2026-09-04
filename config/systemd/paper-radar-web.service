@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=@RIVERBANK_REPO@/apps/paper-radar/data/special-focus @RIVERBANK_REPO@/apps/paper-radar/data/paper-qa
+ReadWritePaths=@RIVERBANK_REPO@/apps/paper-radar/data/special-focus @RIVERBANK_REPO@/apps/paper-radar/data/paper-qa @RIVERBANK_DATA@/paper-radar/data @RIVERBANK_DATA@/paper-radar/reports @RIVERBANK_DATA@/paper-radar/public
 StandardOutput=journal
 StandardError=journal
 

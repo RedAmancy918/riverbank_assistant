@@ -1,6 +1,6 @@
 # 部署说明
 
-当前设备软件正式名称为 **RiverBank Edge OS**，本文对应 `v0.25.5 beta` 的受管 Linux 系统层安装方式。它不是可直接烧录的 `.img.xz`；镜像路线与分发边界见 `docs/EDGE_OS.zh-CN.md`。
+当前设备软件正式名称为 **RiverBank Edge OS**，本文对应 `v0.26.0 beta` 的受管 Linux 系统层安装方式。它不是可直接烧录的 `.img.xz`；镜像路线与分发边界见 `docs/EDGE_OS.zh-CN.md`。
 
 本说明面向与已验证原型相近的 Raspberry Pi 5。先在测试机验证，再部署到长期运行设备。
 
@@ -16,12 +16,13 @@ python3 scripts/render_config.py \
 ```
 
 工具会读取当前用户 UID、主目录和仓库绝对路径，把 `config/` 中的 `@RIVERBANK_*@` 占位符渲染到 `build/generated/`，并生成 `manifest.json`。它不修改系统。
+若在开发机为另一台设备交叉渲染，使用 `--repo /目标设备/上的/riverbank-edge-os` 明确目标路径；不得把开发机绝对路径写入设备服务。
 
 ## 2. 准备运行目录和 Python 环境
 
 ```bash
-mkdir -p apps/paper-radar/data/{generated,candidates,special-focus}
-mkdir -p apps/paper-radar/{reports,public}
+mkdir -p /mnt/riverbank-data/paper-radar/data/{generated,candidates,special-focus}
+mkdir -p /mnt/riverbank-data/paper-radar/{reports,public}
 python3 -m venv apps/paper-radar/.venv
 apps/paper-radar/.venv/bin/pip install -r apps/paper-radar/requirements.txt
 sudo apt-get install python3-qrcode
@@ -31,7 +32,9 @@ sudo apt-get install python3-qrcode
 
 实时转写气泡需要 sherpa-onnx 的 `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`。最终转写还需要 SenseVoice INT8 与 Zipformer CTC INT8，默认分别放在数据盘 `ai/models/asr-final/sensevoice-int8/` 和 `ai/models/asr-final/zipformer-ctc-int8/`，也可用 `RIVERBANK_FINAL_ASR_*` 环境变量改写。模型缺失时服务会明确报告最终 ASR 不可用，不会把低质量草稿直接提交给 Hermes。
 
-将有权使用的 GIF 放入 `apps/expression-ui/assets/expressions/`；将可选唤醒回应放为 `apps/expression-ui/assets/audio/wake_ack.wav`。路径也可以通过环境变量或 `expressions.json` 改写。
+将有权使用的 GIF 放入 `$HOME/.local/share/riverbank/assets/expressions/`，使用 `expressions.json` 中的 15 个标准文件名；将可选唤醒回应放为 `$HOME/.local/share/riverbank/assets/audio/wake_ack.wav`。这些设备资产不进入 Git 或公开 OTA，升级代码时也不会覆盖。路径可以通过环境变量或 `expressions.json` 改写。
+
+日报的 `data/`、`reports/` 和生成后的 `public/` 属于设备状态，不属于应用源码。既有设备升级时先复制到 `RIVERBANK_DATA/paper-radar/` 并核对 `latest-report.json` 摘要，再让正式源码树中的同名目录指向该状态目录；不得用空仓库目录覆盖现有日报或问询缓存。
 
 ## 3. 核对硬件参数
 
@@ -59,6 +62,7 @@ sudo scripts/install.sh --generated build/generated --apply
 ```
 
 安装器会复制核心 systemd 单元、健康监控配置、Plymouth 主题和 udev 规则，并在首次安装时为工坊创建不可导出的设备 Ed25519 私钥及对应的本机信任公钥。已有私钥或公钥只存在一侧时安装器会停止，不会静默重建身份。安装器不会安装 Hermes、Hailo、ViewTurbo、模型权重或 API 密钥；可选代理/VPN 单元不会自动启用。
+安装后 `riverbank-release` 与 `riverbank-agentctl` 是固定指向本机正式 Edge OS 基线的入口，不再依赖脚本被复制到哪个目录。
 
 若要启用圆屏设置页的 Wi-Fi 开关，确认运行用户属于 `netdev` 组后安装最小 Polkit 规则：
 
@@ -79,6 +83,7 @@ sudo systemctl enable --now riverbank-health-monitor.service
 sudo systemctl enable --now paper-radar-web.service
 sudo systemctl enable --now riverbank-recovery.service
 sudo systemctl enable --now riverbank-provisioning.service
+sudo systemctl enable --now riverbank-agent-runtime.service
 sudo systemctl enable --now riverbank-workshop.service
 ```
 
@@ -95,9 +100,9 @@ python3 apps/face-tracker/face_trackerctl.py status
 正式基线可在所有测试通过后封存。版本必须使用 `vMAJOR.MINOR.PATCH beta|stable`：
 
 ```bash
-sudo python3 apps/release-manager/release_manager.py seal \
-  --version v0.7.1 --channel beta --notes "initial verified deployment"
-python3 apps/release-manager/release_manager.py verify --json
+sudo riverbank-release seal \
+  --version 0.26.0 --channel beta --notes "verified RiverBank Edge OS release"
+riverbank-release verify --json
 ```
 
 这里封存的是 RiverBank Edge OS，不是 iOS/macOS/Windows App，也不是未经 RiverBank 管理的上游 Debian/Raspberry Pi OS。当前交付形态仍是在受支持基础系统上安装受管系统层；可烧录镜像路线见 `docs/EDGE_OS.zh-CN.md`。跨端发布组合以 `config/version-catalog.json` 为准；GitHub CI/CD 与作用域标签见 `docs/CI_CD.zh-CN.md`。
@@ -125,6 +130,7 @@ Camera Hub 默认只监听 `127.0.0.1:19733`，不应直接暴露到局域网或
 
 ```bash
 scripts/validate-release.sh
+python3 apps/agent-runtime/agentctl.py health
 python3 apps/expression-ui/expression_display_persistent.py --self-test
 python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v
 python3 apps/workshop/workshopctl.py service-health

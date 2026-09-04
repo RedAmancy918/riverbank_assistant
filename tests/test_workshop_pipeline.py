@@ -38,7 +38,7 @@ from workshop_declarative import (  # noqa: E402
     validate_declarative_app,
 )
 from workshop_generator import (  # noqa: E402
-    HermesPlanGenerator,
+    AgentPlanGenerator,
     build_candidate,
     fallback_plan,
     requirement_policy_error,
@@ -101,6 +101,11 @@ class FakeGenerator:
         return fallback_plan(requirement)
 
 
+class UnavailableAgentRuntime:
+    def available(self) -> bool:
+        return False
+
+
 class FakeMicrophoneCapture:
     def __init__(self, source: str, sample_rate: int) -> None:
         self.source = source
@@ -128,6 +133,15 @@ class FakeMicrophoneCapture:
 
 
 class WorkshopPipelineTests(unittest.TestCase):
+    def test_production_generator_does_not_silently_build_a_fallback_app(self) -> None:
+        generator = AgentPlanGenerator(
+            agent_runtime=UnavailableAgentRuntime(),
+            allow_fallback=False,
+        )
+        with self.assertRaises(ContractError) as context:
+            generator.generate("帮我做一个能理解上下文的应用")
+        self.assertEqual(context.exception.code, "agent_runtime_unavailable")
+
     def test_clock_plan_uses_host_clock_surface_and_local_time_fields(self) -> None:
         requirement = "帮我做一个桌面时钟"
         plan = fallback_plan(requirement)
@@ -208,7 +222,8 @@ class WorkshopPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "hermes"
             binary.touch()
-            generator = HermesPlanGenerator(hermes_bin=binary, workspace=Path(directory))
+            binary.chmod(0o700)
+            generator = AgentPlanGenerator(hermes_bin=binary, workspace=Path(directory))
             with mock.patch.object(
                 generator,
                 "_run_prompt",
@@ -216,7 +231,7 @@ class WorkshopPipelineTests(unittest.TestCase):
             ) as invoke:
                 plan = generator.generate("帮我做一个桌面时钟")
         self.assertEqual(invoke.call_count, 2)
-        self.assertEqual(plan["generator"], "hermes-plan-repaired")
+        self.assertEqual(plan["generator"], "agent-runtime-plan-repaired")
         self.assertEqual(plan["pipeline"][1]["view"], "clock")
 
     def test_microphone_pcm_is_reduced_to_metrics_without_payload(self) -> None:

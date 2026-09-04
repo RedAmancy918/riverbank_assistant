@@ -23,11 +23,16 @@ TOKENS = (
 )
 
 
-def absolute_path(value: str, label: str) -> Path:
-    path = Path(value).expanduser().resolve()
+def absolute_path(
+    value: str,
+    label: str,
+    *,
+    resolve_symlinks: bool = False,
+) -> Path:
+    path = Path(os.path.normpath(str(Path(value).expanduser())))
     if not path.is_absolute():
         raise ValueError(f"{label} must be absolute: {value}")
-    return path
+    return path.resolve() if resolve_symlinks else path
 
 
 def user_record(username: str) -> tuple[int, Path]:
@@ -58,6 +63,10 @@ def main() -> int:
     parser.add_argument("--user", default=getpass.getuser())
     parser.add_argument("--home")
     parser.add_argument("--uid", type=int)
+    parser.add_argument(
+        "--repo",
+        help="absolute repository path on the target device (defaults to this checkout)",
+    )
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--hailo-venv")
     parser.add_argument("--output", default=str(REPO / "build/generated"))
@@ -66,13 +75,14 @@ def main() -> int:
     detected_uid, detected_home = user_record(args.user)
     uid = args.uid if args.uid is not None else detected_uid
     home = absolute_path(args.home, "home") if args.home else detected_home
+    repository = absolute_path(args.repo, "repo") if args.repo else REPO
     data_dir = absolute_path(args.data_dir, "data-dir")
     hailo_venv = absolute_path(
         args.hailo_venv
         or str(data_dir / "ai/apps/hailo-rpi5-examples/venv_hailo_rpi_examples"),
         "hailo-venv",
     )
-    output = absolute_path(args.output, "output")
+    output = absolute_path(args.output, "output", resolve_symlinks=True)
 
     safe_default = REPO / "build/generated"
     if output == REPO or REPO in output.parents and output != safe_default:
@@ -100,7 +110,7 @@ def main() -> int:
         "RIVERBANK_USER": args.user,
         "RIVERBANK_UID": str(uid),
         "RIVERBANK_HOME": str(home),
-        "RIVERBANK_REPO": str(REPO),
+        "RIVERBANK_REPO": str(repository),
         "RIVERBANK_DATA": str(data_dir),
         "RIVERBANK_HAILO_VENV": str(hailo_venv),
     }
@@ -111,7 +121,7 @@ def main() -> int:
         "user": args.user,
         "uid": uid,
         "home": str(home),
-        "repository": str(REPO),
+        "repository": str(repository),
         "data_dir": str(data_dir),
         "hailo_venv": str(hailo_venv),
         "generated_dir": str(output),

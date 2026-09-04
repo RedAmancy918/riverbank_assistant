@@ -1,24 +1,26 @@
 [Unit]
-Description=RiverBank persistent Hermes background task worker
-After=network-online.target
+Description=RiverBank persistent background task worker
+After=network-online.target riverbank-agent-runtime.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 Wants=network-online.target
+Requires=riverbank-agent-runtime.service
 
 [Service]
 Slice=riverbank-apps.slice
 Type=simple
-User=geo
-Group=geo
-WorkingDirectory=/home/geo/video-call
-Environment="HOME=/home/geo"
-Environment="HERMES_HOME=/home/geo/.hermes/profiles/daily"
-EnvironmentFile=-/home/geo/.hermes/.env
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+WorkingDirectory=@RIVERBANK_REPO@/apps/video-call
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="HERMES_HOME=@RIVERBANK_HOME@/.hermes/profiles/daily"
+Environment="PYTHONPATH=@RIVERBANK_REPO@/apps/agent-runtime"
+EnvironmentFile=-@RIVERBANK_HOME@/.hermes/.env
 Environment="PYTHONUNBUFFERED=1"
 Environment="http_proxy=http://127.0.0.1:15732"
 Environment="https_proxy=http://127.0.0.1:15732"
 Environment="no_proxy=127.0.0.1,localhost,riverbank-tech"
-ExecStart=/home/geo/video-call/.venv/bin/python /home/geo/video-call/task_worker.py --db /var/lib/riverbank-tasks/tasks.db --reports-dir /home/geo/.hermes/profiles/daily/workspace/reports --workspace /home/geo/.hermes/profiles/daily/workspace
+ExecStart=@RIVERBANK_REPO@/apps/video-call/.venv/bin/python @RIVERBANK_REPO@/apps/video-call/task_worker.py --db /var/lib/riverbank-tasks/tasks.db --reports-dir @RIVERBANK_HOME@/.hermes/profiles/daily/workspace/reports --workspace @RIVERBANK_HOME@/.hermes/profiles/daily/workspace --agent-transport socket --agent-socket /run/riverbank-agent/runtime.sock
 Restart=on-failure
 RestartSec=4
 KillMode=control-group
@@ -29,7 +31,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=false
-ReadWritePaths=/var/lib/riverbank-tasks /home/geo/.hermes
+ReadWritePaths=/var/lib/riverbank-tasks @RIVERBANK_HOME@/.hermes
 
 [Install]
 WantedBy=multi-user.target

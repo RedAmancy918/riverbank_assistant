@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 SCHEMA = "riverbank.release/v1"
+RIVERBANK_HOME = Path(os.environ.get("RIVERBANK_HOME", Path.home())).resolve()
 REPOSITORY_PATH = Path(
     os.environ.get(
         "RIVERBANK_REPO",
@@ -45,6 +46,27 @@ def repository_file(relative: str) -> str:
 
 COMPONENTS = (
     {
+        "id": "agent-runtime",
+        "name": "Provider-neutral Agent Runtime and backend adapters",
+        "services": ("riverbank-agent-runtime.service",),
+        "files": (
+            repository_file("apps/agent-runtime/agent_runtime_service.py"),
+            repository_file("apps/agent-runtime/agentctl.py"),
+            repository_file("apps/agent-runtime/riverbank_agent/__init__.py"),
+            repository_file("apps/agent-runtime/riverbank_agent/protocol.py"),
+            repository_file("apps/agent-runtime/riverbank_agent/client.py"),
+            repository_file("apps/agent-runtime/riverbank_agent/hermes.py"),
+            repository_file("apps/agent-runtime/riverbank_agent/embedded_hermes.py"),
+            repository_file("apps/agent-runtime/README.md"),
+            repository_file("docs/AGENT_RUNTIME_PROTOCOL.zh-CN.md"),
+            repository_file("tests/test_agent_runtime.py"),
+            repository_file("config/systemd/riverbank-agent-runtime.service"),
+            repository_file("config/bin/riverbank-agentctl"),
+            "/etc/systemd/system/riverbank-agent-runtime.service",
+            "/usr/local/bin/riverbank-agentctl",
+        ),
+    },
+    {
         "id": "assistant-core",
         "name": "Daily voice assistant and Hermes integration",
         "services": ("hermes-gateway.service", "hermes-voice.service"),
@@ -54,8 +76,8 @@ COMPONENTS = (
             repository_file("apps/expression-ui/voice_latency.py"),
             repository_file("apps/expression-ui/pomodoro_voice.py"),
             repository_file("apps/expression-ui/hermes-voicectl.py"),
-            "/home/geo/.hermes/profiles/daily/SOUL.md",
-            "/home/geo/.hermes/profiles/daily/profile.yaml",
+            str(RIVERBANK_HOME / ".hermes/profiles/daily/SOUL.md"),
+            str(RIVERBANK_HOME / ".hermes/profiles/daily/profile.yaml"),
             "/etc/systemd/system/hermes-voice.service",
             "/etc/systemd/system/hermes-voice.service.d/daily-profile.conf",
             "/etc/systemd/system/hermes-voice.service.d/performance.conf",
@@ -253,8 +275,10 @@ COMPONENTS = (
             repository_file("apps/health-monitor/proxy_egress_check.py"),
             repository_file("apps/health-monitor/voice_caption_health.py"),
             repository_file("apps/release-manager/release_manager.py"),
+            repository_file("config/bin/riverbank-release"),
             "/etc/riverbank/health-monitor.json",
             "/etc/systemd/system/riverbank-health-monitor.service",
+            "/usr/local/bin/riverbank-release",
         ),
     },
     {
@@ -404,6 +428,7 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "workshop_microphone_metrics": 1,
             "multi_user_accounts": 1,
             "chat_owner_isolation": 1,
+            "agent_runtime": 1,
         },
         "runtime_contracts": {
             "paper_web_port": 19732,
@@ -426,6 +451,9 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
             "workshop_runtime": "/run/riverbank-workshop/runtime.json",
             "workshop_execution_policy": "validated-declarative-only",
             "workshop_microphone_transport": "pipewire-shared-metrics-only",
+            "agent_runtime_protocol": "riverbank.agent/v1",
+            "agent_runtime_socket": "/run/riverbank-agent/runtime.sock",
+            "agent_backend_policy": "named-workspaces-and-toolsets-only",
         },
         "components": components,
     }

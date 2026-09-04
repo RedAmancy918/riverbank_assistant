@@ -1,0 +1,42 @@
+[Unit]
+Description=RiverBank provider-neutral Agent Runtime
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Slice=riverbank-apps.slice
+Type=simple
+User=@RIVERBANK_USER@
+Group=@RIVERBANK_USER@
+WorkingDirectory=@RIVERBANK_REPO@/apps/agent-runtime
+Environment="HOME=@RIVERBANK_HOME@"
+Environment="HERMES_HOME=@RIVERBANK_HOME@/.hermes/profiles/daily"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-@RIVERBANK_HOME@/.hermes/.env
+Environment="http_proxy=http://127.0.0.1:15732"
+Environment="https_proxy=http://127.0.0.1:15732"
+Environment="no_proxy=127.0.0.1,localhost,riverbank-tech"
+RuntimeDirectory=riverbank-agent
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/python3 @RIVERBANK_REPO@/apps/agent-runtime/agent_runtime_service.py --socket /run/riverbank-agent/runtime.sock --hermes-bin @RIVERBANK_HOME@/.local/bin/hermes --profile-home @RIVERBANK_HOME@/.hermes/profiles/daily --workspace daily=@RIVERBANK_HOME@/.hermes/profiles/daily/workspace --workspace workshop=@RIVERBANK_DATA@/workshop/generator-workspace --image-root /var/lib/riverbank-tasks/chat-attachments --image-root @RIVERBANK_HOME@/.hermes/profiles/daily --max-concurrency 3
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=20
+TimeoutStopSec=15
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@RIVERBANK_HOME@/.hermes @RIVERBANK_DATA@/workshop /var/lib/riverbank-tasks
+MemoryHigh=3G
+MemoryMax=4G
+CPUQuota=350%
+TasksMax=512
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

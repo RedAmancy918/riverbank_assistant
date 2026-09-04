@@ -4,7 +4,7 @@
 
 设备：RiverBank Edge
 
-设备操作系统：**RiverBank Edge OS v0.25.5 beta**
+设备操作系统：**RiverBank Edge OS v0.26.0 beta**
 
 分发模式：`managed-linux-system-layer`
 上游基础发行版：Debian GNU/Linux 12 (bookworm)
@@ -28,8 +28,8 @@
 
 | 产物 | 版本 |
 | --- | --- |
-| RiverBank 发布列车 | `v0.25.5 beta` |
-| RiverBank Edge OS | `v0.25.5 beta` |
+| RiverBank 发布列车 | `v0.26.0 beta` |
+| RiverBank Edge OS | `v0.26.0 beta` |
 | RiverBank iOS | `v0.25.2 beta`，build 3 |
 | RiverBank Call（macOS/Windows） | `v0.25.1 beta` |
 | 上游 Debian/Raspberry Pi OS/Linux | 按设备原版本单独报告 |
@@ -46,6 +46,7 @@ Edge OS、手机端和桌面端是独立产物；版本号不要求相同，通�
 | 六麦与硬件唤醒 | `listengo-mic.service` |
 | 摄像头共享 | `camera-hub.service` |
 | Hailo 人脸/视觉协调 | `riverbank-face-tracker.service` |
+| 统一智能体协议与后端适配 | `riverbank-agent-runtime.service`、`riverbank.agent/v1` |
 | 视频通话、Chat、账号与管理员网站 | `riverbank-video-call.service` |
 | Chat 回复 | `riverbank-chat-worker.service` |
 | 后台任务 | `riverbank-task-worker.service` |
@@ -61,19 +62,19 @@ Edge OS、手机端和桌面端是独立产物；版本号不要求相同，通�
 
 ```bash
 sudo riverbank-release seal \
-  --version 0.25.5 \
+  --version 0.26.0 \
   --channel beta \
   --notes "verified RiverBank Edge OS release"
 
 sudo riverbank-release verify --json
 ```
 
-当前 `v0.25.5 beta` 封存包含 9 个组件、143 个关键文件，设备复核结果为 `drift_count: 0`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
+当前 `v0.26.0 beta` 已于 2026-09-04 18:06（Asia/Shanghai）完成实机部署与封存：10 个组件、177 个关键文件，`drift_count: 0`。设备源码统一位于 `/home/geo/riverbank-edge-os`；表情与提示音等本地授权资产位于 `/home/geo/.local/share/riverbank/assets/`；日报状态位于 `RIVERBANK_DATA/paper-radar/`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
 
 ## 当前正式能力摘要
 
 - 圆屏表情、两级应用菜单、固定/取消固定、番茄钟、性能、音乐、通话、工坊和 SYSTEM 状态；
-- 本地唤醒、双模型最终 ASR、Hermes/DeepSeek、流式 TTS、语义表情和视觉路由；
+- 本地唤醒、双模型最终 ASR、RiverBank Agent Runtime（当前 Hermes/DeepSeek 适配器）、流式 TTS、语义表情和视觉路由；
 - 多用户账号隔离的 Chat、附件、图片生成、后台任务、报告下载和管理员网站；
 - Camera Hub 单一摄像头持有、PipeWire 共享音频、WebRTC 双向音视频；
 - 日报当天精读缓存优先，证据不足时按需补读原论文并回写当天缓存；
@@ -90,6 +91,7 @@ sudo riverbank-release verify --json
 systemctl is-active \
   expression-display.service \
   hermes-voice.service \
+  riverbank-agent-runtime.service \
   riverbank-video-call.service \
   riverbank-workshop.service \
   riverbank-health-monitor.service
@@ -109,5 +111,6 @@ systemctl is-active \
 | `RiverBank-Tech-系统部署说明.md` | `docs/DEVICE_STATUS.zh-CN.md` |
 | `RiverBank批量部署待办.md` | `docs/FLEET-DEPLOYMENT-TODO.zh-CN.md` |
 | `RiverBank Edge OS.md` | `docs/EDGE_OS.zh-CN.md` |
+| `RiverBank-Agent-Runtime-协议.md` | `docs/AGENT_RUNTIME_PROTOCOL.zh-CN.md` |
 
 桌面文件是便于现场查看的镜像副本；后续修改以仓库文件为准，再同步到设备桌面。

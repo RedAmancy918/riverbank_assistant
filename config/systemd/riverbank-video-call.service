@@ -11,12 +11,12 @@ Type=simple
 User=geo
 Group=geo
 SupplementaryGroups=audio video
-WorkingDirectory=/home/geo/video-call
-Environment="HOME=/home/geo"
+WorkingDirectory=@RIVERBANK_REPO@/apps/video-call
+Environment="HOME=@RIVERBANK_HOME@"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="PULSE_SERVER=unix:/run/user/1000/pulse/native"
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=/home/geo/video-call/.venv/bin/python /home/geo/video-call/video_call_server.py --host 0.0.0.0 --port 19734
+ExecStart=@RIVERBANK_REPO@/apps/video-call/.venv/bin/python @RIVERBANK_REPO@/apps/video-call/video_call_server.py --host 0.0.0.0 --port 19734
 Restart=on-failure
 RestartSec=3
 RuntimeDirectory=riverbank-video-call

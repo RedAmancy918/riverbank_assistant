@@ -46,6 +46,7 @@ echo "  health config: /etc/riverbank/health-monitor.json"
 echo "  recovery config: /etc/riverbank/recovery.json"
 echo "  provisioning config: /etc/riverbank/provisioning.json"
 echo "  udev: /etc/udev/rules.d"
+echo "  commands: /usr/local/bin"
 if ((with_boot_theme)); then
   echo "  Plymouth theme: /usr/share/plymouth/themes/riverbank"
 fi
@@ -77,12 +78,28 @@ install_one() {
   install -D -m 0644 "$source" "$target"
 }
 
+install_executable() {
+  local source=$1 target=$2
+  if [[ -e "$target" && $force -ne 1 ]]; then
+    if cmp -s "$source" "$target"; then
+      return
+    fi
+    echo "refusing to overwrite $target; inspect it or use --force" >&2
+    exit 1
+  fi
+  install -D -m 0755 "$source" "$target"
+}
+
 systemd_src="$generated_dir/config/systemd"
 while IFS= read -r -d '' source; do
   relative=${source#"$systemd_src/"}
   [[ "$relative" == optional/* ]] && continue
   install_one "$source" "/etc/systemd/system/$relative"
 done < <(find "$systemd_src" -type f -print0)
+
+while IFS= read -r -d '' source; do
+  install_executable "$source" "/usr/local/bin/$(basename "$source")"
+done < <(find "$generated_dir/config/bin" -type f -print0)
 
 install_one "$generated_dir/health-monitor.json" "/etc/riverbank/health-monitor.json"
 install_one "$generated_dir/recovery.json" "/etc/riverbank/recovery.json"
@@ -102,6 +119,13 @@ install -d -m 0700 -o "$riverbank_user" -g "$riverbank_group" "$workshop_state"
 install -d -m 0755 -o root -g root "$workshop_trust"
 install -d -m 0700 -o "$riverbank_user" -g "$riverbank_group" \
   "$riverbank_data/workshop" "$riverbank_data/ai/output/workshop-yolo"
+install -d -m 0750 -o "$riverbank_user" -g "$riverbank_group" \
+  "$riverbank_data/camera/gallery" \
+  "$riverbank_data/paper-radar/data" \
+  "$riverbank_data/paper-radar/reports" \
+  "$riverbank_data/paper-radar/public" \
+  "$riverbank_data/pomodoro" \
+  "$riverbank_data/ui"
 if [[ ! -e "$workshop_private" && ! -e "$workshop_public" ]]; then
   private_tmp=$(mktemp "$workshop_state/.device-signing-private.XXXXXX")
   public_tmp=$(mktemp "$workshop_trust/.riverbank-local-device-v1.XXXXXX")

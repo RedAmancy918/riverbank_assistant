@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from workshop_contract import ContractError, capability_catalog
-from workshop_generator import HermesPlanGenerator, build_candidate, requirement_policy_error
+from workshop_generator import AgentPlanGenerator, build_candidate, requirement_policy_error
+from riverbank_agent import SocketAgentRuntime
+from riverbank_agent.protocol import DEFAULT_SOCKET as DEFAULT_AGENT_SOCKET
 from workshop_host import WorkshopHostBroker
 from workshop_manager import DEFAULT_DATA_ROOT, WorkshopManager, atomic_write_json, inspect_package
 from workshop_package import DEFAULT_KEY_ID, DEFAULT_PRIVATE_KEY, build_signed_package
@@ -61,14 +63,14 @@ class WorkshopService:
         trust_store: Path = Path("/etc/riverbank/workshop/trusted-keys"),
         signing_key: Path = DEFAULT_PRIVATE_KEY,
         signing_key_id: str = DEFAULT_KEY_ID,
-        generator: HermesPlanGenerator | None = None,
+        generator: AgentPlanGenerator | None = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.runtime_root = Path(runtime_root)
         self.status_path = self.runtime_root / "status.json"
         self.manager = WorkshopManager(self.data_root, trust_store)
         self.store = WorkshopStore(self.data_root)
-        self.generator = generator or HermesPlanGenerator()
+        self.generator = generator or AgentPlanGenerator()
         self.signing_key = Path(signing_key)
         self.signing_key_id = signing_key_id
         self.broker = WorkshopHostBroker(
@@ -459,6 +461,18 @@ def main() -> int:
     parser.add_argument("--trust-store", type=Path, default=Path("/etc/riverbank/workshop/trusted-keys"))
     parser.add_argument("--signing-key", type=Path, default=DEFAULT_PRIVATE_KEY)
     parser.add_argument("--signing-key-id", default=DEFAULT_KEY_ID)
+    parser.add_argument(
+        "--agent-transport",
+        choices=("socket", "direct"),
+        default=os.environ.get("RIVERBANK_AGENT_TRANSPORT", "socket"),
+    )
+    parser.add_argument(
+        "--agent-socket",
+        type=Path,
+        default=Path(
+            os.environ.get("RIVERBANK_AGENT_SOCKET", str(DEFAULT_AGENT_SOCKET))
+        ),
+    )
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -480,6 +494,14 @@ def main() -> int:
         trust_store=args.trust_store,
         signing_key=args.signing_key,
         signing_key_id=args.signing_key_id,
+        generator=AgentPlanGenerator(
+            agent_runtime=(
+                SocketAgentRuntime(args.agent_socket)
+                if args.agent_transport == "socket"
+                else None
+            ),
+            allow_fallback=args.agent_transport == "direct",
+        ),
     )
     service.start()
     server = WorkshopUnixServer(args.socket, service)

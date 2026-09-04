@@ -51,8 +51,8 @@
   "cache_limit_mb": 2048,
   "camera_exit_edge_ratio": 0.8,
   "camera_exit_swipe_px": 100,
-  "font_path": "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-  "status_font_path": "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+  "font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+  "status_font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
   "radial_menu": [
     {
       "id": "voice",
@@ -127,21 +127,21 @@
     }
   ],
   "expressions": {
-    "idle": "assets/expressions/01_idle.gif",
-    "proud": "assets/expressions/02_proud.gif",
-    "poke_mouth": "assets/expressions/03_poke_mouth.gif",
-    "love": "assets/expressions/04_love.gif",
-    "afraid": "assets/expressions/05_afraid.gif",
-    "happy": "assets/expressions/06_happy.gif",
-    "cry": "assets/expressions/07_cry.gif",
-    "cool": "assets/expressions/08_cool.gif",
-    "touch_nose": "assets/expressions/09_touch_nose.gif",
-    "sad": "assets/expressions/10_sad.gif",
-    "angry": "assets/expressions/11_angry.gif",
-    "listening": "assets/expressions/12_listening.gif",
-    "sleep": "assets/expressions/13_sleep.gif",
-    "thinking": "assets/expressions/14_thinking.gif",
-    "error": "assets/expressions/14_thinking.gif",
-    "shutdown": "assets/expressions/15_shutdown.gif"
+    "idle": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/01_idle.gif",
+    "proud": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/02_proud.gif",
+    "poke_mouth": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/03_poke_mouth.gif",
+    "love": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/04_love.gif",
+    "afraid": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/05_afraid.gif",
+    "happy": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/06_happy.gif",
+    "cry": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/07_cry.gif",
+    "cool": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/08_cool.gif",
+    "touch_nose": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/09_touch_nose.gif",
+    "sad": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/10_sad.gif",
+    "angry": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/11_angry.gif",
+    "listening": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/12_listening.gif",
+    "sleep": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/13_sleep.gif",
+    "thinking": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/14_thinking.gif",
+    "error": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/14_thinking.gif",
+    "shutdown": "${RIVERBANK_HOME}/.local/share/riverbank/assets/expressions/15_shutdown.gif"
   }
 }

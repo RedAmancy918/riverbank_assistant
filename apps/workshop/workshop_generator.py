@@ -11,11 +11,22 @@ import hashlib
 import json
 import os
 import re
-import signal
-import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+AGENT_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "agent-runtime"
+if AGENT_RUNTIME_DIR.is_dir() and str(AGENT_RUNTIME_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_RUNTIME_DIR))
+
+from riverbank_agent import (
+    AgentRunRequest,
+    AgentRuntimeError,
+    DirectAgentRuntime,
+    HermesCLIAdapter,
+    SocketAgentRuntime,
+)
 
 from workshop_contract import ContractError, validate_manifest
 from workshop_declarative import permissions_for_app, validate_declarative_app
@@ -285,70 +296,69 @@ hero 的第一个组件必须是 clock、metric 或 progress。用户要求时�
 """.strip()
 
 
-class HermesPlanGenerator:
+class AgentPlanGenerator:
     def __init__(
         self,
         *,
         hermes_bin: Path = Path("/home/geo/.local/bin/hermes"),
         workspace: Path = Path("/mnt/nvme64/riverbank-user/workshop/generator-workspace"),
         timeout_seconds: float = 180.0,
+        agent_runtime: SocketAgentRuntime | DirectAgentRuntime | None = None,
+        allow_fallback: bool = True,
     ) -> None:
         self.hermes_bin = Path(hermes_bin)
         self.workspace = Path(workspace)
         self.timeout_seconds = max(30.0, min(float(timeout_seconds), 300.0))
+        self.allow_fallback = bool(allow_fallback)
+        self.agent_runtime = agent_runtime or DirectAgentRuntime(
+            HermesCLIAdapter(
+                hermes_bin=self.hermes_bin,
+                profile_home=Path(
+                    os.environ.get(
+                        "RIVERBANK_DAILY_HOME",
+                        "/home/geo/.hermes/profiles/daily",
+                    )
+                ),
+                workspaces={"workshop": self.workspace},
+                allowed_toolsets={"clarify"},
+            )
+        )
 
     def _run_prompt(self, prompt: str) -> str | None:
-        command = [
-            str(self.hermes_bin),
-            "chat",
-            "--query",
-            prompt,
-            "--quiet",
-            "--toolsets",
-            "clarify",
-            "--reasoning",
-            "medium",
-            "--max-turns",
-            "4",
-            "--source",
-            "riverbank-workshop",
-            "--in",
-            str(self.workspace),
-        ]
-        environment = os.environ.copy()
-        process = subprocess.Popen(
-            command,
-            cwd=self.workspace,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
-        )
         try:
-            output, _ = process.communicate(timeout=self.timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            raise ContractError("generator_timeout", "应用规划模型响应超时。", "generator") from exc
-        if process.returncode != 0:
+            result = self.agent_runtime.run_sync(
+                AgentRunRequest(
+                    purpose="workshop",
+                    prompt=prompt,
+                    workspace="workshop",
+                    toolsets=("clarify",),
+                    reasoning="medium",
+                    max_turns=4,
+                    timeout_seconds=self.timeout_seconds,
+                    source="riverbank-workshop",
+                )
+            )
+        except AgentRuntimeError as exc:
+            if not self.allow_fallback:
+                raise ContractError(
+                    "agent_runtime_unavailable",
+                    f"工坊智能规划服务暂时不可用：{str(exc)[:240]}",
+                    "generator",
+                ) from exc
             return None
-        return output
+        return result.text
 
     def generate(self, requirement: str) -> dict[str, Any]:
         policy_error = requirement_policy_error(requirement)
         if policy_error:
             raise ContractError("forbidden_requirement", policy_error, "requirement")
-        if not self.hermes_bin.is_file():
+        if not self.agent_runtime.available():
+            if not self.allow_fallback:
+                raise ContractError(
+                    "agent_runtime_unavailable",
+                    "工坊智能规划服务暂时不可用，请稍后重试。",
+                    "generator",
+                )
             return fallback_plan(requirement)
         self.workspace.mkdir(parents=True, exist_ok=True)
         output = self._run_prompt(generator_prompt(requirement))
@@ -356,7 +366,7 @@ class HermesPlanGenerator:
             return fallback_plan(requirement)
         try:
             plan = _extract_json(output)
-            plan["generator"] = "hermes-plan"
+            plan["generator"] = "agent-runtime-plan"
             normalize_plan(requirement, plan)
             return plan
         except ContractError as first_error:
@@ -370,14 +380,24 @@ class HermesPlanGenerator:
             if repaired_output is not None:
                 try:
                     repaired = _extract_json(repaired_output)
-                    repaired["generator"] = "hermes-plan-repaired"
+                    repaired["generator"] = "agent-runtime-plan-repaired"
                     normalize_plan(requirement, repaired)
                     return repaired
                 except ContractError:
                     pass
-            fallback = fallback_plan(requirement)
-            fallback["generator"] = "local-safe-repair"
-            return fallback
+            if self.allow_fallback:
+                fallback = fallback_plan(requirement)
+                fallback["generator"] = "local-safe-repair"
+                return fallback
+            raise ContractError(
+                "generator_contract_failed",
+                f"智能规划连续两次未通过宿主契约：{first_error.message}",
+                "generator",
+            ) from first_error
+
+
+# Compatibility alias for integrations built before RiverBank Agent Runtime v1.
+HermesPlanGenerator = AgentPlanGenerator
 
 
 def normalize_plan(requirement: str, plan: dict[str, Any]) -> dict[str, Any]:

@@ -21,7 +21,7 @@
     <key>RiverBankReleaseChannel</key>
     <string>beta</string>
     <key>RiverBankCompatibleEdgeRange</key>
-    <string>&gt;=0.25.0 &lt;0.26.0</string>
+    <string>&gt;=0.25.0 &lt;0.27.0</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>NSAppTransportSecurity</key>

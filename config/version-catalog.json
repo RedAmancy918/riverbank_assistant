@@ -3,7 +3,7 @@
   "product_suite": {
     "name": "RiverBank",
     "product_id": "riverbank",
-    "release_train": "v0.25.5 beta",
+    "release_train": "v0.26.0 beta",
     "purpose": "Compatibility and shipment mapping; not an installable artifact"
   },
   "hardware": {
@@ -17,9 +17,9 @@
     "artifact_id": "riverbank-edge-os",
     "artifact_class": "device-operating-system",
     "distribution_mode": "managed-linux-system-layer",
-    "version": "0.25.5",
+    "version": "0.26.0",
     "channel": "beta",
-    "display_version": "v0.25.5 beta",
+    "display_version": "v0.26.0 beta",
     "base_operating_system": {
       "name": "Debian / Raspberry Pi OS",
       "ownership": "upstream",
@@ -36,7 +36,7 @@
       "channel": "beta",
       "display_version": "v0.25.2 beta",
       "build": 3,
-      "compatible_edge": ">=0.25.0 <0.26.0"
+      "compatible_edge": ">=0.25.0 <0.27.0"
     },
     "desktop": {
       "name": "RiverBank Call",
@@ -50,7 +50,7 @@
       "channel": "beta",
       "display_version": "v0.25.1 beta",
       "package_version": "0.25.1-beta.1",
-      "compatible_edge": ">=0.25.0 <0.26.0"
+      "compatible_edge": ">=0.25.0 <0.27.0"
     }
   },
   "workshop_apps": {
@@ -65,6 +65,7 @@
   },
   "compatibility": {
     "edge_api": "riverbank.video-call/v1",
-    "workshop_host_api": "riverbank.app-host/v1"
+    "workshop_host_api": "riverbank.app-host/v1",
+    "agent_runtime": "riverbank.agent/v1"
   }
 }

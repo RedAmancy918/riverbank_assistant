@@ -501,7 +501,10 @@ def display_geometry(output_name: str) -> tuple[int, int, int, int, float] | Non
 
 def app_path(value: object) -> Path:
     """Resolve relative configuration paths from the expression UI directory."""
-    path = Path(os.path.expandvars(str(value))).expanduser()
+    raw = str(value)
+    raw = raw.replace("${RIVERBANK_HOME}", str(RIVERBANK_HOME))
+    raw = raw.replace("${RIVERBANK_DATA}", str(RIVERBANK_DATA))
+    path = Path(os.path.expandvars(raw)).expanduser()
     return path if path.is_absolute() else APP_DIR / path
 
 

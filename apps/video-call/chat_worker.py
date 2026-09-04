@@ -5,13 +5,26 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import codecs
 import json
 import logging
 import os
 import re
 import signal
+import sys
 from pathlib import Path
+
+AGENT_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "agent-runtime"
+if AGENT_RUNTIME_DIR.is_dir() and str(AGENT_RUNTIME_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_RUNTIME_DIR))
+
+from riverbank_agent import (
+    AgentCancelled,
+    AgentRunRequest,
+    DirectAgentRuntime,
+    HermesCLIAdapter,
+    SocketAgentRuntime,
+)
+from riverbank_agent.protocol import DEFAULT_SOCKET
 
 from attachment_store import DEFAULT_ATTACHMENT_ROOT, AttachmentStore
 from chat_store import ChatStore, DEFAULT_CHAT_DB
@@ -139,6 +152,7 @@ class ChatWorker:
         timeout_seconds: float,
         poll_seconds: float,
         generated_image_roots: tuple[Path, ...] | None = None,
+        agent_runtime: SocketAgentRuntime | DirectAgentRuntime | None = None,
     ) -> None:
         self.store = store
         self.hermes_bin = hermes_bin
@@ -159,11 +173,24 @@ class ChatWorker:
         self.generated_image_roots = tuple(
             root.expanduser().resolve(strict=False) for root in roots
         )
+        allowed_toolsets = {
+            item.strip() for item in f"{toolsets},skills".split(",") if item.strip()
+        }
+        self.agent_runtime = agent_runtime or DirectAgentRuntime(
+            HermesCLIAdapter(
+                hermes_bin=self.hermes_bin,
+                profile_home=self.workspace.parent,
+                workspaces={"daily": self.workspace},
+                allowed_toolsets=allowed_toolsets,
+                image_roots=(self.attachment_store.root, *self.generated_image_roots),
+            )
+        )
         self.running = True
         self.process: asyncio.subprocess.Process | None = None
 
     def stop(self) -> None:
         self.running = False
+        self.agent_runtime.cancel_all()
         if self.process and self.process.returncode is None:
             self.process.terminate()
 
@@ -225,29 +252,10 @@ class ChatWorker:
         except LookupError as exc:
             await asyncio.to_thread(self.store.fail, assistant_id, str(exc))
             return
-        command = [
-            str(self.hermes_bin),
-            "chat",
-            "--query",
-            prompt,
-            "--quiet",
-            "--toolsets",
-            "skills" if is_paper_chat else self.toolsets,
-            "--reasoning",
-            "medium",
-            "--max-turns",
-            "24",
-            "--source",
-            "riverbank-paper-qa" if is_paper_chat else "riverbank-app-chat",
-            "--continue",
-            f"riverbank-chat-{conversation_id}",
-            "--create-if-missing",
-            "--in",
-            str(self.workspace),
-        ]
         image_attachments = [
             item for item in attachments if str(item.get("kind") or "") == "image"
         ]
+        image_path: Path | None = None
         if image_attachments:
             image_path = Path(str(image_attachments[0].get("storage_path") or ""))
             if not image_path.is_file():
@@ -257,60 +265,44 @@ class ChatWorker:
                     "uploaded image is unavailable",
                 )
                 return
-            command.extend(["--image", str(image_path)])
-        environment = os.environ.copy()
-        environment.setdefault("HERMES_ACCEPT_HOOKS", "1")
-        environment.setdefault("HERMES_HOME", str(self.workspace.parent))
+        request = AgentRunRequest(
+            purpose="paper-qa" if is_paper_chat else "chat",
+            prompt=prompt,
+            workspace="daily",
+            toolsets=("skills",) if is_paper_chat else tuple(
+                item.strip() for item in self.toolsets.split(",") if item.strip()
+            ),
+            reasoning="medium",
+            max_turns=24,
+            timeout_seconds=self.timeout_seconds,
+            source="riverbank-paper-qa" if is_paper_chat else "riverbank-app-chat",
+            session=f"riverbank-chat-{conversation_id}",
+            create_session=True,
+            image_path=str(image_path) if image_path is not None else "",
+        )
         LOGGER.info("chat turn started conversation=%s message=%s", conversation_id, assistant_id)
         try:
-            self.process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=self.workspace,
-                env=environment,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
-            )
-            assert self.process.stdout is not None
-            chunks: list[str] = []
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + self.timeout_seconds
-            while True:
-                if await asyncio.to_thread(self.store.is_cancel_requested, assistant_id):
-                    await self.terminate_process()
-                    await asyncio.to_thread(self.store.mark_cancelled, assistant_id)
-                    LOGGER.info("chat turn cancelled message=%s", assistant_id)
-                    return
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise TimeoutError("chat response timed out")
-                try:
-                    payload = await asyncio.wait_for(
-                        self.process.stdout.read(512), timeout=min(0.35, remaining)
-                    )
-                except asyncio.TimeoutError:
-                    continue
-                if not payload:
-                    tail = decoder.decode(b"", final=True)
-                    if tail:
-                        chunks.append(tail)
-                    break
-                decoded = decoder.decode(payload, final=False)
-                if decoded:
-                    chunks.append(decoded)
-                partial = clean_response("".join(chunks))
+            async def publish_snapshot(value: str) -> None:
+                partial = clean_response(value)
                 if partial:
                     await asyncio.to_thread(
-                        self.store.replace_content, assistant_id, partial
+                        self.store.replace_content,
+                        assistant_id,
+                        partial,
                     )
-            return_code = await self.process.wait()
-            response = clean_response("".join(chunks))
-            if return_code != 0:
-                raise RuntimeError(response[-4000:] or f"Hermes exited {return_code}")
-            if not response:
-                raise RuntimeError("Hermes returned an empty response")
+
+            async def cancellation_requested() -> bool:
+                return (not self.running) or await asyncio.to_thread(
+                    self.store.is_cancel_requested,
+                    assistant_id,
+                )
+
+            result = await self.agent_runtime.run_async(
+                request,
+                on_snapshot=publish_snapshot,
+                should_cancel=cancellation_requested,
+            )
+            response = clean_response(result.text)
             if not is_paper_chat and is_image_generation_request(user["content"]):
                 response = await self.import_generated_images(
                     assistant_id,
@@ -319,15 +311,16 @@ class ChatWorker:
                 )
             await asyncio.to_thread(self.store.finish, assistant_id, response)
             LOGGER.info("chat turn completed message=%s", assistant_id)
+        except AgentCancelled:
+            await asyncio.to_thread(self.store.mark_cancelled, assistant_id)
+            LOGGER.info("chat turn cancelled message=%s", assistant_id)
         except asyncio.CancelledError:
-            await self.terminate_process()
+            if isinstance(self.agent_runtime, SocketAgentRuntime):
+                await self.agent_runtime.cancel_async(request.request_id)
             raise
         except Exception as exc:
-            await self.terminate_process()
             await asyncio.to_thread(self.store.fail, assistant_id, str(exc))
             LOGGER.exception("chat turn failed message=%s", assistant_id)
-        finally:
-            self.process = None
 
     def trusted_generated_image_paths(self, response: str) -> list[Path]:
         paths: list[Path] = []
@@ -626,6 +619,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--toolsets", default="browser,skills,web")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--poll", type=float, default=0.5)
+    parser.add_argument(
+        "--agent-transport",
+        choices=("socket", "direct"),
+        default=os.environ.get("RIVERBANK_AGENT_TRANSPORT", "socket"),
+    )
+    parser.add_argument(
+        "--agent-socket",
+        type=Path,
+        default=Path(os.environ.get("RIVERBANK_AGENT_SOCKET", str(DEFAULT_SOCKET))),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--self-test", action="store_true")
@@ -645,6 +648,8 @@ async def async_main(args: argparse.Namespace) -> int:
                     "db": str(args.db),
                     "workspace": str(args.workspace),
                     "hermes_bin": str(args.hermes_bin),
+                    "agent_transport": args.agent_transport,
+                    "agent_socket": str(args.agent_socket),
                     "attachment_root": str(args.attachment_root),
                     "image_generation": {
                         "configured": image_generator.available,
@@ -660,6 +665,11 @@ async def async_main(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    agent_runtime = (
+        SocketAgentRuntime(args.agent_socket)
+        if args.agent_transport == "socket"
+        else None
+    )
     worker = ChatWorker(
         store=store,
         hermes_bin=args.hermes_bin,
@@ -672,6 +682,7 @@ async def async_main(args: argparse.Namespace) -> int:
         toolsets=args.toolsets,
         timeout_seconds=args.timeout,
         poll_seconds=args.poll,
+        agent_runtime=agent_runtime,
     )
     loop = asyncio.get_running_loop()
     for event in (signal.SIGTERM, signal.SIGINT):
