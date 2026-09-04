@@ -186,7 +186,7 @@ jobs:
           merge-multiple: true
       - name: List release assets
         run: find release-assets -maxdepth 1 -type f -printf '%f\n' | sort
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
           generate_release_notes: true
