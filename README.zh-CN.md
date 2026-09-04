@@ -1,8 +1,10 @@
 # RiverBank Edge
 
-RiverBank Edge 是一套在 Raspberry Pi 5 上运行的边缘智能助理工程。它把圆形触摸屏、摄像头共享、Hailo-8 本地视觉、六麦阵列、Hermes Agent、语音交互、表情系统、论文日报与健康守护整合为一套可开机自启、可扩展的服务架构。
+RiverBank Edge 是一套在 Raspberry Pi 5 上运行的边缘智能助理整机；设备软件正式命名为 **RiverBank Edge OS**。当前 Edge OS 以 Debian/Raspberry Pi OS 为上游基础，整合圆形触摸屏、摄像头共享、Hailo-8 本地视觉、六麦阵列、Hermes Agent、语音交互、表情系统、论文日报与健康守护，形成可开机自启、可升级、可扩展的设备操作系统。
 
 本仓库来自一台真实运行设备的当前实现，但已经做过公开发布清理：不包含 API Key、Hermes 私人 Profile、数据库、日志、相册、录音、模型权重、第三方表情包、专有字体或 VPN 登录数据。
+
+工坊用户创建或导入的应用属于设备本地用户行为：提案、`.rbapp`、安装包、授权、审计及应用私有数据不进入本仓库、GitHub Release 或 Edge OS OTA。仓库中的 `apps/workshop/examples/` 只存放 RiverBank 明确维护的官方示例。
 
 ## 当前能力
 
@@ -17,7 +19,7 @@ RiverBank Edge 是一套在 Raspberry Pi 5 上运行的边缘智能助理工程�
 - 回复语义表情：DeepSeek 在最终口语回复中选择受控情绪标签，语音层在朗读前截获标签并同步驱动圆屏表情；标签不会出现在语音或用户可见文字中。
 - 视觉路由：普通对话使用 Hermes 默认模型；明确的看图请求获取当前帧，并由 Hermes Profile 中配置的视觉模型处理。
 - Hailo-8 人脸追踪：SCRFD 模型常驻、推理按 TTL 租约启停，结果写入本地运行时状态，后续可接双轴云台闭环。
-- 正式运行架构：语音表情使用带顺序校验的结构化事件；Edge System 与各平台客户端独立版本，通过发布列车和兼容清单对齐，设备端可用 SHA-256 清单检测发布漂移。
+- 正式运行架构：语音表情使用带顺序校验的结构化事件；RiverBank Edge OS 与各平台客户端独立版本，通过发布列车和兼容清单对齐，设备端可用 SHA-256 清单检测发布漂移。
 - 具身智讯日报：多检索流、半年去重回填、中文候选摘要、全文精读、潜在方法、产业动态与一次性“明日焦点”；逐篇文章问询优先复用当天精读缓存，细节证据不足时受控补读原论文并回写当日缓存。
 - 可扩展健康守护：systemd、HTTP、JSON、端口、挂载点、文件新鲜度和自定义命令检查。
 
@@ -57,7 +59,7 @@ apps/
   health-monitor/    可扩展自检与桌面告警
   listengo-mic/      麦克风阵列控制口、唤醒与声源方向服务
   paper-radar/       论文采集、Hermes 编辑规则、渲染和网页
-  release-manager/   Edge System 版本封存与发布完整性验证
+  release-manager/   RiverBank Edge OS 版本封存与发布完整性验证
   video-call/        树莓派 WebRTC 端点、圆屏控制和 macOS/Windows 桌面客户端
   ios/               SwiftUI iPhone 客户端：Chat、视频通话、后台任务与报告
 config/
@@ -87,7 +89,7 @@ scripts/             配置渲染、安装和发布检查工具
 4. 按 [部署说明](docs/DEPLOYMENT.zh-CN.md) 安装依赖与服务。安装脚本只有显式传入 `--apply` 才会写入系统目录。
 5. 运行 `scripts/validate-release.sh` 做源码语法、JSON 与敏感信息检查。
 
-GitHub Actions 会在每次 Pull Request 和 `main` 推送时自动完成版本治理、单元测试以及 iOS/macOS/Windows 构建。发布标签、审批环境和 OTA 边界见 [GitHub CI/CD](docs/CI_CD.zh-CN.md)，产品命名与独立版本关系见 [命名与版本规范](apps/expression-ui/VERSIONING.md)。
+GitHub Actions 会在每次 Pull Request 和 `main` 推送时自动完成版本治理、单元测试以及 iOS/macOS/Windows 构建。发布标签、审批环境和 OTA 边界见 [GitHub CI/CD](docs/CI_CD.zh-CN.md)，产品命名与独立版本关系见 [命名与版本规范](apps/expression-ui/VERSIONING.md)，可烧录系统镜像的演进边界见 [RiverBank Edge OS 镜像与升级路线](docs/EDGE_OS.zh-CN.md)。
 
 ## 默认端口
 

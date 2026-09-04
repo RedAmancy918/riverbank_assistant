@@ -25,6 +25,9 @@ git diff --check
 - HEF、ONNX、PyTorch 权重、第三方 `.so` 与未知授权素材；
 - 微软雅黑等不可再分发字体；
 - 生成的论文数据库、历史报告与抓取缓存。
+- 工坊用户提案、生成/导入的 `.rbapp`、已安装应用、注册表、授权、审计和应用私有数据；仓库只保留工坊平台与明确标记的官方示例。
+
+`scripts/scan_release.py` 会拒绝任何位置的 `.rbapp`，以及误放到源码树中的 `drafts/`、`packages/`、`app-data/`、注册表、提案和审计文件。即使有人使用 `git add -f` 绕过 `.gitignore`，CI 仍会阻止发布。
 
 ## 建议的首次提交
 

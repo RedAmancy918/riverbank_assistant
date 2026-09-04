@@ -1,5 +1,7 @@
 # 部署说明
 
+当前设备软件正式名称为 **RiverBank Edge OS**，本文对应 `v0.25.4 beta` 的受管 Linux 系统层安装方式。它不是可直接烧录的 `.img.xz`；镜像路线与分发边界见 `docs/EDGE_OS.zh-CN.md`。
+
 本说明面向与已验证原型相近的 Raspberry Pi 5。先在测试机验证，再部署到长期运行设备。
 
 ## 1. 生成本机配置
@@ -98,7 +100,7 @@ sudo python3 apps/release-manager/release_manager.py seal \
 python3 apps/release-manager/release_manager.py verify --json
 ```
 
-这里封存的是 RiverBank Edge System，不是 iOS/macOS/Windows App，也不是 Debian/Raspberry Pi OS。跨端发布组合以 `config/version-catalog.json` 为准；GitHub CI/CD 与作用域标签见 `docs/CI_CD.zh-CN.md`。
+这里封存的是 RiverBank Edge OS，不是 iOS/macOS/Windows App，也不是未经 RiverBank 管理的上游 Debian/Raspberry Pi OS。当前交付形态仍是在受支持基础系统上安装受管系统层；可烧录镜像路线见 `docs/EDGE_OS.zh-CN.md`。跨端发布组合以 `config/version-catalog.json` 为准；GitHub CI/CD 与作用域标签见 `docs/CI_CD.zh-CN.md`。
 
 ## 5. Hermes Daily Profile
 

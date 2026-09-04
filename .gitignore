@@ -46,9 +46,28 @@ gallery/
 photos/
 recordings/
 models/
+*.rbapp
 *.hef
 *.onnx
 *.pt
 *.pth
 *.safetensors
 *.so
+
+# Workshop user behavior and device-local application state
+# Platform code, schemas and apps/workshop/examples/ remain versioned.
+apps/workshop/drafts/
+apps/workshop/packages/
+apps/workshop/app-data/
+apps/workshop/generated/
+apps/workshop/runtime-data/
+apps/workshop/user-data/
+apps/workshop/data/
+apps/workshop/registry.json
+apps/workshop/proposals.json
+apps/workshop/audit.jsonl
+apps/workshop/.registry.lock
+apps/workshop/.proposals.lock
+data/workshop/
+riverbank-user/workshop/
+workshop-data/

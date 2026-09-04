@@ -8616,7 +8616,7 @@ class PersistentExpressionDisplay:
             (
                 "version",
                 "版本",
-                f"Edge 系统 · {status.app_version}",
+                f"Edge OS · {status.app_version}",
                 True,
             ),
             ("system", "系统", f"{status.hostname} · {health}", True),
@@ -8648,7 +8648,7 @@ class PersistentExpressionDisplay:
         if section == "version":
             return "版本", (
                 ("产品", "RiverBank Edge"),
-                ("Edge 系统", status.app_version),
+                ("Edge OS", status.app_version),
                 ("基础系统", status.os_name),
                 ("内核", status.kernel_version or "—"),
             )

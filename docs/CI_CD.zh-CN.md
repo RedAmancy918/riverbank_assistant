@@ -27,15 +27,17 @@
 `.github/workflows/release.yml` 只接受带产物作用域、且与 `config/version-catalog.json` 完全一致的标签：
 
 ```text
-suite/v0.25.3-beta
-edge-system/v0.25.3-beta
-ios/v0.25.1-beta
+suite/v0.25.4-beta
+edge-os/v0.25.4-beta
+ios/v0.25.2-beta
 call/v0.25.1-beta
 ```
 
-`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.25.3` 会被拒绝，因为无法判断它代表硬件、Edge System 还是客户端。
+`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.25.4` 会被拒绝，因为无法判断它代表硬件、Edge OS 还是客户端。历史 `edge-system/` 标签继续保留用于审计，但新版本统一使用 `edge-os/`。
 
-发布流程会生成 GitHub Release、目标平台附件和 SHA-256 文件。当前 macOS、Windows 与 iOS beta 没有商业发行签名，iOS 文件会明确带 `unsigned`，不可描述成可公开安装的正式包。Edge 附件是源码发布候选，不会自动执行安装。
+工坊用户创建或导入的应用不属于任何 GitHub 发布作用域。CI/CD 只包含工坊平台、协议、Schema、测试与官方示例；`.rbapp`、提案、注册表、授权、审计及应用私有数据由 `.gitignore` 和发布扫描器双重排除。用户显式导出的应用只能作为用户备份/分享文件，不能自动进入 `edge-os/` 或 `suite/` Release。
+
+发布流程会生成 GitHub Release、目标平台附件和 SHA-256 文件。当前 macOS、Windows 与 iOS beta 没有商业发行签名，iOS 文件会明确带 `unsigned`，不可描述成可公开安装的正式包。Edge OS 附件目前是源码发布候选，不会自动执行安装，也还不是可直接写入存储介质的系统镜像。
 
 ## GitHub 发布保护
 
@@ -61,4 +63,4 @@ call/v0.25.1-beta
 6. A/B 分区或可恢复快照安装，失败自动回滚；
 7. 先内部、再灰度、最后全量，并保留远程停止发布开关。
 
-这样 GitHub 负责源码、测试和发布候选，公司 OTA 负责最终信任与分发，用户账号和私人数据仍只保存在自己的设备上。
+这样 GitHub 负责源码、测试和发布候选，公司 OTA 负责最终信任与分发，用户账号和私人数据仍只保存在自己的设备上。Edge OS 可烧录镜像的构建、签名与恢复设计见 `docs/EDGE_OS.zh-CN.md`。

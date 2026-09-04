@@ -38,6 +38,42 @@ PRIVATE_IPV4 = re.compile(
     r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b"
 )
 
+WORKSHOP_USER_PREFIXES = (
+    "apps/workshop/drafts",
+    "apps/workshop/packages",
+    "apps/workshop/app-data",
+    "apps/workshop/generated",
+    "apps/workshop/runtime-data",
+    "apps/workshop/user-data",
+    "apps/workshop/data",
+    "data/workshop",
+    "riverbank-user/workshop",
+    "workshop-data",
+)
+WORKSHOP_USER_FILENAMES = {
+    "apps/workshop/registry.json",
+    "apps/workshop/proposals.json",
+    "apps/workshop/audit.jsonl",
+    "apps/workshop/.registry.lock",
+    "apps/workshop/.proposals.lock",
+}
+
+
+def workshop_user_artifact_reason(relative: Path) -> str | None:
+    """Identify device-local Workshop output that must never ship from Git."""
+
+    normalized = relative.as_posix().lstrip("./")
+    if relative.suffix.lower() == ".rbapp":
+        return "Workshop user package"
+    if normalized in WORKSHOP_USER_FILENAMES:
+        return "Workshop user state"
+    if any(
+        normalized == prefix or normalized.startswith(prefix + "/")
+        for prefix in WORKSHOP_USER_PREFIXES
+    ):
+        return "Workshop user data"
+    return None
+
 
 def files() -> list[Path]:
     return [
@@ -50,6 +86,9 @@ def main() -> int:
     errors: list[str] = []
     for path in files():
         relative = path.relative_to(ROOT)
+        workshop_reason = workshop_user_artifact_reason(relative)
+        if workshop_reason:
+            errors.append(f"{workshop_reason}: {relative}")
         if path.stat().st_size > 10 * 1024 * 1024:
             errors.append(f"large file: {relative}")
         if path.suffix.lower() in BANNED_SUFFIXES:

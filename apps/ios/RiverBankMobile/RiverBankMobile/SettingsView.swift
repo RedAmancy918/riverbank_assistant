@@ -69,7 +69,7 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(testing)
-                    LabeledContent("兼容的 Edge 系统", value: compatibleEdgeRange)
+                    LabeledContent("兼容的 Edge OS", value: compatibleEdgeRange)
                 }
 
                 Section("状态") {

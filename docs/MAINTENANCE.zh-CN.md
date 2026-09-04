@@ -1,5 +1,9 @@
 # 代码与维护索引
 
+当前设备操作系统基线：**RiverBank Edge OS v0.25.4 beta**。本页与设备桌面维护副本以该基线同步；上游 Debian/Raspberry Pi OS 版本单独报告，不作为 Edge OS 版本号。
+
+工坊用户生成或导入的应用、提案、授权、注册表、审计和私有数据统一位于 `RIVERBANK_DATA/workshop/`，属于用户行为，不纳入 GitHub 更新、Edge OS 发布清单或 OTA。仓库只维护工坊平台、协议、测试和官方示例。
+
 ## 常用访问入口
 
 | 入口 | 完整地址 | 使用说明 |
@@ -43,7 +47,7 @@
 |---|---|
 | 圆屏布局、动画、状态栏、设置页、相机和相册 | `apps/expression-ui/expression_display_persistent.py` |
 | 表情素材路径、菜单项、尺寸和时间参数 | `apps/expression-ui/expressions.json` |
-| 设置页显示的 Edge 系统版本号 | `apps/expression-ui/VERSION`；跨端组合与命名在 `config/version-catalog.json` |
+| 设置页显示的 Edge OS 版本号 | `apps/expression-ui/VERSION`；跨端组合与命名在 `config/version-catalog.json` |
 | GIF 解码、抠色与视口缓存 | `apps/expression-ui/animation_assets.py` |
 | 番茄钟阶段、每日统计、截止时间、重启恢复和持久化 | `apps/expression-ui/pomodoro.py`；语音解析在 `pomodoro_voice.py`；视觉、统计页与触摸在 `expression_display_persistent.py` |
 | 两级应用菜单、主菜单固定槽与固定状态 | `apps/expression-ui/app_menu.py`；交互和过场动画在 `expression_display_persistent.py`；状态位于 `RIVERBANK_DATA/ui/app-pin.json` |
@@ -66,7 +70,7 @@
 | 自检类型、失败阈值和弹窗 | `apps/health-monitor/health_monitor.py` 与 `config.example.json` |
 | 流式转写模型与语音气泡链路自检 | `apps/health-monitor/voice_caption_health.py` |
 | 人脸追踪双态与表情事件链路自检 | `apps/health-monitor/face_tracker_health.py`、`expression_event_health.py` |
-| Edge 系统封存与 SHA-256 漂移检查 | `apps/release-manager/release_manager.py`；跨端版本一致性检查为 `scripts/versionctl.py` |
+| Edge OS 封存与 SHA-256 漂移检查 | `apps/release-manager/release_manager.py`；跨端版本一致性检查为 `scripts/versionctl.py` |
 | 日报检索范围和产业源 | `apps/paper-radar/config/topics.json` |
 | 日报编辑规则 | `apps/paper-radar/AGENTS.md` |
 | 日报网页样式与交互 | `apps/paper-radar/templates/`、`static/` |
@@ -116,7 +120,7 @@ ${RIVERBANK_DATA}/pomodoro/state.json
 - 四个应用都接入 Daily 本地快速路由，不能依赖 Hermes 工具选择：番茄钟支持打开、创建、开始、暂停、继续、重置和跳过；性能支持打开与关闭；音乐支持打开/关闭页面、播放、暂停、上一首、下一首、列表循环、单曲循环、乱序播放和主页歌词开关；通话支持打开与挂断。音乐播放期间再次唤醒后说“下一首”必须直接发送 `music_control next`；首次播放时若曲库仍为空，渲染器应保留待播放标记并在异步扫描完成后自动播放。普通“继续”和讨论论文中的“下一首”不得被本地路由误拦截；
 - 播放模式固定为 `list_loop`、`single_repeat`、`shuffle` 三种，右上模式按钮单击按“列表循环 → 单曲循环 → 乱序播放”切换，长按约 750 ms 手动刷新音乐库；进入音乐页也必须异步扫描。自然播完与手动运输控制遵循当前模式，乱序不得立即重复当前曲；播放模式保存在 `RIVERBANK_DATA/ui/music-preferences.json`，服务重启后恢复。
 - 主菜单“应用”进入二级环形应用菜单；选中应用后沿原方向继续向外滑：未固定的应用显示“固定到桌面”，当前已固定的应用显示“取消固定”。手指必须实际进入该外弧命中区域、保持满行程约 0.35 秒并在其上松手才确认，未命中外弧、快速滑过或立即松手仍应打开应用，回拖需取消；不再保留单独的“清空”扇区；二级菜单只能通过“返回”扇区返回主菜单，禁止左向右滑动返回，以免截获右侧应用的选择手势；层级切换使用约 220 ms 缓存交叉淡化；
-- 工坊外部包默认必须通过 `.rbapp` 完整性和 Ed25519 信任检查；本地开发包只有人工显式使用 `--allow-unsigned-local` 才可注册，而且仍保持 `installed_disabled`。语音创建必须先进入提案队列，由有限声明式验证器反推权限，经设备签名复检后在圆屏显示完整权限；批准集合必须与展示集合完全一致，才能启用。v0.24.2 beta 只验证“本地圆屏物理在场”，没有验证发起者、设备所有者或超级开发者身份；维护和客服不得把它描述成账户级所有者审批。目标角色模型是普通请求者只提交，设备所有者通过 PIN/可信手机批准具体应用，平台开发者只在签名版本中发布 capability 和硬边界；远程客户端在该身份链完成前不得直接 approve。运行器只接受 `declarative-v1`，`python-sandbox-v1` 保持禁用；退出页面或视觉租约到期必须停止应用和隐私指示。任何新 capability、声明式节点、Host 方法或审核身份机制都必须同时更新 `workshop_contract.py`、`workshop_declarative.py`、`host-api-methods.json`、JSON Schema、中文协议和威胁测试；不得先在运行时添加隐藏接口。回归至少运行 `python3 apps/workshop/workshopctl.py self-test` 与 `python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v`；
+- 工坊外部包默认必须通过 `.rbapp` 完整性和 Ed25519 信任检查；本地开发包只有人工显式使用 `--allow-unsigned-local` 才可注册，而且仍保持 `installed_disabled`。语音创建必须先进入提案队列，由有限声明式验证器反推权限，经设备签名复检后在圆屏显示完整权限；批准集合必须与展示集合完全一致，才能启用。Edge OS v0.25.4 beta 只验证“本地圆屏物理在场”，没有验证发起者、设备所有者或超级开发者身份；维护和客服不得把它描述成账户级所有者审批。目标角色模型是普通请求者只提交，设备所有者通过 PIN/可信手机批准具体应用，平台开发者只在签名版本中发布 capability 和硬边界；远程客户端在该身份链完成前不得直接 approve。运行器只接受 `declarative-v1`，`python-sandbox-v1` 保持禁用；退出页面或视觉租约到期必须停止应用和隐私指示。任何新 capability、声明式节点、Host 方法或审核身份机制都必须同时更新 `workshop_contract.py`、`workshop_declarative.py`、`host-api-methods.json`、JSON Schema、中文协议和威胁测试；不得先在运行时添加隐藏接口。回归至少运行 `python3 apps/workshop/workshopctl.py self-test` 与 `python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v`；
 - 重启滑块回拖可撤销，到端点抬手才执行；
 - 主页状态栏重启图标必须使用顶部开口圆弧加独立竖线的标准电源符号，所有端点为圆帽并随状态胶囊切线方向整体旋转；不得使用循环箭头图标。
 - 摄像头被主动调用时，表情桌面和展开状态栏继续使用既有右上角隐私灯位置；相机、相册、音乐、番茄钟、性能和设置页必须统一显示在圆屏顶部中轴，不得遮挡返回、模式或统计按钮；Camera Hub 常驻本身不得点亮。
@@ -177,7 +181,7 @@ python3 apps/face-tracker/face_trackerctl.py release LEASE_ID
 
 ```bash
 sudo python3 apps/release-manager/release_manager.py seal \
-  --version v0.24.5 --channel beta --notes "release summary"
+  --version v0.25.4 --channel beta --notes "release summary"
 python3 apps/release-manager/release_manager.py verify --json
 ```
 

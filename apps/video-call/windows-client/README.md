@@ -2,7 +2,7 @@
 
 这里是 macOS 与 Windows 共用的 Electron 桌面客户端源码。目录名 `windows-client` 是早期命名，macOS 构建并不是另一份未上传的工程。
 
-当前客户端版本为 `v0.25.1 beta`，包版本 `0.25.1-beta.1`。它是独立的配套客户端，不属于 Raspberry Pi OS 或 RiverBank Edge System；兼容的 Edge 版本范围由仓库根目录 `config/version-catalog.json` 管理。
+当前客户端版本为 `v0.25.1 beta`，包版本 `0.25.1-beta.1`。它是独立的配套客户端，不属于 Raspberry Pi OS 或 RiverBank Edge OS；兼容的 Edge OS 版本范围由仓库根目录 `config/version-catalog.json` 管理。
 
 ## 开发运行
 

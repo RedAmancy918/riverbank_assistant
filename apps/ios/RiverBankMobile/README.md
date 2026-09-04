@@ -14,7 +14,7 @@ SwiftUI iOS 客户端，支持与 `riverbank-tech` 进行持久化连续 Chat、
 4. 在 Signing & Capabilities 选择自己的 Apple Development Team；
 5. 连接 iPhone 后运行 `RiverBankMobile` scheme。
 
-当前客户端版本显示为 `v0.25.1 beta`（build 2）。App Store 的 `CFBundleShortVersionString` 保持三段数字，beta 通道在界面中单独标记。客户端版本独立于 RiverBank Edge System，兼容关系由 `config/version-catalog.json` 管理。
+当前客户端版本显示为 `v0.25.2 beta`（build 3）。App Store 的 `CFBundleShortVersionString` 保持三段数字，beta 通道在界面中单独标记。客户端版本独立于 RiverBank Edge OS，兼容关系由 `config/version-catalog.json` 管理。
 
 仓库保存 Swift 源码、Asset Catalog、`project.yml` 和共享 Xcode 工程，不保存本机 `DerivedData`、开发证书、Provisioning Profile、`.app`、`.ipa` 或 `.xcarchive`。克隆后需要选择自己的 Apple Development Team；若要分发给其他设备，应通过 TestFlight、App Store 或签名后的独立 Release 流程，而不是提交本机编译目录。
 

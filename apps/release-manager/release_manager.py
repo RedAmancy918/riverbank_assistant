@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal and verify RiverBank Edge System releases."""
+"""Seal and verify RiverBank Edge OS releases."""
 
 from __future__ import annotations
 
@@ -373,8 +373,9 @@ def build_manifest(version: str, channel: str, notes: str) -> dict:
         "schema": SCHEMA,
         "product": "RiverBank Edge",
         "artifact": {
-            "kind": "device-system-software",
-            "name": "RiverBank Edge System",
+            "kind": "device-operating-system",
+            "name": "RiverBank Edge OS",
+            "distribution_mode": "managed-linux-system-layer",
         },
         "version": version,
         "display_version": display_version(version, channel),

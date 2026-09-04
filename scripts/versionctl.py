@@ -36,8 +36,16 @@ def validate_catalog(catalog: dict[str, Any]) -> list[str]:
         "product_suite.product_id": (catalog.get("product_suite", {}).get("product_id"), "riverbank"),
         "hardware.product": (catalog.get("hardware", {}).get("product"), "RiverBank Edge"),
         "hardware.family_id": (catalog.get("hardware", {}).get("family_id"), "riverbank-edge"),
-        "edge_system.name": (catalog.get("edge_system", {}).get("name"), "RiverBank Edge System"),
-        "edge_system.artifact_id": (catalog.get("edge_system", {}).get("artifact_id"), "riverbank-edge-system"),
+        "edge_system.name": (catalog.get("edge_system", {}).get("name"), "RiverBank Edge OS"),
+        "edge_system.artifact_id": (catalog.get("edge_system", {}).get("artifact_id"), "riverbank-edge-os"),
+        "edge_system.artifact_class": (
+            catalog.get("edge_system", {}).get("artifact_class"),
+            "device-operating-system",
+        ),
+        "edge_system.distribution_mode": (
+            catalog.get("edge_system", {}).get("distribution_mode"),
+            "managed-linux-system-layer",
+        ),
         "clients.ios.name": (catalog.get("clients", {}).get("ios", {}).get("name"), "RiverBank"),
         "clients.ios.bundle_id": (catalog.get("clients", {}).get("ios", {}).get("bundle_id"), "com.riverbank.assistant"),
         "clients.desktop.name": (catalog.get("clients", {}).get("desktop", {}).get("name"), "RiverBank Call"),
@@ -66,6 +74,20 @@ def validate_catalog(catalog: dict[str, Any]) -> list[str]:
     release_train = str(catalog.get("product_suite", {}).get("release_train", ""))
     if not DISPLAY_RE.fullmatch(release_train):
         errors.append("product_suite.release_train must use vMAJOR.MINOR.PATCH beta|stable")
+
+    workshop_apps = catalog.get("workshop_apps", {})
+    expected_workshop_policy = {
+        "artifact_class": "user-application-package",
+        "ownership": "device-user",
+        "storage_root": "RIVERBANK_DATA/workshop",
+        "included_in_source_control": False,
+        "included_in_edge_os_release": False,
+        "included_in_ota": False,
+    }
+    for key, expected in expected_workshop_policy.items():
+        actual = workshop_apps.get(key)
+        if actual != expected:
+            errors.append(f"workshop_apps.{key} must be {expected!r}")
     return errors
 
 
@@ -143,7 +165,7 @@ def validate_repository(catalog: dict[str, Any]) -> list[str]:
 def status_lines(catalog: dict[str, Any]) -> list[str]:
     return [
         f"RiverBank 发布列车  {catalog['product_suite']['release_train']}",
-        f"Edge 整机系统      {catalog['edge_system']['display_version']}",
+        f"RiverBank Edge OS  {catalog['edge_system']['display_version']}",
         f"iOS 客户端         {catalog['clients']['ios']['display_version']} (build {catalog['clients']['ios']['build']})",
         f"macOS/Windows      {catalog['clients']['desktop']['display_version']}",
         "Linux 基础系统     跟随设备上游版本（不计入 RiverBank 版本号）",
@@ -163,7 +185,7 @@ def expected_tags(catalog: dict[str, Any]) -> dict[str, str]:
     suite_version, suite_channel = catalog["product_suite"]["release_train"][1:].split(" ", 1)
     return {
         "suite": tag("suite", suite_version, suite_channel),
-        "edge-system": tag("edge-system", edge["version"], edge["channel"]),
+        "edge-os": tag("edge-os", edge["version"], edge["channel"]),
         "ios": tag("ios", ios["version"], ios["channel"]),
         "call": tag("call", desktop["version"], desktop["channel"]),
     }

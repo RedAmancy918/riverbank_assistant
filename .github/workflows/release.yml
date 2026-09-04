@@ -5,8 +5,8 @@ on:
     tags:
       - "suite/v*-beta"
       - "suite/v*-stable"
-      - "edge-system/v*-beta"
-      - "edge-system/v*-stable"
+      - "edge-os/v*-beta"
+      - "edge-os/v*-stable"
       - "ios/v*-beta"
       - "ios/v*-stable"
       - "call/v*-beta"
@@ -48,9 +48,9 @@ jobs:
           fi
 
   edge:
-    name: Package Edge System
+    name: Package RiverBank Edge OS
     needs: preflight
-    if: needs.preflight.outputs.scope == 'edge-system' || needs.preflight.outputs.scope == 'suite'
+    if: needs.preflight.outputs.scope == 'edge-os' || needs.preflight.outputs.scope == 'suite'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -61,15 +61,15 @@ jobs:
           mkdir -p release-assets
           git archive \
             --format=tar \
-            --prefix="RiverBank-Edge-System-v${version}/" \
+            --prefix="RiverBank-Edge-OS-v${version}/" \
             HEAD \
             README.md README.zh-CN.md requirements-ci.txt apps config docs scripts tests \
-            | gzip -9 > "release-assets/RiverBank-Edge-System-${version}.tar.gz"
+            | gzip -9 > "release-assets/RiverBank-Edge-OS-${version}.tar.gz"
           cd release-assets
-          sha256sum RiverBank-Edge-System-* > SHA256SUMS-edge.txt
+          sha256sum RiverBank-Edge-OS-* > SHA256SUMS-edge-os.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: release-edge-system
+          name: release-edge-os
           path: release-assets/*
           if-no-files-found: error
 
@@ -194,5 +194,5 @@ jobs:
           body: |
             该 Release 由 RiverBank CI/CD 根据版本清单生成。
 
-            beta 阶段的 macOS、Windows 与 iOS 构建尚未使用商业发行证书；iOS 附件明确标记为 unsigned，只用于编译验证。Edge System 附件是可审计的发布候选源码包，不会自动安装到用户设备。正式 OTA 必须经过 release Environment 审核、公司签名服务签名与设备端兼容性检查。
+            beta 阶段的 macOS、Windows 与 iOS 构建尚未使用商业发行证书；iOS 附件明确标记为 unsigned，只用于编译验证。RiverBank Edge OS 附件目前是可审计的发布候选源码包，不会自动安装到用户设备；可烧录系统镜像将在镜像流水线完成后单独发布。正式 OTA 必须经过 release Environment 审核、公司签名服务签名与设备端兼容性检查。
           files: release-assets/*
