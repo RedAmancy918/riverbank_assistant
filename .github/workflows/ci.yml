@@ -19,8 +19,8 @@ jobs:
     name: Version, naming and release checks
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Validate release tree
@@ -34,8 +34,8 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}/apps/agent-runtime:${{ github.workspace }}/apps/expression-ui:${{ github.workspace }}/apps/video-call:${{ github.workspace }}/apps/paper-radar/scripts:${{ github.workspace }}/apps/provisioning:${{ github.workspace }}/apps/recovery:${{ github.workspace }}/apps/face-tracker:${{ github.workspace }}/apps/workshop:${{ github.workspace }}/apps/release-manager
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -64,8 +64,8 @@ jobs:
       run:
         working-directory: apps/video-call/windows-client
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -87,7 +87,7 @@ jobs:
     name: iOS client build
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build without distribution signing
         run: >-
           xcodebuild

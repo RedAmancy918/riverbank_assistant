@@ -27,8 +27,8 @@ jobs:
       scope: ${{ steps.release.outputs.scope }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Check catalog and tag
@@ -53,7 +53,7 @@ jobs:
     if: needs.preflight.outputs.scope == 'edge-os' || needs.preflight.outputs.scope == 'suite'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build immutable source bundle
         shell: bash
         run: |
@@ -82,8 +82,8 @@ jobs:
       run:
         working-directory: apps/video-call/windows-client
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -110,8 +110,8 @@ jobs:
         working-directory: apps/video-call/windows-client
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -134,7 +134,7 @@ jobs:
     if: needs.preflight.outputs.scope == 'ios' || needs.preflight.outputs.scope == 'suite'
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build unsigned release candidate
         run: >-
           xcodebuild
@@ -179,14 +179,14 @@ jobs:
     runs-on: ubuntu-24.04
     environment: release
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets
           merge-multiple: true
       - name: List release assets
         run: find release-assets -maxdepth 1 -type f -printf '%f\n' | sort
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
           generate_release_notes: true
