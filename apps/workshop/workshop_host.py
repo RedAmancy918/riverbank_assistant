@@ -707,6 +707,11 @@ class WorkshopHostBroker:
             payload = {
                 "view": str(params.get("view") or "status")[:48],
                 "title": str(params.get("title") or "")[:40],
+                "presentation": (
+                    params.get("presentation")
+                    if isinstance(params.get("presentation"), dict)
+                    else None
+                ),
                 "data": params.get("data") if isinstance(params.get("data"), dict) else {},
             }
             if self.ui_callback is not None:

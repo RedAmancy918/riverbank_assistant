@@ -17,6 +17,8 @@ from workshop_store import WorkshopStore
 
 
 class DeclarativeRuntime:
+    WEEKDAYS_ZH = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+
     def __init__(
         self,
         manager: WorkshopManager,
@@ -225,6 +227,22 @@ class DeclarativeRuntime:
         context["minimumDbfs"] = threshold
         context["soundActive"] = above_threshold or now < self.audio_hold_until
 
+    @classmethod
+    def _time_context(cls, timestamp: float | None = None) -> dict[str, Any]:
+        """Return host-owned local clock fields for declarative UI surfaces."""
+
+        current = time.time() if timestamp is None else float(timestamp)
+        local = time.localtime(current)
+        return {
+            "timestamp": current,
+            "time": time.strftime("%H:%M:%S", local),
+            "hourMinute": time.strftime("%H:%M", local),
+            "seconds": time.strftime("%S", local),
+            "date": time.strftime("%Y-%m-%d", local),
+            "dateLabel": f"{local.tm_year}年{local.tm_mon}月{local.tm_mday}日",
+            "weekday": cls.WEEKDAYS_ZH[local.tm_wday],
+        }
+
     def _execute_nodes(
         self,
         app_id: str,
@@ -256,6 +274,7 @@ class DeclarativeRuntime:
                 text = str(node["template"])
                 for key, value in context.items():
                     if isinstance(value, (str, int, float, bool)):
+                        text = text.replace("{{" + key + "}}", str(value))
                         text = text.replace("{" + key + "}", str(value))
                 context["text"] = text
             elif operator == "assistant.query":
@@ -271,6 +290,7 @@ class DeclarativeRuntime:
                     {
                         "view": node["view"],
                         "title": node.get("title") or self.state.get("title", ""),
+                        "presentation": node.get("presentation"),
                         "data": context,
                     },
                 )
@@ -317,12 +337,22 @@ class DeclarativeRuntime:
                 self.write_state()
                 seconds = float(source["seconds"])
                 sequence = 0
+                clock_surface = any(
+                    node.get("sink") == "ui.present" and node.get("view") == "clock"
+                    for node in nodes
+                )
+                if clock_surface:
+                    self._execute_nodes(
+                        app_id,
+                        nodes,
+                        {"event": "timer", "sequence": sequence, **self._time_context()},
+                    )
                 while not stop_event.wait(seconds):
                     sequence += 1
                     self._execute_nodes(
                         app_id,
                         nodes,
-                        {"event": "timer", "sequence": sequence, "timestamp": time.time()},
+                        {"event": "timer", "sequence": sequence, **self._time_context()},
                     )
                     if not source["repeat"]:
                         break

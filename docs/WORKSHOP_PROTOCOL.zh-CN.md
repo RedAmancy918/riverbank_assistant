@@ -160,6 +160,39 @@ Camera Hub / Hailo / PipeWire / Daily / Tasks / Reports / UI / Motor Broker
 
 单个应用清单允许的范围：CPU `1–50%`、内存 `16–512 MiB`、私有存储 `1–2048 MiB`、进程数 `1–8`。这是申请上限，宿主可以依据整机 20% 保留空间进一步下调。达到上限时先节流或终止应用，不能挤压语音、显示、健康监控、SSH 和恢复控制器。
 
+### 5.4 意图编译与受控界面
+
+工坊不把模型返回的 `view` 字符串当成已经实现的页面。生成器先把自然语言拆成“数据源、处理逻辑、输出行为、界面语义”，再交给可信验证器编译。`ui.present` 只能使用宿主公布的预置视图，或携带 `riverbank.surface/v1` 受控组件树；未知视图在打包前直接拒绝，禁止静默显示成通用“应用状态”页。
+
+`riverbank.surface/v1` 当前提供 `hero`、`dashboard`、`list` 三种圆屏自适应布局，强调色只能从 RiverBank 设计令牌中选择；组件限制为最多 6 个，首批包括 `clock`、`metric`、`progress`、`status` 和 `text`。组件只能绑定声明式运行时上下文中的安全值，不能嵌入脚本、HTML、CSS、URL、绝对坐标或宿主路径。
+
+例如，桌面时钟表达的是界面语义，而不是一段模型自行排版的文字：
+
+```json
+{
+  "sink": "ui.present",
+  "view": "clock",
+  "title": "桌面时钟",
+  "presentation": {
+    "schema": "riverbank.surface/v1",
+    "layout": "hero",
+    "accent": "cyan",
+    "components": [
+      {
+        "id": "local-time",
+        "type": "clock",
+        "format": "24h",
+        "showSeconds": true,
+        "showDate": true,
+        "showWeekday": true
+      }
+    ]
+  }
+}
+```
+
+时间值由宿主注入并按设备时区更新；模型不需要也不能通过文本模板伪造系统时间。后续新增相机取景、图表、列表等组件时，必须同时交付协议验证、宿主渲染、生成器词表和回归测试，四者版本一致后才算平台能力。
+
 ## 6. 能力约束
 
 ### 6.1 摄像头和麦克风

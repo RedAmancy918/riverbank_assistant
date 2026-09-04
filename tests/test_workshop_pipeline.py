@@ -14,6 +14,8 @@ from unittest import mock
 
 TEST_ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = TEST_ROOT / "apps" / "workshop"
+if not APP_DIR.is_dir() and (TEST_ROOT / "workshop_declarative.py").is_file():
+    APP_DIR = TEST_ROOT
 sys.path.insert(0, str(APP_DIR))
 EXPRESSION_DIR = TEST_ROOT / "apps" / "expression-ui"
 if not EXPRESSION_DIR.is_dir():
@@ -36,6 +38,7 @@ from workshop_declarative import (  # noqa: E402
     validate_declarative_app,
 )
 from workshop_generator import (  # noqa: E402
+    HermesPlanGenerator,
     build_candidate,
     fallback_plan,
     requirement_policy_error,
@@ -125,6 +128,97 @@ class FakeMicrophoneCapture:
 
 
 class WorkshopPipelineTests(unittest.TestCase):
+    def test_clock_plan_uses_host_clock_surface_and_local_time_fields(self) -> None:
+        requirement = "帮我做一个桌面时钟"
+        plan = fallback_plan(requirement)
+        self.assertEqual(plan["pipeline"][0]["source"], "timer.interval")
+        self.assertEqual(plan["pipeline"][0]["seconds"], 1)
+        self.assertEqual(plan["pipeline"][1]["view"], "clock")
+        presentation = plan["pipeline"][1]["presentation"]
+        self.assertEqual(presentation["schema"], "riverbank.surface/v1")
+        self.assertEqual(presentation["components"][0]["type"], "clock")
+        manifest, app = build_candidate(requirement, plan)
+        self.assertEqual(
+            {item["capability"] for item in manifest["spec"]["permissions"]},
+            {"ui.surface"},
+        )
+        self.assertEqual(app["pipeline"][1]["view"], "clock")
+        context = DeclarativeRuntime._time_context(0)
+        self.assertRegex(context["hourMinute"], r"^\d{2}:\d{2}$")
+        self.assertRegex(context["time"], r"^\d{2}:\d{2}:\d{2}$")
+        self.assertIn(context["weekday"], DeclarativeRuntime.WEEKDAYS_ZH)
+
+    def test_unknown_surface_is_rejected_instead_of_silently_rendering_status(self) -> None:
+        app = {
+            "schema": "riverbank.declarative-app/v1",
+            "title": "Unknown UI",
+            "pipeline": [
+                {"source": "app.lifecycle.foreground"},
+                {"sink": "ui.present", "view": "invented-screen"},
+            ],
+            "safety": {"runOnlyInForeground": True},
+        }
+        with self.assertRaises(ContractError) as context:
+            validate_declarative_app(app)
+        self.assertEqual(context.exception.code, "unsupported_ui_view")
+
+    def test_adaptive_surface_components_are_bounded_and_normalized(self) -> None:
+        app = validate_declarative_app(
+            {
+                "schema": "riverbank.declarative-app/v1",
+                "title": "Temperature",
+                "pipeline": [
+                    {"source": "timer.interval", "seconds": 5, "repeat": True},
+                    {
+                        "sink": "ui.present",
+                        "view": "adaptive",
+                        "presentation": {
+                            "schema": "riverbank.surface/v1",
+                            "layout": "hero",
+                            "accent": "amber",
+                            "components": [
+                                {
+                                    "id": "temperature",
+                                    "type": "metric",
+                                    "valueKey": "value",
+                                    "label": "温度",
+                                    "unit": "°C",
+                                    "precision": 1,
+                                }
+                            ],
+                        },
+                    },
+                ],
+                "safety": {"runOnlyInForeground": True},
+            }
+        )
+        surface = app["pipeline"][1]["presentation"]
+        self.assertEqual(surface["layout"], "hero")
+        self.assertEqual(surface["components"][0]["precision"], 1)
+
+    def test_generator_repairs_a_semantic_plan_that_host_cannot_render(self) -> None:
+        invalid = {
+            **fallback_plan("帮我做一个桌面时钟"),
+            "pipeline": [
+                {"source": "timer.interval", "seconds": 1, "repeat": True},
+                {"sink": "ui.present", "view": "beautiful-clock-that-does-not-exist"},
+            ],
+        }
+        repaired = fallback_plan("帮我做一个桌面时钟")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "hermes"
+            binary.touch()
+            generator = HermesPlanGenerator(hermes_bin=binary, workspace=Path(directory))
+            with mock.patch.object(
+                generator,
+                "_run_prompt",
+                side_effect=[json.dumps(invalid), json.dumps(repaired)],
+            ) as invoke:
+                plan = generator.generate("帮我做一个桌面时钟")
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(plan["generator"], "hermes-plan-repaired")
+        self.assertEqual(plan["pipeline"][1]["view"], "clock")
+
     def test_microphone_pcm_is_reduced_to_metrics_without_payload(self) -> None:
         result = PipeWireMicrophoneCapture._level_metrics(
             b"\x00\x40" * 1600,

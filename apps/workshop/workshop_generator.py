@@ -166,6 +166,30 @@ def fallback_plan(requirement: str) -> dict[str, Any]:
                     "cooldownSeconds": 15,
                 }
             )
+    elif any(word in compact for word in ("时钟", "当前时间", "现在几点", "几点了")):
+        pipeline = [
+            {"source": "timer.interval", "seconds": 1, "repeat": True},
+            {
+                "sink": "ui.present",
+                "view": "clock",
+                "title": name,
+                "presentation": {
+                    "schema": "riverbank.surface/v1",
+                    "layout": "hero",
+                    "accent": "cyan",
+                    "components": [
+                        {
+                            "id": "local-time",
+                            "type": "clock",
+                            "format": "24h",
+                            "showSeconds": True,
+                            "showDate": True,
+                            "showWeekday": True,
+                        }
+                    ],
+                },
+            },
+        ]
     elif any(word in compact for word in ("定时", "计时", "倒计时", "每隔", "周期")):
         minute_match = re.search(r"([0-9]{1,4})分钟", compact)
         seconds = max(60, min(int(minute_match.group(1)) * 60, 86400)) if minute_match else 1500
@@ -239,10 +263,22 @@ pipeline 必须有且仅有一个 source，且放第一项；至少有一个 sin
 - {{"operator":"text.compose","template":"最多240字"}}
 - {{"operator":"assistant.query","prompt":"最多1200字"}}
 允许的 sink：
-- {{"sink":"ui.present","view":"安全短名称","title":"可选标题"}}
+- {{"sink":"ui.present","view":"预置视图名称","title":"可选标题"}}
 - {{"sink":"notifications.show","title":"标题","body":"正文","cooldownSeconds":5到86400}}
 - {{"sink":"storage.put","path":"安全相对文件名","value":{{}}}}
 - {{"sink":"tasks.create","prompt":"任务","kind":"general|research|file"}}
+
+ui.present 的预置视图：clock（本机实时时钟）、detection-counter（视觉计数）、sound-meter（声音表）、timer-status（计时状态）、task-status（任务状态）、simple-dashboard（普通状态）、adaptive（受控组件界面）。不得发明其他 view；宿主不会用通用页面替代未知视图。
+
+需要表达界面意图时，在 ui.present 增加 presentation：
+{{"schema":"riverbank.surface/v1","layout":"hero|dashboard|list","accent":"cyan|green|amber|red|neutral","components":[1到6个组件]}}
+允许组件：
+- clock：{{"id":"local-time","type":"clock","format":"24h|12h","showSeconds":true,"showDate":true,"showWeekday":true}}
+- metric：{{"id":"metric","type":"metric","valueKey":"上下文键","label":"指标名","unit":"单位","precision":0到3}}
+- progress：{{"id":"progress","type":"progress","valueKey":"上下文键","label":"进度名","minimum":0,"maximum":100}}
+- status：{{"id":"status","type":"status","valueKey":"上下文键","label":"状态名"}}
+- text：{{"id":"caption","type":"text","text":"固定文案","role":"title|body|caption"}}，或把 text 换成 valueKey 读取上下文。
+hero 的第一个组件必须是 clock、metric 或 progress。用户要求时钟或当前时间时，必须用 timer.interval（1 秒）连接 clock，并使用 hero + clock 组件；不要自行用 text.compose 拼接时间。
 
 不得输出 Python、Shell、命令、URL、绝对路径、系统服务、密钥、sudo、软件安装、设备节点或未列出的字段。
 涉及摄像头就必须使用 camera.stream，涉及麦克风就必须使用 microphone.stream，并且 privacyIndicator=true。麦克风 v1 只提供实时音量指标，不提供原始音频保存，retainAudio 必须为 false。不要为了显得强大而申请与需求无关的能力。
@@ -261,18 +297,12 @@ class HermesPlanGenerator:
         self.workspace = Path(workspace)
         self.timeout_seconds = max(30.0, min(float(timeout_seconds), 300.0))
 
-    def generate(self, requirement: str) -> dict[str, Any]:
-        policy_error = requirement_policy_error(requirement)
-        if policy_error:
-            raise ContractError("forbidden_requirement", policy_error, "requirement")
-        if not self.hermes_bin.is_file():
-            return fallback_plan(requirement)
-        self.workspace.mkdir(parents=True, exist_ok=True)
+    def _run_prompt(self, prompt: str) -> str | None:
         command = [
             str(self.hermes_bin),
             "chat",
             "--query",
-            generator_prompt(requirement),
+            prompt,
             "--quiet",
             "--toolsets",
             "clarify",
@@ -311,13 +341,43 @@ class HermesPlanGenerator:
                     pass
             raise ContractError("generator_timeout", "应用规划模型响应超时。", "generator") from exc
         if process.returncode != 0:
+            return None
+        return output
+
+    def generate(self, requirement: str) -> dict[str, Any]:
+        policy_error = requirement_policy_error(requirement)
+        if policy_error:
+            raise ContractError("forbidden_requirement", policy_error, "requirement")
+        if not self.hermes_bin.is_file():
+            return fallback_plan(requirement)
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        output = self._run_prompt(generator_prompt(requirement))
+        if output is None:
             return fallback_plan(requirement)
         try:
             plan = _extract_json(output)
             plan["generator"] = "hermes-plan"
+            normalize_plan(requirement, plan)
             return plan
-        except ContractError:
-            return fallback_plan(requirement)
+        except ContractError as first_error:
+            repair_prompt = (
+                generator_prompt(requirement)
+                + "\n\n你上一次的计划未通过宿主契约："
+                + first_error.message
+                + " 请根据上面的确切白名单重新规划；不要删除用户要求的主要功能。"
+            )
+            repaired_output = self._run_prompt(repair_prompt)
+            if repaired_output is not None:
+                try:
+                    repaired = _extract_json(repaired_output)
+                    repaired["generator"] = "hermes-plan-repaired"
+                    normalize_plan(requirement, repaired)
+                    return repaired
+                except ContractError:
+                    pass
+            fallback = fallback_plan(requirement)
+            fallback["generator"] = "local-safe-repair"
+            return fallback
 
 
 def normalize_plan(requirement: str, plan: dict[str, Any]) -> dict[str, Any]:

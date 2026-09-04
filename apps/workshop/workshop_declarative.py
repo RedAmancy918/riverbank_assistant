@@ -16,7 +16,33 @@ from workshop_contract import ContractError
 
 
 DECLARATIVE_SCHEMA = "riverbank.declarative-app/v1"
+SURFACE_SCHEMA = "riverbank.surface/v1"
 MAX_PIPELINE_NODES = 12
+MAX_SURFACE_COMPONENTS = 6
+
+SUPPORTED_UI_VIEWS = frozenset(
+    {
+        "adaptive",
+        "cat-counter",
+        "clock",
+        "detection-counter",
+        "main",
+        "simple-dashboard",
+        "sound-meter",
+        "status",
+        "task-status",
+        "timer-status",
+    }
+)
+SURFACE_LAYOUTS = frozenset({"hero", "dashboard", "list"})
+SURFACE_ACCENTS = frozenset({"cyan", "green", "amber", "red", "neutral"})
+SURFACE_COMPONENT_FIELDS: dict[str, set[str]] = {
+    "clock": {"id", "type", "format", "showSeconds", "showDate", "showWeekday"},
+    "metric": {"id", "type", "valueKey", "label", "unit", "precision"},
+    "progress": {"id", "type", "valueKey", "label", "minimum", "maximum"},
+    "status": {"id", "type", "valueKey", "label"},
+    "text": {"id", "type", "valueKey", "text", "role"},
+}
 
 SOURCE_FIELDS: dict[str, set[str]] = {
     "app.lifecycle.foreground": {"source"},
@@ -44,7 +70,7 @@ OPERATOR_FIELDS: dict[str, set[str]] = {
     "assistant.query": {"operator", "prompt"},
 }
 SINK_FIELDS: dict[str, set[str]] = {
-    "ui.present": {"sink", "view", "title"},
+    "ui.present": {"sink", "view", "title", "presentation"},
     "notifications.show": {"sink", "title", "body", "cooldownSeconds"},
     "storage.put": {"sink", "path", "value"},
     "tasks.create": {"sink", "prompt", "kind"},
@@ -136,6 +162,137 @@ def _safe_name(value: Any, field: str, maximum: int = 48) -> str:
             field,
         )
     return text
+
+
+def _validate_surface_component(value: Any, field: str) -> dict[str, Any]:
+    node = dict(_mapping(value, field))
+    kind = _text(node.get("type"), f"{field}.type", maximum=24)
+    allowed = SURFACE_COMPONENT_FIELDS.get(kind)
+    if allowed is None:
+        raise ContractError(
+            "unsupported_surface_component",
+            f"宿主不能渲染组件 {kind}。",
+            f"{field}.type",
+        )
+    _reject_unknown(node, allowed, field)
+    result: dict[str, Any] = {
+        "id": _safe_name(node.get("id", kind), f"{field}.id", 32),
+        "type": kind,
+    }
+    if kind == "clock":
+        clock_format = str(node.get("format", "24h")).strip().lower()
+        if clock_format not in {"24h", "12h"}:
+            raise ContractError(
+                "invalid_clock_format",
+                "时钟格式只允许 24h 或 12h。",
+                f"{field}.format",
+            )
+        result.update(
+            {
+                "format": clock_format,
+                "showSeconds": bool(node.get("showSeconds", True)),
+                "showDate": bool(node.get("showDate", True)),
+                "showWeekday": bool(node.get("showWeekday", True)),
+            }
+        )
+    elif kind == "metric":
+        result.update(
+            {
+                "valueKey": _safe_name(node.get("valueKey", "value"), f"{field}.valueKey", 48),
+                "label": _text(node.get("label", "当前值"), f"{field}.label", maximum=24),
+                "unit": _text(node.get("unit", ""), f"{field}.unit", minimum=0, maximum=12),
+                "precision": int(_number(node.get("precision", 0), f"{field}.precision", 0, 3)),
+            }
+        )
+    elif kind == "progress":
+        minimum = _number(node.get("minimum", 0), f"{field}.minimum", -1_000_000, 1_000_000)
+        maximum = _number(node.get("maximum", 100), f"{field}.maximum", -1_000_000, 1_000_000)
+        if maximum <= minimum:
+            raise ContractError(
+                "invalid_progress_range",
+                "进度组件 maximum 必须大于 minimum。",
+                field,
+            )
+        result.update(
+            {
+                "valueKey": _safe_name(node.get("valueKey", "value"), f"{field}.valueKey", 48),
+                "label": _text(node.get("label", "进度"), f"{field}.label", maximum=24),
+                "minimum": minimum,
+                "maximum": maximum,
+            }
+        )
+    elif kind == "status":
+        result.update(
+            {
+                "valueKey": _safe_name(node.get("valueKey", "status"), f"{field}.valueKey", 48),
+                "label": _text(node.get("label", "状态"), f"{field}.label", maximum=24),
+            }
+        )
+    else:
+        value_key = str(node.get("valueKey") or "").strip()
+        fixed_text = str(node.get("text") or "").replace("\x00", "").strip()
+        if bool(value_key) == bool(fixed_text):
+            raise ContractError(
+                "invalid_text_component",
+                "文本组件必须且只能提供 valueKey 或 text。",
+                field,
+            )
+        role = str(node.get("role", "body")).strip().lower()
+        if role not in {"title", "body", "caption"}:
+            raise ContractError(
+                "invalid_text_role",
+                "文本角色只允许 title、body 或 caption。",
+                f"{field}.role",
+            )
+        result["role"] = role
+        if value_key:
+            result["valueKey"] = _safe_name(value_key, f"{field}.valueKey", 48)
+        else:
+            result["text"] = _text(fixed_text, f"{field}.text", maximum=80)
+    return result
+
+
+def _validate_presentation(value: Any, field: str) -> dict[str, Any]:
+    presentation = dict(_mapping(value, field))
+    _reject_unknown(presentation, {"schema", "layout", "accent", "components"}, field)
+    if presentation.get("schema") != SURFACE_SCHEMA:
+        raise ContractError(
+            "unsupported_surface_schema",
+            f"界面必须使用 {SURFACE_SCHEMA}。",
+            f"{field}.schema",
+        )
+    layout = str(presentation.get("layout", "hero")).strip().lower()
+    if layout not in SURFACE_LAYOUTS:
+        raise ContractError("unsupported_surface_layout", "宿主不能渲染这个布局。", f"{field}.layout")
+    accent = str(presentation.get("accent", "cyan")).strip().lower()
+    if accent not in SURFACE_ACCENTS:
+        raise ContractError("unsupported_surface_accent", "界面强调色不受支持。", f"{field}.accent")
+    raw_components = presentation.get("components")
+    if not isinstance(raw_components, list) or not 1 <= len(raw_components) <= MAX_SURFACE_COMPONENTS:
+        raise ContractError(
+            "invalid_surface_components",
+            f"界面必须包含 1 到 {MAX_SURFACE_COMPONENTS} 个受控组件。",
+            f"{field}.components",
+        )
+    components = [
+        _validate_surface_component(item, f"{field}.components[{index}]")
+        for index, item in enumerate(raw_components)
+    ]
+    identifiers = [str(item["id"]) for item in components]
+    if len(identifiers) != len(set(identifiers)):
+        raise ContractError("duplicate_surface_component", "界面组件 id 不能重复。", field)
+    if layout == "hero" and components[0]["type"] not in {"clock", "metric", "progress"}:
+        raise ContractError(
+            "invalid_hero_component",
+            "hero 布局的第一个组件必须是时钟、指标或进度。",
+            f"{field}.components[0]",
+        )
+    return {
+        "schema": SURFACE_SCHEMA,
+        "layout": layout,
+        "accent": accent,
+        "components": components,
+    }
 
 
 def _validate_source(node: Mapping[str, Any], index: int) -> dict[str, Any]:
@@ -335,9 +492,27 @@ def _validate_sink(node: Mapping[str, Any], index: int) -> dict[str, Any]:
     _reject_unknown(node, allowed, field)
     result: dict[str, Any] = {"sink": name}
     if name == "ui.present":
-        result["view"] = _safe_name(node.get("view", "status"), f"{field}.view")
+        view = _safe_name(node.get("view", "status"), f"{field}.view")
+        if view not in SUPPORTED_UI_VIEWS:
+            raise ContractError(
+                "unsupported_ui_view",
+                f"宿主不能渲染视图 {view}，应用不会用通用状态页代替。",
+                f"{field}.view",
+            )
+        result["view"] = view
         if str(node.get("title") or "").strip():
             result["title"] = _text(node["title"], f"{field}.title", maximum=40)
+        if "presentation" in node:
+            result["presentation"] = _validate_presentation(
+                node["presentation"],
+                f"{field}.presentation",
+            )
+        elif view == "adaptive":
+            raise ContractError(
+                "surface_presentation_required",
+                "adaptive 视图必须声明受控界面组件。",
+                f"{field}.presentation",
+            )
     elif name == "notifications.show":
         result.update(
             {
@@ -417,6 +592,27 @@ def validate_declarative_app(value: Mapping[str, Any]) -> dict[str, Any]:
             "pipeline",
         )
     source_name = str(pipeline[0].get("source") or "")
+    clock_surfaces = [
+        node
+        for node in pipeline
+        if node.get("sink") == "ui.present"
+        and (
+            node.get("view") == "clock"
+            or any(
+                component.get("type") == "clock"
+                for component in node.get("presentation", {}).get("components", [])
+                if isinstance(component, Mapping)
+            )
+        )
+    ]
+    if clock_surfaces and (
+        source_name != "timer.interval" or float(pipeline[0].get("seconds", 86400)) > 60
+    ):
+        raise ContractError(
+            "clock_source_required",
+            "时钟界面必须连接刷新间隔不超过 60 秒的 timer.interval。",
+            "pipeline",
+        )
     has_audio_level = any(
         node.get("operator") == "audio.level" for node in pipeline
     )

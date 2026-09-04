@@ -1314,6 +1314,14 @@ class PersistentExpressionDisplay:
             status_font_path,
             52 * UI_AA_SCALE,
         )
+        self.font_workshop_clock_high = pygame.font.Font(
+            status_font_path,
+            96 * UI_AA_SCALE,
+        )
+        self.font_workshop_clock_seconds_high = pygame.font.Font(
+            status_font_path,
+            34 * UI_AA_SCALE,
+        )
         self.font_pomodoro_time = pygame.font.Font(status_font_path, 82)
         self.font_pomodoro_label = pygame.font.Font(font_path, 28)
         pomodoro_title_font_path = app_path(
@@ -6033,10 +6041,228 @@ class PersistentExpressionDisplay:
             )
         self.draw_centered_text("点击应用启动；左滑返回", self.font_small, (74, 118, 132), (400, 655))
 
+    def draw_workshop_high_text(
+        self,
+        text: str,
+        font: object,
+        color: tuple[int, int, int],
+        center: tuple[int, int],
+    ) -> object:
+        high = font.render(text, True, color)
+        smooth = self.pygame.transform.smoothscale(
+            high,
+            (
+                max(1, round(high.get_width() / UI_AA_SCALE)),
+                max(1, round(high.get_height() / UI_AA_SCALE)),
+            ),
+        )
+        rect = smooth.get_rect(center=center)
+        self.screen.blit(smooth, rect)
+        return rect
+
+    @staticmethod
+    def workshop_surface_accent(name: str) -> tuple[int, int, int]:
+        return {
+            "cyan": (75, 210, 241),
+            "green": (92, 216, 153),
+            "amber": (241, 183, 81),
+            "red": (235, 86, 91),
+            "neutral": (185, 211, 219),
+        }.get(str(name).lower(), (75, 210, 241))
+
+    @staticmethod
+    def workshop_surface_value(data: dict, key: str, fallback: object = "—") -> object:
+        value: object = data
+        for part in str(key).split("."):
+            if not isinstance(value, dict) or part not in value:
+                return fallback
+            value = value[part]
+        return fallback if value is None else value
+
+    def draw_workshop_clock(
+        self,
+        runtime: dict,
+        data: dict,
+        presentation: dict | None = None,
+    ) -> None:
+        presentation = presentation if isinstance(presentation, dict) else {}
+        components = presentation.get("components") if isinstance(presentation.get("components"), list) else []
+        clock_component = next(
+            (item for item in components if isinstance(item, dict) and item.get("type") == "clock"),
+            {},
+        )
+        clock_format = str(clock_component.get("format") or "24h").lower()
+        show_seconds = bool(clock_component.get("showSeconds", True))
+        show_date = bool(clock_component.get("showDate", True))
+        show_weekday = bool(clock_component.get("showWeekday", True))
+        accent = self.workshop_surface_accent(str(presentation.get("accent") or "cyan"))
+        timestamp = data.get("timestamp")
+        try:
+            local = time.localtime(float(timestamp))
+        except (TypeError, ValueError, OverflowError):
+            local = time.localtime()
+        hour_minute = (
+            time.strftime("%I:%M", local).lstrip("0") or "12:00"
+            if clock_format == "12h"
+            else str(data.get("hourMinute") or time.strftime("%H:%M", local))
+        )
+        seconds = str(data.get("seconds") or time.strftime("%S", local)).zfill(2)[-2:]
+        weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+        weekday = str(data.get("weekday") or weekdays[local.tm_wday])
+        second_value = max(0, min(int(seconds) if seconds.isdigit() else 0, 59))
+
+        title = str(runtime.get("title") or "桌面时钟")[:20]
+        self.draw_centered_text(title, self.font_medium, (185, 222, 232), (400, 110))
+        self.draw_centered_text("本机时间", self.font_small, (65, 123, 140), (400, 151))
+
+        center = (400, 367)
+        for index in range(60):
+            angle = -math.pi / 2 + index * math.tau / 60
+            major = index % 5 == 0
+            outer = 188
+            inner = outer - (13 if major else 7)
+            color = (
+                accent
+                if index <= second_value
+                else ((41, 99, 116) if major else (24, 58, 69))
+            )
+            start = (
+                round(center[0] + math.cos(angle) * inner),
+                round(center[1] + math.sin(angle) * inner),
+            )
+            end = (
+                round(center[0] + math.cos(angle) * outer),
+                round(center[1] + math.sin(angle) * outer),
+            )
+            self.draw_aa_round_line(self.screen, color, start, end, 3 if major else 2)
+
+        self.draw_aa_circle(self.screen, (2, 13, 19), center, 156)
+        self.draw_aa_ring(self.screen, (19, 62, 76), center, 156, 2)
+        clock_center_x = 400 if not show_seconds else 382
+        clock_rect = self.draw_workshop_high_text(
+            hour_minute,
+            self.font_workshop_clock_high,
+            (226, 244, 248),
+            (clock_center_x, 355),
+        )
+        if show_seconds:
+            seconds_center = (min(clock_rect.right + 28, 555), 390)
+            self.draw_workshop_high_text(
+                seconds,
+                self.font_workshop_clock_seconds_high,
+                accent,
+                seconds_center,
+            )
+        date_ascii = str(data.get("date") or time.strftime("%Y-%m-%d", local)).replace("-", ".")
+        if show_date and show_weekday:
+            date_surface = self.font_status.render(date_ascii, True, (126, 173, 186))
+            weekday_surface = self.font_small.render(weekday, True, (126, 173, 186))
+            gap = 34
+            total_width = date_surface.get_width() + weekday_surface.get_width() + gap
+            left = 400 - total_width // 2
+            self.screen.blit(date_surface, date_surface.get_rect(midleft=(left, 452)))
+            self.draw_aa_circle(
+                self.screen,
+                accent,
+                (left + date_surface.get_width() + gap // 2, 452),
+                3,
+            )
+            self.screen.blit(
+                weekday_surface,
+                weekday_surface.get_rect(midleft=(left + date_surface.get_width() + gap, 452)),
+            )
+        elif show_date:
+            self.draw_centered_text(date_ascii, self.font_status, (126, 173, 186), (400, 452))
+        elif show_weekday:
+            self.draw_centered_text(weekday, self.font_small, (126, 173, 186), (400, 452))
+
+    def draw_workshop_adaptive_surface(
+        self,
+        runtime: dict,
+        data: dict,
+        presentation: dict,
+    ) -> None:
+        components = presentation.get("components") if isinstance(presentation.get("components"), list) else []
+        accent = self.workshop_surface_accent(str(presentation.get("accent") or "cyan"))
+        title = str(runtime.get("title") or "用户应用")[:20]
+        self.draw_centered_text(title, self.font_medium, (185, 222, 232), (400, 128))
+        first = components[0] if components and isinstance(components[0], dict) else {}
+        kind = str(first.get("type") or "status")
+        if kind == "clock":
+            self.draw_workshop_clock(runtime, data, presentation)
+            return
+
+        center = (400, 350)
+        self.draw_aa_circle(self.screen, (2, 17, 24), center, 145)
+        self.draw_aa_ring(self.screen, (22, 74, 89), center, 145, 2)
+        raw_value = self.workshop_surface_value(data, str(first.get("valueKey") or "value"))
+        label = str(first.get("label") or "当前值")[:18]
+        if kind == "metric":
+            precision = int(first.get("precision") or 0)
+            try:
+                value_text = f"{float(raw_value):.{precision}f}"
+            except (TypeError, ValueError):
+                value_text = str(raw_value)[:12]
+            value_text += str(first.get("unit") or "")[:8]
+        elif kind == "progress":
+            minimum = float(first.get("minimum") or 0)
+            maximum = float(first.get("maximum") or 100)
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError):
+                numeric = minimum
+            progress = max(0.0, min((numeric - minimum) / max(maximum - minimum, 1e-6), 1.0))
+            value_text = f"{progress * 100:.0f}%"
+            for index in range(40):
+                angle = -math.pi / 2 + index * math.tau / 40
+                color = accent if index / 39 <= progress else (25, 61, 72)
+                start = (round(center[0] + math.cos(angle) * 160), round(center[1] + math.sin(angle) * 160))
+                end = (round(center[0] + math.cos(angle) * 170), round(center[1] + math.sin(angle) * 170))
+                self.draw_aa_round_line(self.screen, color, start, end, 3)
+        else:
+            value_text = str(raw_value)[:16]
+        self.draw_centered_text(value_text, self.font_large, accent, (400, 338))
+        self.draw_centered_text(label, self.font_small, (117, 162, 175), (400, 398))
+
+        detail_y = 524
+        for component in components[1:4]:
+            if not isinstance(component, dict):
+                continue
+            component_kind = str(component.get("type") or "text")
+            if component_kind == "text":
+                detail = str(
+                    component.get("text")
+                    or self.workshop_surface_value(data, str(component.get("valueKey") or ""), "")
+                )[:34]
+            else:
+                detail_value = self.workshop_surface_value(data, str(component.get("valueKey") or "value"))
+                detail = f"{str(component.get('label') or '状态')[:12]}  {str(detail_value)[:16]}"
+            self.draw_centered_text(detail, self.font_small, (145, 185, 196), (400, detail_y))
+            detail_y += 37
+
     def draw_workshop_runtime(self, now: float) -> None:
         self.screen.fill((0, 0, 0))
         self.draw_gallery_back_button()
         runtime = self.workshop_runtime_status
+        surface = runtime.get("surface") if isinstance(runtime.get("surface"), dict) else {}
+        data = surface.get("data") if isinstance(surface.get("data"), dict) else {}
+        view = str(surface.get("view") or "status")
+        presentation = surface.get("presentation") if isinstance(surface.get("presentation"), dict) else {}
+        if view == "clock" or presentation:
+            if view == "clock":
+                self.draw_workshop_clock(runtime, data, presentation)
+            else:
+                self.draw_workshop_adaptive_surface(runtime, data, presentation)
+            error = str(runtime.get("error") or "")
+            if error:
+                self.draw_centered_text(error[:28], self.font_small, (255, 151, 136), (400, 566))
+            rect = self.workshop_control_rects()["stop_runtime"]
+            self.draw_workshop_button(
+                rect,
+                "退出时钟",
+                selected=self.pointer_down and self.workshop_pointer_target == "stop_runtime",
+            )
+            return
         title = str(runtime.get("title") or "用户应用")[:20]
         status = str(runtime.get("status") or "starting")
         self.draw_centered_text(title, self.font_large, (220, 245, 252), (400, 134))
@@ -6049,9 +6275,6 @@ class PersistentExpressionDisplay:
         }.get(status, status)
         status_color = (119, 224, 174) if status in {"running", "completed"} else (255, 131, 110) if status == "error" else (112, 198, 225)
         self.draw_centered_text(status_label, self.font_medium, status_color, (400, 198))
-        surface = runtime.get("surface") if isinstance(runtime.get("surface"), dict) else {}
-        data = surface.get("data") if isinstance(surface.get("data"), dict) else {}
-        view = str(surface.get("view") or "status")
         self.draw_aa_circle(self.screen, (4, 25, 34), (400, 390), 150)
         self.draw_aa_ring(self.screen, (26, 100, 126), (400, 390), 150, 2)
         detection_count = int(data.get("detectionCount") or 0)

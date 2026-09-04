@@ -27,13 +27,13 @@
 `.github/workflows/release.yml` 只接受带产物作用域、且与 `config/version-catalog.json` 完全一致的标签：
 
 ```text
-suite/v0.25.2-beta
-edge-system/v0.25.2-beta
+suite/v0.25.3-beta
+edge-system/v0.25.3-beta
 ios/v0.25.1-beta
 call/v0.25.1-beta
 ```
 
-`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.25.2` 会被拒绝，因为无法判断它代表硬件、Edge System 还是客户端。
+`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.25.3` 会被拒绝，因为无法判断它代表硬件、Edge System 还是客户端。
 
 发布流程会生成 GitHub Release、目标平台附件和 SHA-256 文件。当前 macOS、Windows 与 iOS beta 没有商业发行签名，iOS 文件会明确带 `unsigned`，不可描述成可公开安装的正式包。Edge 附件是源码发布候选，不会自动执行安装。
 

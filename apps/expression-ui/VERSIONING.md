@@ -32,7 +32,7 @@ RiverBank 不再用一个名称或版本号同时代表硬件、树莓派基础�
 
 | 层级 | 如何编号 | 是否独立发布 |
 | --- | --- | --- |
-| RiverBank 产品套件 | 发布列车 `v0.25.2 beta` | 否，只描述一组经过验证的版本组合 |
+| RiverBank 产品套件 | 发布列车 `v0.25.3 beta` | 否，只描述一组经过验证的版本组合 |
 | RiverBank Edge 硬件 | 产品代次 + 硬件 Revision | 是硬件身份，不使用软件 SemVer |
 | RiverBank Edge System | `vMAJOR.MINOR.PATCH beta|stable` | 是，可在设备上安装、封存和回滚 |
 | Debian / Raspberry Pi OS / Linux 内核 | 保留上游版本 | 是上游依赖，不纳入 RiverBank 版本号 |
@@ -48,8 +48,8 @@ RiverBank 不再用一个名称或版本号同时代表硬件、树莓派基础�
 
 当前清单记录：
 
-- RiverBank 发布列车：`v0.25.2 beta`；
-- RiverBank Edge System：`v0.25.2 beta`；
+- RiverBank 发布列车：`v0.25.3 beta`；
+- RiverBank Edge System：`v0.25.3 beta`；
 - iOS 客户端：`v0.25.1 beta`，build 2；
 - macOS/Windows 客户端：`v0.25.1 beta`；
 - iOS 与桌面客户端兼容 Edge System `>=0.25.0 <0.26.0`。

@@ -30,14 +30,14 @@ class VersionCatalogTests(unittest.TestCase):
         self.assertEqual(
             VERSIONCTL.expected_tags(catalog),
             {
-                "suite": "suite/v0.25.2-beta",
-                "edge-system": "edge-system/v0.25.2-beta",
+                "suite": "suite/v0.25.3-beta",
+                "edge-system": "edge-system/v0.25.3-beta",
                 "ios": "ios/v0.25.1-beta",
                 "call": "call/v0.25.1-beta",
             },
         )
-        self.assertEqual(VERSIONCTL.validate_tag(catalog, "edge-system/v0.25.2-beta"), [])
-        self.assertTrue(VERSIONCTL.validate_tag(catalog, "v0.25.2"))
+        self.assertEqual(VERSIONCTL.validate_tag(catalog, "edge-system/v0.25.3-beta"), [])
+        self.assertTrue(VERSIONCTL.validate_tag(catalog, "v0.25.3"))
 
 
 if __name__ == "__main__":
