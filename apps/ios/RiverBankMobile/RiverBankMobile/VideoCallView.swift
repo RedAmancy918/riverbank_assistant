@@ -101,7 +101,11 @@ private struct WebRTCContainer: UIViewRepresentable {
                 try session.setCategory(
                     .playAndRecord,
                     mode: .videoChat,
-                    options: [.defaultToSpeaker, .allowBluetoothHFP]
+                    // Keep the CI/release toolchain compatible with Xcode 16.x.
+                    // `.allowBluetoothHFP` is only exposed by newer SDKs; this
+                    // option provides the same hands-free Bluetooth routing on
+                    // every SDK supported by RiverBank's iOS 17 deployment target.
+                    options: [.defaultToSpeaker, .allowBluetooth]
                 )
                 try session.setActive(true)
             } catch {
