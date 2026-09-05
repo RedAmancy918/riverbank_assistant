@@ -57,6 +57,13 @@
     </header>
 
     {% if is_latest %}
+    <aside class="source-status-banner" id="source-status-banner" role="status" aria-live="polite" hidden>
+      <strong id="source-status-title">论文源状态</strong>
+      <span id="source-status-copy"></span>
+    </aside>
+    {% endif %}
+
+    {% if is_latest %}
     <section class="special-focus-console" id="special-focus-console" aria-hidden="true">
       <div class="special-focus-console-inner">
         <div class="focus-console-copy">
@@ -80,6 +87,9 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">DAILY BRIEFING · {{ report.display_date }}</p>
+        {% if report.paper_source_carried_forward %}
+        <p class="paper-source-carry">论文部分沿用 {{ report.paper_source_date }} 最近一次成功阅读；产业资讯按本期继续更新。</p>
+        {% endif %}
         {% if is_latest %}
         <aside class="focus-pending-banner" id="special-focus-pending-banner" aria-live="polite" hidden>
           <div class="focus-pending-heading">

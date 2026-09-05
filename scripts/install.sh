@@ -126,6 +126,8 @@ install -d -m 0750 -o "$riverbank_user" -g "$riverbank_group" \
   "$riverbank_data/paper-radar/public" \
   "$riverbank_data/pomodoro" \
   "$riverbank_data/ui"
+/usr/sbin/runuser -u "$riverbank_user" -- env HOME="$(getent passwd "$riverbank_user" | cut -d: -f6)" \
+  /usr/bin/python3 "$repo/apps/paper-radar/scripts/align_hermes_job.py" --repo "$repo"
 if [[ ! -e "$workshop_private" && ! -e "$workshop_public" ]]; then
   private_tmp=$(mktemp "$workshop_state/.device-signing-private.XXXXXX")
   public_tmp=$(mktemp "$workshop_trust/.riverbank-local-device-v1.XXXXXX")

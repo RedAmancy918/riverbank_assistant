@@ -10,11 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_KNOWLEDGE_PATH = Path(
     os.environ.get(
         "RIVERBANK_PAPER_KNOWLEDGE",
-        "/home/geo/paper-radar/data/paper-qa/current.json",
+        str(REPOSITORY_ROOT / "apps/paper-radar/data/paper-qa/current.json"),
     )
 )
 PAPER_SOURCE = "paper-radar-internal"

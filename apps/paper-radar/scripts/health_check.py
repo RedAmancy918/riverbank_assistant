@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "data" / "generated" / "latest-report.json"
+PUBLIC_INDEX = ROOT / "public" / "index.html"
+SOURCE_STATUS = ROOT / "data" / "arxiv-access" / "source-status.json"
 CRON_JOBS = Path(
     os.environ.get(
         "RIVERBANK_HERMES_CRON_JOBS",
@@ -56,7 +58,20 @@ def main() -> int:
         expected_dates.add((now.date() - timedelta(days=1)).isoformat())
     report_date = str(report.get("date") or "")
     if report_date not in expected_dates:
-        return fail(f"report is stale: date={report_date}, expected={sorted(expected_dates)}")
+        source = load_json(SOURCE_STATUS) if SOURCE_STATUS.is_file() else {}
+        return fail(
+            f"report is stale: date={report_date}, expected={sorted(expected_dates)}, "
+            f"arxiv_state={source.get('state', 'unknown')} retry_at={source.get('retry_at', '')}"
+        )
+    try:
+        rendered = PUBLIC_INDEX.read_text(encoding="utf-8")
+    except OSError as exc:
+        return fail(f"formal Paper Radar index is unavailable: {exc}")
+    expected_display_date = report_date.replace("-", ".")
+    if expected_display_date not in rendered:
+        return fail(
+            f"formal Paper Radar site is not aligned with report: expected {expected_display_date}"
+        )
 
     required_arrays = ("papers", "potential_methods", "special_focus", "industry_updates")
     for key in required_arrays:

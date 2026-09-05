@@ -3,7 +3,10 @@
   "fresh_window_hours": 72,
   "paper_lookback_days": 183,
   "max_results_per_query": 75,
-  "request_interval_seconds": 4.5,
+  "request_interval_seconds": 4.0,
+  "rate_limit_cooldown_seconds": 1800,
+  "rate_limit_max_cooldown_seconds": 7200,
+  "max_automatic_attempts": 3,
   "max_candidates": 30,
   "candidate_section_targets": {
     "world_model": 5,
@@ -46,12 +49,16 @@
     {
       "id": "category_latest",
       "label": "重点分类最新论文",
-      "queries": [
-        "cat:cs.RO",
-        "cat:cs.AI",
-        "cat:cs.CV",
-        "cat:cs.LG",
-        "cat:stat.ML"
+      "queries": [],
+      "oai_sets": [
+        {
+          "set": "cs",
+          "categories": ["cs.RO", "cs.AI", "cs.CV", "cs.LG"]
+        },
+        {
+          "set": "stat",
+          "categories": ["stat.ML"]
+        }
       ]
     },
     {

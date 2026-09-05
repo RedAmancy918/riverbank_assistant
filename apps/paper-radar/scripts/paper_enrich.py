@@ -13,10 +13,10 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 import requests
 
+from arxiv_access import ArxivAccess
 from paper_qa import (
     ARXIV_RE,
     CURRENT_PATH,
@@ -37,38 +37,15 @@ MAX_PDF_TEXT_CHARS = 450_000
 
 
 def download_arxiv_pdf(arxiv_id: str) -> bytes:
-    session = requests.Session()
-    response = session.get(
+    payload = ArxivAccess().fetch_bytes(
         f"https://arxiv.org/pdf/{arxiv_id}",
         timeout=90,
-        stream=True,
-        headers={"User-Agent": "RiverBank-PaperRadar/1.0 (personal research reader)"},
+        max_bytes=MAX_PDF_BYTES,
+        headers={"Accept": "application/pdf"},
     )
-    try:
-        if response.status_code == 429:
-            raise RuntimeError("arXiv 暂时限流（429）")
-        response.raise_for_status()
-        hostname = (urlparse(response.url).hostname or "").lower()
-        if hostname != "arxiv.org" and not hostname.endswith(".arxiv.org"):
-            raise RuntimeError("论文 PDF 被重定向到不受信任的地址")
-        announced = int(response.headers.get("Content-Length", "0") or 0)
-        if announced > MAX_PDF_BYTES:
-            raise RuntimeError("论文 PDF 超过 35 MB 安全上限")
-        parts: list[bytes] = []
-        consumed = 0
-        for part in response.iter_content(chunk_size=128 * 1024):
-            if not part:
-                continue
-            consumed += len(part)
-            if consumed > MAX_PDF_BYTES:
-                raise RuntimeError("论文 PDF 超过 35 MB 安全上限")
-            parts.append(part)
-        payload = b"".join(parts)
-    finally:
-        response.close()
-    if not payload.lstrip().startswith(b"%PDF-"):
+    if not payload.body.lstrip().startswith(b"%PDF-"):
         raise RuntimeError("原文地址没有返回有效 PDF")
-    return payload
+    return payload.body
 
 
 def extract_pdf_chunks(payload: bytes) -> list[dict[str, str]]:

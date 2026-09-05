@@ -13,4 +13,4 @@ python_bin=${RIVERBANK_PAPER_RADAR_PYTHON:-$project_dir/.venv/bin/python}
 if [ ! -x "$python_bin" ]; then
   python_bin=/usr/bin/python3
 fi
-exec "$python_bin" "$project_dir/scripts/collect.py" --automatic
+exec "$python_bin" "$project_dir/scripts/collect.py" --force-all

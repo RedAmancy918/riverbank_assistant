@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from arxiv_access import ArxivAccess
 from paper_chat_proxy import PaperChatError, PaperChatProxy
 from special_focus import (
     cancel_request,
@@ -90,6 +91,22 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
         if self.api_path() == "/healthz":
             self.send_json(HTTPStatus.OK, {"ok": True, "service": "paper-radar"})
             return
+        if self.api_path() == "/api/source-status":
+            source = ArxivAccess().read_source_status()
+            state = ArxivAccess().status()
+            self.send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "state": str(source.get("state") or "unknown"),
+                    "message": str(source.get("message") or ""),
+                    "attempted_report_date": str(source.get("attempted_report_date") or ""),
+                    "last_successful_report_date": str(source.get("last_successful_report_date") or ""),
+                    "retry_at": str(source.get("retry_at") or state.get("cooldown_until") or ""),
+                    "automatic_attempts": int(source.get("automatic_attempts") or 0),
+                },
+            )
+            return
         paper_id = self.paper_chat_id()
         if paper_id:
             try:
@@ -115,7 +132,7 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        if self.api_path() == "/api/special-focus":
+        if self.api_path() in {"/api/special-focus", "/api/source-status"}:
             self.send_response(HTTPStatus.NO_CONTENT)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()

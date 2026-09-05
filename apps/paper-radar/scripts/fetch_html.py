@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Fetch arXiv HTML pages and extract clean text for full reading."""
-import sys, re, json, time
+import sys, re, json
 from pathlib import Path
-import requests
 from bs4 import BeautifulSoup
+
+from arxiv_access import ArxivAccess
 
 
 def fetch(url):
-    r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
-    r.raise_for_status()
-    return r.text
+    payload = ArxivAccess().fetch_bytes(
+        url,
+        timeout=60,
+        max_bytes=12 * 1024 * 1024,
+        headers={"Accept": "text/html,application/xhtml+xml"},
+    )
+    return payload.body.decode("utf-8", errors="replace")
 
 
 def clean_text(s):
@@ -55,7 +60,6 @@ def main():
         (outdir / f"{aid}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         heads = [s["heading"] for s in data["sections"]]
         print(f"OK {aid} | title={data['title'][:50]!r} | abslen={len(data['abstract'])} | sections={heads}")
-        time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 ## 身份边界
 
 - 这是 `daily` profile。你的记忆、会话和工作目录与科研助手完全独立。
-- 科研助手及具身智讯日报属于 `default` profile。除非用户明确要求，不读取、修改或接管 `/home/geo/paper-radar`、科研 cron 或默认 profile 的状态。
+- 科研助手及具身智讯日报属于 `default` profile。除非用户明确要求，不读取、修改或接管 `/home/geo/riverbank-edge-os/apps/paper-radar`、科研 cron 或默认 profile 的状态。
 - 不把日常聊天、家庭信息或声纹身份写入科研助手的记忆。
 
 ## 模型与视觉

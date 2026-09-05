@@ -1,6 +1,6 @@
 # 代码与维护索引
 
-当前设备操作系统基线：**RiverBank Edge OS v0.26.0 beta**。本页与设备桌面维护副本以该基线同步；上游 Debian/Raspberry Pi OS 版本单独报告，不作为 Edge OS 版本号。
+当前设备操作系统基线：**RiverBank Edge OS v0.26.1 beta**。本页与设备桌面维护副本以该基线同步；上游 Debian/Raspberry Pi OS 版本单独报告，不作为 Edge OS 版本号。
 
 工坊用户生成或导入的应用、提案、授权、注册表、审计和私有数据统一位于 `RIVERBANK_DATA/workshop/`，属于用户行为，不纳入 GitHub 更新、Edge OS 发布清单或 OTA。仓库只维护工坊平台、协议、测试和官方示例。
 
@@ -120,7 +120,7 @@ ${RIVERBANK_DATA}/pomodoro/state.json
 - 四个应用都接入 Daily 本地快速路由，不能依赖 Hermes 工具选择：番茄钟支持打开、创建、开始、暂停、继续、重置和跳过；性能支持打开与关闭；音乐支持打开/关闭页面、播放、暂停、上一首、下一首、列表循环、单曲循环、乱序播放和主页歌词开关；通话支持打开与挂断。音乐播放期间再次唤醒后说“下一首”必须直接发送 `music_control next`；首次播放时若曲库仍为空，渲染器应保留待播放标记并在异步扫描完成后自动播放。普通“继续”和讨论论文中的“下一首”不得被本地路由误拦截；
 - 播放模式固定为 `list_loop`、`single_repeat`、`shuffle` 三种，右上模式按钮单击按“列表循环 → 单曲循环 → 乱序播放”切换，长按约 750 ms 手动刷新音乐库；进入音乐页也必须异步扫描。自然播完与手动运输控制遵循当前模式，乱序不得立即重复当前曲；播放模式保存在 `RIVERBANK_DATA/ui/music-preferences.json`，服务重启后恢复。
 - 主菜单“应用”进入二级环形应用菜单；选中应用后沿原方向继续向外滑：未固定的应用显示“固定到桌面”，当前已固定的应用显示“取消固定”。手指必须实际进入该外弧命中区域、保持满行程约 0.35 秒并在其上松手才确认，未命中外弧、快速滑过或立即松手仍应打开应用，回拖需取消；不再保留单独的“清空”扇区；二级菜单只能通过“返回”扇区返回主菜单，禁止左向右滑动返回，以免截获右侧应用的选择手势；层级切换使用约 220 ms 缓存交叉淡化；
-- 工坊外部包默认必须通过 `.rbapp` 完整性和 Ed25519 信任检查；本地开发包只有人工显式使用 `--allow-unsigned-local` 才可注册，而且仍保持 `installed_disabled`。语音创建必须先进入提案队列，由有限声明式验证器反推权限，经设备签名复检后在圆屏显示完整权限；批准集合必须与展示集合完全一致，才能启用。Edge OS v0.26.0 beta 只验证“本地圆屏物理在场”，没有验证发起者、设备所有者或超级开发者身份；维护和客服不得把它描述成账户级所有者审批。目标角色模型是普通请求者只提交，设备所有者通过 PIN/可信手机批准具体应用，平台开发者只在签名版本中发布 capability 和硬边界；远程客户端在该身份链完成前不得直接 approve。运行器只接受 `declarative-v1`，`python-sandbox-v1` 保持禁用；退出页面或视觉租约到期必须停止应用和隐私指示。任何新 capability、声明式节点、Host 方法或审核身份机制都必须同时更新 `workshop_contract.py`、`workshop_declarative.py`、`host-api-methods.json`、JSON Schema、中文协议和威胁测试；不得先在运行时添加隐藏接口。回归至少运行 `python3 apps/workshop/workshopctl.py self-test` 与 `python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v`；
+- 工坊外部包默认必须通过 `.rbapp` 完整性和 Ed25519 信任检查；本地开发包只有人工显式使用 `--allow-unsigned-local` 才可注册，而且仍保持 `installed_disabled`。语音创建必须先进入提案队列，由有限声明式验证器反推权限，经设备签名复检后在圆屏显示完整权限；批准集合必须与展示集合完全一致，才能启用。Edge OS v0.26.1 beta 只验证“本地圆屏物理在场”，没有验证发起者、设备所有者或超级开发者身份；维护和客服不得把它描述成账户级所有者审批。目标角色模型是普通请求者只提交，设备所有者通过 PIN/可信手机批准具体应用，平台开发者只在签名版本中发布 capability 和硬边界；远程客户端在该身份链完成前不得直接 approve。运行器只接受 `declarative-v1`，`python-sandbox-v1` 保持禁用；退出页面或视觉租约到期必须停止应用和隐私指示。任何新 capability、声明式节点、Host 方法或审核身份机制都必须同时更新 `workshop_contract.py`、`workshop_declarative.py`、`host-api-methods.json`、JSON Schema、中文协议和威胁测试；不得先在运行时添加隐藏接口。回归至少运行 `python3 apps/workshop/workshopctl.py self-test` 与 `python3 -m unittest tests.test_workshop_contract tests.test_workshop_pipeline -v`；
 - 重启滑块回拖可撤销，到端点抬手才执行；
 - 主页状态栏重启图标必须使用顶部开口圆弧加独立竖线的标准电源符号，所有端点为圆帽并随状态胶囊切线方向整体旋转；不得使用循环箭头图标。
 - 摄像头被主动调用时，表情桌面和展开状态栏继续使用既有右上角隐私灯位置；相机、相册、音乐、番茄钟、性能和设置页必须统一显示在圆屏顶部中轴，不得遮挡返回、模式或统计按钮；Camera Hub 常驻本身不得点亮。
@@ -134,6 +134,7 @@ ${RIVERBANK_DATA}/pomodoro/state.json
 - Hermes 推理、Qwen 视觉或扬声器播放期间再次说出唤醒词，旧轮次应立即停止，播放新的唤醒回应并重新录音；
 - Paper Radar 候选/精选/焦点/产业数量上限保持不变。
 - 文章问询必须遵循“当天精读缓存优先、原文按需补证”：一般问题不得重复抓取；具体型号、参数、实验设置、缓存零命中或用户明确要求进一步核实时，调用 `apps/paper-radar/scripts/paper_enrich.py`，只读取该论文自身的 arXiv PDF/HTML。成功结果写回 `data/paper-qa/current.json` 并在当天复用，禁止建立按日期全文归档；下一次成功日报整体替换。补证失败仍用已有缓存回答，并明确已尝试的来源和缺失证据，不能把模型常识写成论文结论。回归运行 `tests/test_paper_qa.py` 与 `tests/test_chat_worker_paper_enrichment.py`；
+- arXiv 元数据、HTML 与 PDF 必须全部经过 `apps/paper-radar/scripts/arxiv_access.py` 的设备级单连接闸门，最短间隔 4 秒；同一查询当天复用，缓存只保留今天和昨天。HTTP 429 优先遵守 `Retry-After`，否则冷却 30 分钟，连续限流依次扩展到 1 小时和 2 小时，不允许立即重试、并发抓取、换 IP 或代理规避。分类最新流使用 OAI-PMH 增量，复杂关键词继续使用 API。每天最多执行 08:00 初次运行和两次带随机延迟的补跑；论文源不可用时沿用最近成功论文区并明确日期，产业官方来源仍可更新，一次性特别关注不得提前消费；
 - 无视觉租约时只能保留不打开设备的协调器，不得存在 Hailo 推理子进程；申请人脸租约后启动 SCRFD Worker，到期或释放后完整终止 Worker。工坊 YOLO 只能在同一协调器取得外部预约后启动，且与人脸 Worker 不得并存。
 - `expression_display_persistent.py --self-test`、结构化表情事件、人脸追踪双态及发布完整性检查全部通过。
 
@@ -184,7 +185,7 @@ python3 apps/face-tracker/face_trackerctl.py release LEASE_ID
 
 ```bash
 sudo python3 apps/release-manager/release_manager.py seal \
-  --version v0.26.0 --channel beta --notes "release summary"
+  --version v0.26.1 --channel beta --notes "release summary"
 python3 apps/release-manager/release_manager.py verify --json
 ```
 

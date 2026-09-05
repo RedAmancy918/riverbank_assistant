@@ -4,7 +4,12 @@ Daily embodied-intelligence research digest for Hermes Agent.
 
 ## Runtime
 
-- `scripts/collect.py`: arXiv collection, prefiltering, deduplication and candidate manifest.
+- `scripts/collect.py`: OAI-PMH/API collection, prefiltering, deduplication and candidate manifest.
+- `scripts/arxiv_access.py`: the only arXiv network boundary. It serializes metadata,
+  HTML and PDF requests across processes, enforces a four-second floor, persists
+  429 cooldown, and keeps only today's and yesterday's request cache.
+- `scripts/catchup.py`: guarded catch-up launcher; the scheduled run plus at most
+  two automatic catch-ups may run on one date.
 - `AGENTS.md`: the durable editorial and deep-reading contract used by Hermes cron.
 - `scripts/render.py`: report validation, Markdown archive and atomic static-site rendering.
 - `scripts/web_server.py`: static-site server plus the one-shot special-focus and
@@ -17,6 +22,7 @@ Daily embodied-intelligence research digest for Hermes Agent.
 - `public/`: latest report at `/`, title-and-abstract candidate list at `/candidates/`,
   and historical reports under `/archive/`.
 - `../../config/systemd/paper-radar-web.service`: boot-persistent web service template.
+- `../../config/systemd/paper-radar-catchup.{service,timer}`: cooldown-aware catch-up units.
 
 The default timezone is Asia/Shanghai. The web app listens on `0.0.0.0:19732`,
 so it can be reached through a LAN or Tailscale address. Access control remains
@@ -52,6 +58,24 @@ useful technical or deployment information.
 The latest page can accept one special-focus description for the next 08:00 run.
 The request is stored under `data/special-focus/`, adds at most five items outside
 the normal candidate/selected limits, and is consumed only after a successful render.
+
+## arXiv access and outage behavior
+
+The category-latest stream uses arXiv OAI-PMH daily increments. Complex thematic
+queries continue to use the arXiv API. Every request made by collection, deep reading
+or on-demand article Q&A passes through the same filesystem lock and state file under
+`data/arxiv-access/`; no caller may add its own immediate retries. A 429 honors
+`Retry-After` when present, otherwise enters a persistent 30-minute cooldown; repeated
+rate limits expand that cooldown to one and then two hours. Daily successful responses
+are reused for the same query, and only two dates of request cache are retained.
+
+If collection is unavailable, the agent carries forward the most recent successful
+paper sections, keeps the one-shot focus request pending, and can still refresh official
+industry sources. The latest page labels the paper source date and exposes the current
+cooldown without replacing valid content with an empty report. The catch-up timer runs
+at two jittered windows after 08:00 and never exceeds the initial run plus two retries.
+This follows arXiv's API terms and OAI bulk-data guidance; IP rotation, parallel scraping
+and rate-limit bypass are explicitly outside the design.
 
 ## Article Q&A
 

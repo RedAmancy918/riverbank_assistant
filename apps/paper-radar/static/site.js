@@ -171,6 +171,28 @@
 })();
 
 (() => {
+  const banner = document.querySelector("#source-status-banner");
+  if (!banner) return;
+  const title = banner.querySelector("#source-status-title");
+  const copy = banner.querySelector("#source-status-copy");
+  fetch("/api/source-status", { cache: "no-store" })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error("状态读取失败");
+      if (["ready", "collecting"].includes(payload.state)) return;
+      const last = payload.last_successful_report_date || "最近一次成功日期";
+      const retry = payload.retry_at ? `；后台将在冷却结束后自动补跑（${payload.retry_at}）` : "；后台会按计划自动补跑";
+      title.textContent = payload.state === "degraded" ? "ARXIV PARTIAL" : "ARXIV DELAYED";
+      copy.textContent = payload.state === "degraded"
+        ? `arXiv 部分来源暂不可用，当前日报已使用成功结果与当天缓存。${payload.message || ""}`
+        : `arXiv 暂时不可用，当前展示 ${last} 最近一次成功日报${retry}。产业资讯链路不受该冷却影响。`;
+      banner.classList.toggle("is-degraded", payload.state === "degraded");
+      banner.hidden = false;
+    })
+    .catch(() => {});
+})();
+
+(() => {
   const panels = [...document.querySelectorAll("[data-paper-chat]")];
   if (!panels.length) return;
 

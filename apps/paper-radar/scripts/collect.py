@@ -6,20 +6,24 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import os
 import re
 import sqlite3
 import sys
-import time
 import urllib.parse
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from arxiv_access import (
+    ArxivAccess,
+    ArxivAccessError,
+    ArxivCooldownError,
+    ArxivNetworkError,
+    atomic_write_json,
+    cache_dates_around,
+)
 from special_focus import get_due_request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,11 +32,15 @@ DB_PATH = ROOT / "data" / "papers.db"
 CANDIDATE_DIR = ROOT / "data" / "candidates"
 REPORTS_DIR = ROOT / "reports"
 ARXIV_API = "https://export.arxiv.org/api/query"
+ARXIV_OAI = "https://oaipmh.arxiv.org/oai"
 ATOM = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-USER_AGENT = "paper-radar/1.0 (research digest)"
+OAI = {
+    "oai": "http://www.openarchives.org/OAI/2.0/",
+    "arxiv": "http://arxiv.org/OAI/arXiv/",
+}
 
 
-class NetworkUnavailableError(RuntimeError):
+class NetworkUnavailableError(ArxivNetworkError):
     """The host cannot currently reach arXiv; stop multiplying identical retries."""
 
 
@@ -49,7 +57,23 @@ def arxiv_id_from_url(url: str) -> str:
     return re.sub(r"v\d+$", "", value)
 
 
-def fetch_feed(query: str, max_results: int = 75) -> list[dict[str, Any]]:
+def fetch_feed(
+    query: str,
+    max_results: int = 75,
+    *,
+    report_date: str | None = None,
+    access: ArxivAccess | None = None,
+) -> list[dict[str, Any]]:
+    access = access or ArxivAccess()
+    cache_date = report_date or datetime.now().astimezone().date().isoformat()
+    cache_key = json.dumps(
+        {"query": query, "max_results": max_results, "sort": "submittedDate:descending"},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cached = access.read_daily_cache("api-query", cache_date, cache_key)
+    if isinstance(cached, list):
+        return cached
     params = urllib.parse.urlencode(
         {
             "search_query": query,
@@ -59,35 +83,18 @@ def fetch_feed(query: str, max_results: int = 75) -> list[dict[str, Any]]:
             "sortOrder": "descending",
         }
     )
-    request = urllib.request.Request(f"{ARXIV_API}?{params}", headers={"User-Agent": USER_AGENT})
-    last_error: Exception | None = None
-    http_retry_delays = (15, 30, 60)
-    network_retry_delays = (5, 15, 30)
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response:
-                payload = response.read()
-            return parse_feed(payload)
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            if attempt >= len(http_retry_delays):
-                break
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
-            try:
-                delay = max(http_retry_delays[attempt], int(retry_after or 0))
-            except ValueError:
-                delay = http_retry_delays[attempt]
-            time.sleep(delay)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last_error = exc
-            if attempt >= len(network_retry_delays):
-                break
-            time.sleep(network_retry_delays[attempt])
-        except Exception as exc:
-            raise RuntimeError(f"arXiv request failed: {exc}") from exc
-    if isinstance(last_error, (urllib.error.URLError, TimeoutError, OSError)):
-        raise NetworkUnavailableError(f"arXiv network unavailable: {last_error}")
-    raise RuntimeError(f"arXiv request failed after retries: {last_error}")
+    try:
+        payload = access.fetch_bytes(
+            f"{ARXIV_API}?{params}",
+            timeout=60,
+            max_bytes=8 * 1024 * 1024,
+            headers={"Accept": "application/atom+xml"},
+        ).body
+    except ArxivNetworkError as exc:
+        raise NetworkUnavailableError(str(exc)) from exc
+    records = parse_feed(payload)
+    access.write_daily_cache("api-query", cache_date, cache_key, records)
+    return records
 
 
 def parse_feed(payload: bytes) -> list[dict[str, Any]]:
@@ -121,6 +128,128 @@ def parse_feed(payload: bytes) -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def _oai_text(node: ET.Element | None, path: str) -> str:
+    if node is None:
+        return ""
+    return normalize_space(node.findtext(path, default="", namespaces=OAI))
+
+
+def parse_oai_page(payload: bytes) -> tuple[list[dict[str, Any]], str]:
+    root = ET.fromstring(payload)
+    error = root.find("oai:error", OAI)
+    if error is not None:
+        code = str(error.attrib.get("code", ""))
+        if code == "noRecordsMatch":
+            return [], ""
+        raise RuntimeError(f"arXiv OAI error {code or 'unknown'}: {normalize_space(error.text or '')}")
+    records: list[dict[str, Any]] = []
+    for item in root.findall(".//oai:record", OAI):
+        header = item.find("oai:header", OAI)
+        if header is None or header.attrib.get("status") == "deleted":
+            continue
+        metadata = item.find("oai:metadata/arxiv:arXiv", OAI)
+        if metadata is None:
+            continue
+        arxiv_id = _oai_text(metadata, "arxiv:id")
+        if not arxiv_id:
+            identifier = _oai_text(header, "oai:identifier")
+            arxiv_id = identifier.rsplit(":", 1)[-1]
+        arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+        authors: list[str] = []
+        for author in metadata.findall("arxiv:authors/arxiv:author", OAI):
+            forenames = _oai_text(author, "arxiv:forenames")
+            keyname = _oai_text(author, "arxiv:keyname")
+            name = normalize_space(f"{forenames} {keyname}")
+            if name:
+                authors.append(name)
+        created = _oai_text(metadata, "arxiv:created")
+        updated = _oai_text(metadata, "arxiv:updated") or created
+        categories = _oai_text(metadata, "arxiv:categories").split()
+        records.append(
+            {
+                "arxiv_id": arxiv_id,
+                "title": _oai_text(metadata, "arxiv:title"),
+                "abstract": _oai_text(metadata, "arxiv:abstract"),
+                "authors": authors,
+                "published": f"{created}T00:00:00Z" if created else "",
+                "updated": f"{updated}T00:00:00Z" if updated else "",
+                "categories": categories,
+                "primary_category": categories[0] if categories else "",
+                "url": f"https://arxiv.org/abs/{arxiv_id}",
+                "html_url": f"https://arxiv.org/html/{arxiv_id}",
+                "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
+            }
+        )
+    token = _oai_text(root, ".//oai:resumptionToken")
+    return records, token
+
+
+def fetch_oai_records(
+    set_spec: str,
+    from_date: str,
+    categories: list[str],
+    *,
+    report_date: str,
+    access: ArxivAccess,
+    max_pages: int = 8,
+) -> list[dict[str, Any]]:
+    cache_key = json.dumps(
+        {"set": set_spec, "from": from_date, "categories": sorted(categories)},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cached = access.read_daily_cache("oai", report_date, cache_key)
+    if isinstance(cached, list):
+        return cached
+    records: list[dict[str, Any]] = []
+    token = ""
+    for page in range(max_pages):
+        if token:
+            params = {"verb": "ListRecords", "resumptionToken": token}
+        else:
+            params = {
+                "verb": "ListRecords",
+                "metadataPrefix": "arXiv",
+                "from": from_date,
+                "set": set_spec,
+            }
+        url = f"{ARXIV_OAI}?{urllib.parse.urlencode(params)}"
+        payload = access.fetch_bytes(
+            url,
+            timeout=90,
+            max_bytes=16 * 1024 * 1024,
+            headers={"Accept": "application/xml"},
+        ).body
+        page_records, token = parse_oai_page(payload)
+        records.extend(page_records)
+        if not token:
+            break
+    else:
+        raise RuntimeError(f"arXiv OAI exceeded the safe page limit ({max_pages})")
+    allowed = set(categories)
+    if allowed:
+        records = [record for record in records if allowed.intersection(record["categories"])]
+    access.write_daily_cache("oai", report_date, cache_key, records)
+    return records
+
+
+def merge_stream_records(
+    target: dict[str, dict[str, Any]],
+    records: list[dict[str, Any]],
+    stream_id: str,
+    stream_label: str,
+) -> None:
+    for record in records:
+        existing = target.get(record["arxiv_id"])
+        if existing is None:
+            record["retrieval_streams"] = [stream_id]
+            record["retrieval_stream_labels"] = [stream_label]
+            target[record["arxiv_id"]] = record
+        elif stream_id not in existing["retrieval_streams"]:
+            existing["retrieval_streams"].append(stream_id)
+            existing["retrieval_stream_labels"].append(stream_label)
 
 
 def weighted_matches(haystack: str, weights: dict[str, Any]) -> tuple[int, list[str]]:
@@ -316,7 +445,25 @@ def select_diverse_candidates(
     )
 
 
-def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
+def latest_successful_report_date() -> str:
+    path = ROOT / "data" / "generated" / "latest-report.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    if payload.get("paper_source_carried_forward") is True:
+        return str(payload.get("paper_source_date") or "")
+    return str(payload.get("date") or "")
+
+
+def collect(
+    config: dict[str, Any],
+    force_all: bool = False,
+    *,
+    automatic: bool = False,
+) -> dict[str, Any]:
     tz = ZoneInfo(config["timezone"])
     local_now = datetime.now(tz)
     report_date = local_now.date().isoformat()
@@ -328,38 +475,96 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
     archive_cutoff = utc_now - timedelta(days=paper_lookback_days)
     all_records: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
+    access = ArxivAccess(
+        min_interval_seconds=float(config.get("request_interval_seconds", 4.0)),
+        default_cooldown_seconds=int(config.get("rate_limit_cooldown_seconds", 1800)),
+        max_cooldown_seconds=int(config.get("rate_limit_max_cooldown_seconds", 7200)),
+    )
+    access.prune_daily_cache(cache_dates_around(local_now.date(), 2))
+    previous_status = access.read_source_status()
+    previous_automatic_attempts = (
+        int(previous_status.get("automatic_attempts") or 0)
+        if previous_status.get("attempted_report_date") == report_date
+        else 0
+    )
+    automatic_attempts = previous_automatic_attempts + (1 if automatic else 0)
+    if automatic and automatic_attempts > int(config.get("max_automatic_attempts", 3)):
+        raise RuntimeError("当天自动采集已达到初次运行加两次补跑的上限")
+    access.write_source_status(
+        {
+            "state": "collecting",
+            "message": "正在增量读取 arXiv 元数据",
+            "attempted_report_date": report_date,
+            "automatic_attempts": automatic_attempts,
+            "last_successful_report_date": latest_successful_report_date(),
+        }
+    )
+
+    cooldown_error: ArxivCooldownError | None = None
+    consecutive_network_failures = 0
+    network_open = False
+    oai_from = (local_now.date() - timedelta(days=max(2, (fresh_window_hours // 24) + 1))).isoformat()
+    for stream in config["retrieval_streams"]:
+        for oai_set in stream.get("oai_sets", []):
+            try:
+                records = fetch_oai_records(
+                    str(oai_set["set"]),
+                    oai_from,
+                    [str(item) for item in oai_set.get("categories", [])],
+                    report_date=report_date,
+                    access=access,
+                )
+                merge_stream_records(all_records, records, stream["id"], stream["label"])
+                consecutive_network_failures = 0
+            except ArxivCooldownError as exc:
+                cooldown_error = exc
+                errors.append(f"{stream['id']} OAI: {exc}")
+                break
+            except ArxivNetworkError as exc:
+                consecutive_network_failures += 1
+                errors.append(f"{stream['id']} OAI: {exc}")
+                if consecutive_network_failures >= 2:
+                    network_open = True
+                    errors.append("network circuit opened; skipped remaining arXiv sources")
+                    break
+            except (ArxivAccessError, RuntimeError, ValueError, ET.ParseError) as exc:
+                errors.append(f"{stream['id']} OAI: {exc}")
+        if cooldown_error or network_open:
+            break
 
     stream_queries = [
         (stream["id"], stream["label"], query)
         for stream in config["retrieval_streams"]
-        for query in stream["queries"]
+        for query in stream.get("queries", [])
     ]
-    consecutive_network_failures = 0
-    for index, (stream_id, stream_label, query) in enumerate(stream_queries):
-        try:
-            for record in fetch_feed(query, int(config.get("max_results_per_query", 75))):
-                existing = all_records.get(record["arxiv_id"])
-                if existing is None:
-                    record["retrieval_streams"] = [stream_id]
-                    record["retrieval_stream_labels"] = [stream_label]
-                    all_records[record["arxiv_id"]] = record
-                elif stream_id not in existing["retrieval_streams"]:
-                    existing["retrieval_streams"].append(stream_id)
-                    existing["retrieval_stream_labels"].append(stream_label)
-            consecutive_network_failures = 0
-        except NetworkUnavailableError as exc:
-            consecutive_network_failures += 1
-            errors.append(f"{stream_id} query {index + 1}: {exc}")
-            if consecutive_network_failures >= 2:
-                remaining = len(stream_queries) - index - 1
+    if not cooldown_error and not network_open:
+        for index, (stream_id, stream_label, query) in enumerate(stream_queries):
+            try:
+                records = fetch_feed(
+                    query,
+                    int(config.get("max_results_per_query", 75)),
+                    report_date=report_date,
+                    access=access,
+                )
+                merge_stream_records(all_records, records, stream_id, stream_label)
+                consecutive_network_failures = 0
+            except ArxivCooldownError as exc:
+                cooldown_error = exc
+                errors.append(f"{stream_id} query {index + 1}: {exc}")
                 errors.append(
-                    f"network circuit breaker opened; skipped {remaining} remaining queries"
+                    f"rate-limit circuit opened; skipped {len(stream_queries) - index - 1} remaining queries"
                 )
                 break
-        except Exception as exc:
-            errors.append(f"{stream_id} query {index + 1}: {exc}")
-        if index < len(stream_queries) - 1:
-            time.sleep(float(config.get("request_interval_seconds", 4.5)))
+            except NetworkUnavailableError as exc:
+                consecutive_network_failures += 1
+                errors.append(f"{stream_id} query {index + 1}: {exc}")
+                if consecutive_network_failures >= 2:
+                    errors.append(
+                        f"network circuit opened; skipped {len(stream_queries) - index - 1} remaining queries"
+                    )
+                    break
+            except (ArxivAccessError, RuntimeError, ValueError, ET.ParseError) as exc:
+                errors.append(f"{stream_id} query {index + 1}: {exc}")
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     CANDIDATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -425,6 +630,36 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
     connection.commit()
     connection.close()
 
+    if cooldown_error:
+        source_state = "cooldown"
+    elif errors and not all_records:
+        source_state = "unavailable"
+    elif errors:
+        source_state = "degraded"
+    else:
+        source_state = "ready"
+    access_state = access.status()
+    retry_at = str(access_state.get("cooldown_until") or "")
+    last_successful = latest_successful_report_date()
+    source_message = {
+        "ready": "arXiv 增量元数据采集完成",
+        "degraded": "arXiv 部分来源暂不可用，已使用成功结果与当天缓存",
+        "cooldown": "arXiv 已触发限流冷却，保留最近一次成功日报并等待补跑",
+        "unavailable": "arXiv 当前不可用，保留最近一次成功日报并等待补跑",
+    }[source_state]
+    source_status = {
+        "state": source_state,
+        "message": source_message,
+        "attempted_report_date": report_date,
+        "automatic_attempts": automatic_attempts,
+        "last_successful_report_date": last_successful,
+        "retry_at": retry_at,
+        "retry_after_seconds": int(access_state.get("retry_after_seconds") or 0),
+        "total_fetched": len(all_records),
+        "error_count": len(errors),
+    }
+    access.write_source_status(source_status)
+
     manifest = {
         "report_date": report_date,
         "generated_at": local_now.isoformat(),
@@ -437,6 +672,7 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
         "fresh_candidate_count": sum(item["selection_bucket"] == "fresh" for item in candidates),
         "backfill_candidate_count": sum(item["selection_bucket"] == "backfill" for item in candidates),
         "errors": errors,
+        "source_status": source_status,
         "retrieval_streams": config["retrieval_streams"],
         "selection_policy": {
             "candidate_score": config["candidate_score"],
@@ -453,21 +689,22 @@ def collect(config: dict[str, Any], force_all: bool = False) -> dict[str, Any]:
             "max_industry_updates_per_source": config["max_industry_updates_per_source"],
             "max_special_focus_papers": int(config.get("max_special_focus_papers", 5)),
         },
-        "special_focus": special_focus,
+        "special_focus": special_focus if source_state not in {"cooldown", "unavailable"} else None,
         "company_sources": config["company_sources"],
         "candidates": candidates,
     }
     output_path = CANDIDATE_DIR / f"{report_date}.json"
-    output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(output_path, manifest)
     return {**manifest, "candidate_file": str(output_path)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--force-all", action="store_true", help="include already-seen papers for a manual dry run")
+    parser.add_argument("--automatic", action="store_true", help="count this as a scheduled run or catch-up")
     args = parser.parse_args()
     try:
-        result = collect(load_config(), force_all=args.force_all)
+        result = collect(load_config(), force_all=args.force_all, automatic=args.automatic)
     except Exception as exc:
         print(f"PAPER_RADAR_COLLECTION_FAILED\nerror={exc}")
         return 1
@@ -478,6 +715,9 @@ def main() -> int:
     print(f"fresh_candidate_count={result['fresh_candidate_count']}")
     print(f"backfill_candidate_count={result['backfill_candidate_count']}")
     print(f"total_fetched={result['total_fetched']}")
+    print(f"source_state={result['source_status']['state']}")
+    print(f"automatic_attempts={result['source_status']['automatic_attempts']}")
+    print(f"retry_at={result['source_status']['retry_at']}")
     print(f"special_focus={json.dumps(result['special_focus'], ensure_ascii=False)}")
     print(f"errors={json.dumps(result['errors'], ensure_ascii=False)}")
     print("Read the candidate JSON and follow AGENTS.md Daily Run Procedure.")

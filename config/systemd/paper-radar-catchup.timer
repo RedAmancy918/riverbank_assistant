@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry Paper Radar after a source outage without request storms
+
+[Timer]
+OnCalendar=*-*-* 08:35:00 Asia/Shanghai
+OnCalendar=*-*-* 09:40:00 Asia/Shanghai
+RandomizedDelaySec=10min
+Persistent=true
+Unit=paper-radar-catchup.service
+
+[Install]
+WantedBy=timers.target

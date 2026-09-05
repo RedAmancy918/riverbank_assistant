@@ -47,7 +47,7 @@ DashScope 原生多模态接口，默认模型为 `qwen-image-3.0-pro`，不再�
 
 Paper Radar 的逐篇文章问询复用同一个 Worker 和数据库，但通过
 `source=paper-radar-internal` 隔离。Worker 会按会话的稳定论文 ID 读取
-`/home/geo/paper-radar/data/paper-qa/current.json`，优先检索当天精读缓存。具体型号、参数、
+`/home/geo/riverbank-edge-os/apps/paper-radar/data/paper-qa/current.json`，优先检索当天精读缓存。具体型号、参数、
 实验设置或“进一步确认”这类问题若未被缓存覆盖，Worker 会调用受控补证器读取该论文自身的
 arXiv PDF，失败时降级为 arXiv HTML，并将新增分块原子写回同一个当日缓存；不会开放普通
 网页搜索给论文回答，也不会把模型常识冒充论文证据。补证仅在同一篇论文当天首次需要时

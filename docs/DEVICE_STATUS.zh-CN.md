@@ -4,7 +4,7 @@
 
 设备：RiverBank Edge
 
-设备操作系统：**RiverBank Edge OS v0.26.0 beta**
+设备操作系统：**RiverBank Edge OS v0.26.1 beta**
 
 分发模式：`managed-linux-system-layer`
 上游基础发行版：Debian GNU/Linux 12 (bookworm)
@@ -28,8 +28,8 @@
 
 | 产物 | 版本 |
 | --- | --- |
-| RiverBank 发布列车 | `v0.26.0 beta` |
-| RiverBank Edge OS | `v0.26.0 beta` |
+| RiverBank 发布列车 | `v0.26.1 beta` |
+| RiverBank Edge OS | `v0.26.1 beta` |
 | RiverBank iOS | `v0.25.2 beta`，build 3 |
 | RiverBank Call（macOS/Windows） | `v0.25.1 beta` |
 | 上游 Debian/Raspberry Pi OS/Linux | 按设备原版本单独报告 |
@@ -50,7 +50,7 @@ Edge OS、手机端和桌面端是独立产物；版本号不要求相同，通�
 | 视频通话、Chat、账号与管理员网站 | `riverbank-video-call.service` |
 | Chat 回复 | `riverbank-chat-worker.service` |
 | 后台任务 | `riverbank-task-worker.service` |
-| 具身智讯网页 | `paper-radar-web.service` |
+| 具身智讯网页与受控补跑 | `paper-radar-web.service`、`paper-radar-catchup.timer` |
 | 工坊 | `riverbank-workshop.service` |
 | 健康守护 | `riverbank-health-monitor.service` |
 | 一键恢复与日报补跑 | `riverbank-recovery.service` |
@@ -62,20 +62,21 @@ Edge OS、手机端和桌面端是独立产物；版本号不要求相同，通�
 
 ```bash
 sudo riverbank-release seal \
-  --version 0.26.0 \
+  --version 0.26.1 \
   --channel beta \
   --notes "verified RiverBank Edge OS release"
 
 sudo riverbank-release verify --json
 ```
 
-当前 `v0.26.0 beta` 已于 2026-09-04 18:06（Asia/Shanghai）完成实机部署与封存：10 个组件、177 个关键文件，`drift_count: 0`。设备源码统一位于 `/home/geo/riverbank-edge-os`；表情与提示音等本地授权资产位于 `/home/geo/.local/share/riverbank/assets/`；日报状态位于 `RIVERBANK_DATA/paper-radar/`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
+当前 `v0.26.1 beta` 已于 2026-09-06 01:23（Asia/Shanghai）完成实机部署与封存：10 个组件、185 个关键文件，`drift_count: 0`。设备源码统一位于 `/home/geo/riverbank-edge-os`；表情与提示音等本地授权资产位于 `/home/geo/.local/share/riverbank/assets/`；日报状态位于 `RIVERBANK_DATA/paper-radar/`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
 
 ## 当前正式能力摘要
 
 - 圆屏表情、两级应用菜单、固定/取消固定、番茄钟、性能、音乐、通话、工坊和 SYSTEM 状态；
 - 本地唤醒、双模型最终 ASR、RiverBank Agent Runtime（当前 Hermes/DeepSeek 适配器）、流式 TTS、语义表情和视觉路由；
 - 多用户账号隔离的 Chat、附件、图片生成、后台任务、报告下载和管理员网站；
+- 具身智讯通过 OAI-PMH 增量与统一 arXiv 访问闸门采集；元数据、HTML、PDF 共用单连接、4 秒最短间隔、当天缓存与持久化 429 冷却，每日最多初次运行加两次受控补跑；论文源异常时沿用最近成功论文区，产业资讯仍可独立更新；
 - Camera Hub 单一摄像头持有、PipeWire 共享音频、WebRTC 双向音视频；
 - 日报当天精读缓存优先，证据不足时按需补读原论文并回写当天缓存；
 - 工坊使用有限声明式生成、可信验证、权限反推、物理审核、受控 Host API 和 `riverbank.surface/v1`；

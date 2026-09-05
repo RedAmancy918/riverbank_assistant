@@ -43,13 +43,17 @@ from paper_context import (
 
 LOGGER = logging.getLogger("riverbank-chat-worker")
 DEFAULT_WORKSPACE = Path("/home/geo/.hermes/profiles/daily/workspace")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PAPER_PYTHON = Path(
-    os.environ.get("RIVERBANK_PAPER_PYTHON", "/home/geo/paper-radar/.venv/bin/python")
+    os.environ.get(
+        "RIVERBANK_PAPER_PYTHON",
+        str(REPOSITORY_ROOT / "apps/paper-radar/.venv/bin/python"),
+    )
 )
 DEFAULT_PAPER_ENRICHER = Path(
     os.environ.get(
         "RIVERBANK_PAPER_ENRICHER",
-        "/home/geo/paper-radar/scripts/paper_enrich.py",
+        str(REPOSITORY_ROOT / "apps/paper-radar/scripts/paper_enrich.py"),
     )
 )
 MAX_ATTACHMENT_CONTEXT_CHARS = 90_000

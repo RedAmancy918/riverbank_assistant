@@ -199,6 +199,12 @@
       "target": "paper-radar-web.service"
     },
     {
+      "id": "paper-radar-catchup-timer",
+      "name": "论文日报受控补跑计划",
+      "type": "systemd_service",
+      "target": "paper-radar-catchup.timer"
+    },
+    {
       "id": "paper-radar-page",
       "name": "论文日报页面",
       "type": "http",

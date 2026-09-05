@@ -71,6 +71,41 @@ class PaperKnowledgeTests(unittest.TestCase):
         self.assertEqual(payload["date"], "2026-09-02")
         self.assertEqual(list(payload["papers"]), [paper_qa_id(second["papers"][0])])
 
+    def test_carried_forward_report_reuses_previous_full_text(self) -> None:
+        path = self.root / "current.json"
+        paper = sample_paper("2609.00008", "Carried source")
+        first = build_daily_knowledge(
+            {
+                "date": "2026-09-05",
+                "papers": [paper],
+                "potential_methods": [],
+                "special_focus": [],
+            },
+            fetch_full=False,
+            output_path=path,
+        )
+        paper_id = paper_qa_id(paper)
+        first["papers"][paper_id]["chunks"].append(
+            {"label": "Method", "text": "Reusable original evidence.", "source": "arxiv_html"}
+        )
+        first["papers"][paper_id]["source_state"] = "arxiv_html"
+        path.write_text(json.dumps(first), encoding="utf-8")
+        with patch("paper_qa.CURRENT_PATH", path):
+            second = build_daily_knowledge(
+                {
+                    "date": "2026-09-06",
+                    "paper_source_carried_forward": True,
+                    "paper_source_date": "2026-09-05",
+                    "papers": [paper],
+                    "potential_methods": [],
+                    "special_focus": [],
+                },
+                output_path=path,
+            )
+        record = second["papers"][paper_id]
+        self.assertEqual(record["source_state"], "arxiv_html")
+        self.assertTrue(any(chunk["text"] == "Reusable original evidence." for chunk in record["chunks"]))
+
     def test_temp_full_text_is_added_to_current_buffer(self) -> None:
         temp_sources = self.root / "sources"
         temp_sources.mkdir()

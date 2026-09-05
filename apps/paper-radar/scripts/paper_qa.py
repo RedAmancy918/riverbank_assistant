@@ -9,12 +9,13 @@ import json
 import os
 import re
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import requests
+
+from arxiv_access import ArxivAccess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,25 +119,16 @@ def fetch_arxiv_source(arxiv_id: str, session: requests.Session) -> dict[str, An
     from fetch_html import extract
 
     url = f"https://arxiv.org/html/{arxiv_id}"
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            response = session.get(
-                url,
-                timeout=60,
-                headers={"User-Agent": "RiverBank-PaperRadar/1.0 (personal research reader)"},
-            )
-            if response.status_code == 429:
-                raise requests.HTTPError("arXiv rate limited the request (429)")
-            response.raise_for_status()
-            data = extract(response.text)
-            data["url"] = url
-            return data
-        except (requests.RequestException, ValueError) as exc:
-            last_error = exc
-            if attempt < 2:
-                time.sleep(2.0 * (attempt + 1))
-    raise RuntimeError(str(last_error or "arXiv HTML fetch failed"))
+    payload = ArxivAccess().fetch_bytes(
+        url,
+        session=session,
+        timeout=60,
+        max_bytes=12 * 1024 * 1024,
+        headers={"Accept": "text/html,application/xhtml+xml"},
+    )
+    data = extract(payload.body.decode("utf-8", errors="replace"))
+    data["url"] = url
+    return data
 
 
 def source_chunks(source: dict[str, Any]) -> list[dict[str, str]]:
@@ -184,12 +176,15 @@ def structured_notes(paper: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_reusable_current(report_date: str) -> dict[str, Any]:
+def load_reusable_current(report_date: str, *, allow_previous: bool = False) -> dict[str, Any]:
     try:
         current = json.loads(CURRENT_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    if current.get("date") != report_date or not isinstance(current.get("papers"), dict):
+    if (
+        (current.get("date") != report_date and not allow_previous)
+        or not isinstance(current.get("papers"), dict)
+    ):
         return {}
     return current["papers"]
 
@@ -219,7 +214,14 @@ def build_daily_knowledge(
     """Replace the current knowledge buffer; never create dated source archives."""
     annotate_report(report)
     report_date = str(report["date"])
-    reusable = load_reusable_current(report_date) if output_path == CURRENT_PATH else {}
+    reusable = (
+        load_reusable_current(
+            report_date,
+            allow_previous=report.get("paper_source_carried_forward") is True,
+        )
+        if output_path == CURRENT_PATH
+        else {}
+    )
     session = requests.Session()
     records: dict[str, dict[str, Any]] = {}
     full_source_count = 0
@@ -247,7 +249,6 @@ def build_daily_knowledge(
                 if extracted:
                     chunks.extend(extracted)
                     source_state = "arxiv_html"
-                time.sleep(0.8)
             except Exception as exc:  # The daily report must still publish if arXiv is unavailable.
                 source_error = clean_text(exc)[:500]
         if source_state.startswith("arxiv_"):
