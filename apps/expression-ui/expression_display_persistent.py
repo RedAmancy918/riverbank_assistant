@@ -508,6 +508,112 @@ def app_path(value: object) -> Path:
     return path if path.is_absolute() else APP_DIR / path
 
 
+def uses_cjk_font(character: str) -> bool:
+    """Route CJK glyphs to the compact device font and other glyphs to Latin."""
+    codepoint = ord(character)
+    return any(
+        lower <= codepoint <= upper
+        for lower, upper in (
+            (0x1100, 0x11FF),
+            (0x2E80, 0x31FF),
+            (0x3400, 0x4DBF),
+            (0x4E00, 0x9FFF),
+            (0xAC00, 0xD7AF),
+            (0xF900, 0xFAFF),
+            (0xFF00, 0xFFEF),
+            (0x20000, 0x2FA1F),
+        )
+    )
+
+
+def split_font_runs(text: str) -> list[tuple[bool, str]]:
+    """Split text into CJK and non-CJK runs without changing its contents."""
+    if not text:
+        return []
+    runs: list[tuple[bool, str]] = []
+    current_kind = uses_cjk_font(text[0])
+    current: list[str] = []
+    for character in text:
+        kind = uses_cjk_font(character)
+        if current and kind != current_kind:
+            runs.append((current_kind, "".join(current)))
+            current = []
+        current_kind = kind
+        current.append(character)
+    runs.append((current_kind, "".join(current)))
+    return runs
+
+
+class MixedGlyphFont:
+    """Pygame font facade with deterministic CJK/Latin glyph fallback."""
+
+    def __init__(
+        self,
+        pygame_module: object,
+        cjk_path: str,
+        latin_path: str,
+        size: int,
+    ) -> None:
+        self.pygame = pygame_module
+        self.cjk = pygame_module.font.Font(cjk_path, size)
+        self.latin = pygame_module.font.Font(latin_path, size)
+
+    def font_runs(self, text: object) -> list[tuple[object, str]]:
+        return [
+            (self.cjk if is_cjk else self.latin, value)
+            for is_cjk, value in split_font_runs(str(text))
+        ]
+
+    def size(self, text: object) -> tuple[int, int]:
+        runs = self.font_runs(text)
+        if not runs:
+            return self.cjk.size("")
+        if len(runs) == 1:
+            return runs[0][0].size(runs[0][1])
+        ascent = max(font.get_ascent() for font, _value in runs)
+        width = 0
+        height = 0
+        for font, value in runs:
+            run_width, run_height = font.size(value)
+            width += run_width
+            height = max(height, ascent - font.get_ascent() + run_height)
+        return width, height
+
+    def render(
+        self,
+        text: object,
+        antialias: bool,
+        color: object,
+        background: object | None = None,
+    ) -> object:
+        runs = self.font_runs(text)
+        if not runs:
+            return self.cjk.render("", antialias, color, background)
+        if len(runs) == 1:
+            return runs[0][0].render(runs[0][1], antialias, color, background)
+        rendered = [
+            (font, font.render(value, antialias, color, background))
+            for font, value in runs
+        ]
+        ascent = max(font.get_ascent() for font, _surface in rendered)
+        width = sum(surface.get_width() for _font, surface in rendered)
+        height = max(
+            ascent - font.get_ascent() + surface.get_height()
+            for font, surface in rendered
+        )
+        flags = self.pygame.SRCALPHA if background is None else 0
+        surface = self.pygame.Surface((max(1, width), max(1, height)), flags)
+        surface.fill((0, 0, 0, 0) if background is None else background)
+        x = 0
+        for font, run_surface in rendered:
+            surface.blit(run_surface, (x, ascent - font.get_ascent()))
+            x += run_surface.get_width()
+        return surface
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.cjk, name)
+
+
 
 
 
@@ -1302,11 +1408,29 @@ class PersistentExpressionDisplay:
                 "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
             )
         ))
-        self.font_small = pygame.font.Font(font_path, 21)
-        self.font_medium = pygame.font.Font(font_path, 26)
-        self.font_large = pygame.font.Font(font_path, 34)
-        self.font_camera_label = pygame.font.Font(font_path, 21)
-        self.font_speech_bubble_high = pygame.font.Font(
+        latin_font_path = app_path(
+            config.get(
+                "latin_font_path",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            )
+        )
+        if not latin_font_path.is_file():
+            log(f"latin font missing, using CJK font only: {latin_font_path}")
+            latin_font_path = Path(font_path)
+
+        def mixed_font(primary_path: str, size: int) -> MixedGlyphFont:
+            return MixedGlyphFont(
+                pygame,
+                primary_path,
+                str(latin_font_path),
+                size,
+            )
+
+        self.font_small = mixed_font(font_path, 21)
+        self.font_medium = mixed_font(font_path, 26)
+        self.font_large = mixed_font(font_path, 34)
+        self.font_camera_label = mixed_font(font_path, 21)
+        self.font_speech_bubble_high = mixed_font(
             font_path,
             25 * UI_AA_SCALE,
         )
@@ -1316,21 +1440,21 @@ class PersistentExpressionDisplay:
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             )
         ))
-        self.font_status = pygame.font.Font(status_font_path, 20)
-        self.font_radial_time_high = pygame.font.Font(
+        self.font_status = mixed_font(status_font_path, 20)
+        self.font_radial_time_high = mixed_font(
             status_font_path,
             52 * UI_AA_SCALE,
         )
-        self.font_workshop_clock_high = pygame.font.Font(
+        self.font_workshop_clock_high = mixed_font(
             status_font_path,
             96 * UI_AA_SCALE,
         )
-        self.font_workshop_clock_seconds_high = pygame.font.Font(
+        self.font_workshop_clock_seconds_high = mixed_font(
             status_font_path,
             34 * UI_AA_SCALE,
         )
-        self.font_pomodoro_time = pygame.font.Font(status_font_path, 82)
-        self.font_pomodoro_label = pygame.font.Font(font_path, 28)
+        self.font_pomodoro_time = mixed_font(status_font_path, 82)
+        self.font_pomodoro_label = mixed_font(font_path, 28)
         pomodoro_title_font_path = app_path(
             config.get(
                 "pomodoro_title_font_path",
@@ -1346,7 +1470,7 @@ class PersistentExpressionDisplay:
             str(self.pomodoro_title_font_path),
             46,
         )
-        self.font_pomodoro_stat_value = pygame.font.Font(status_font_path, 42)
+        self.font_pomodoro_stat_value = mixed_font(status_font_path, 42)
         performance_mono_path = Path(
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
         )
@@ -1354,25 +1478,25 @@ class PersistentExpressionDisplay:
             str(performance_mono_path if performance_mono_path.is_file() else status_font_path),
             34,
         )
-        self.font_music_track = pygame.font.Font(font_path, 30)
-        self.font_music_artist = pygame.font.Font(font_path, 22)
-        self.font_music_lyric_current_high = pygame.font.Font(
+        self.font_music_track = mixed_font(font_path, 30)
+        self.font_music_artist = mixed_font(font_path, 22)
+        self.font_music_lyric_current_high = mixed_font(
             font_path,
             50 * UI_AA_SCALE,
         )
-        self.font_music_lyric_muted_high = pygame.font.Font(
+        self.font_music_lyric_muted_high = mixed_font(
             font_path,
             20 * UI_AA_SCALE,
         )
-        self.font_music_lyric_toggle_high = pygame.font.Font(
+        self.font_music_lyric_toggle_high = mixed_font(
             font_path,
             25 * UI_AA_SCALE,
         )
-        self.font_music_player_lyric_current_high = pygame.font.Font(
+        self.font_music_player_lyric_current_high = mixed_font(
             font_path,
             32 * UI_AA_SCALE,
         )
-        self.font_music_player_lyric_muted_high = pygame.font.Font(
+        self.font_music_player_lyric_muted_high = mixed_font(
             font_path,
             24 * UI_AA_SCALE,
         )

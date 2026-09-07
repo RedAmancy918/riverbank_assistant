@@ -28,7 +28,7 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 USER_AGENT = os.environ.get(
     "RIVERBANK_ARXIV_USER_AGENT",
-    "RiverBank-Edge-PaperRadar/0.26.3 "
+    "RiverBank-Edge-PaperRadar/0.26.4 "
     "(personal research reader; https://github.com/RedAmancy918/riverbank_assistant)",
 )
 ALLOWED_HOSTS = frozenset({"arxiv.org", "export.arxiv.org", "oaipmh.arxiv.org"})

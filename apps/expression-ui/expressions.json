@@ -53,6 +53,7 @@
   "camera_exit_swipe_px": 100,
   "font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
   "status_font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+  "latin_font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
   "radial_menu": [
     {
       "id": "voice",

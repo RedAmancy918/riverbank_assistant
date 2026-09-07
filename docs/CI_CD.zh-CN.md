@@ -27,13 +27,13 @@
 `.github/workflows/release.yml` 只接受带产物作用域、且与 `config/version-catalog.json` 完全一致的标签：
 
 ```text
-suite/v0.26.3-beta
-edge-os/v0.26.3-beta
+suite/v0.26.4-beta
+edge-os/v0.26.4-beta
 ios/v0.25.2-beta
 call/v0.25.1-beta
 ```
 
-`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.26.3` 会被拒绝，因为无法判断它代表硬件、Edge OS 还是客户端。历史 `edge-system/` 标签继续保留用于审计，但新版本统一使用 `edge-os/`。
+`suite/` 构建当前发布列车中的全部产物；其余标签只构建指定产物。裸标签 `v0.26.4` 会被拒绝，因为无法判断它代表硬件、Edge OS 还是客户端。历史 `edge-system/` 标签继续保留用于审计，但新版本统一使用 `edge-os/`。
 
 工坊用户创建或导入的应用不属于任何 GitHub 发布作用域。CI/CD 只包含工坊平台、协议、Schema、测试与官方示例；`.rbapp`、提案、注册表、授权、审计及应用私有数据由 `.gitignore` 和发布扫描器双重排除。用户显式导出的应用只能作为用户备份/分享文件，不能自动进入 `edge-os/` 或 `suite/` Release。
 
