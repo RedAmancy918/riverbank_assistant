@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from arxiv_access import ArxivAccess
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT = ROOT / "data" / "generated" / "latest-report.json"
@@ -69,6 +71,41 @@ def validate(report_path: Path, candidate_path: Path) -> tuple[dict, dict]:
     return report, candidates
 
 
+def finalized_source_status(
+    report: dict,
+    candidates: dict,
+    access_state: dict,
+) -> dict:
+    source = dict(candidates.get("source_status") or {})
+    report_date = str(report.get("date") or "")
+    carried_forward = report.get("paper_source_carried_forward") is True
+    paper_source_date = (
+        str(report.get("paper_source_date") or source.get("last_successful_report_date") or "")
+        if carried_forward
+        else report_date
+    )
+    cooldown_active = bool(access_state.get("cooldown_active"))
+    source.update(
+        {
+            "latest_report_date": report_date,
+            "last_successful_report_date": paper_source_date,
+            "paper_source_date": paper_source_date,
+            "report_ready": True,
+            "retry_at": (
+                str(access_state.get("cooldown_until") or "")
+                if cooldown_active
+                else ""
+            ),
+            "retry_after_seconds": (
+                int(access_state.get("retry_after_seconds") or 0)
+                if cooldown_active
+                else 0
+            ),
+        }
+    )
+    return source
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", nargs="?", type=Path, default=DEFAULT_REPORT)
@@ -85,6 +122,10 @@ def main() -> int:
             [str(PYTHON), str(RENDER), str(args.report)],
             cwd=ROOT,
             check=True,
+        )
+        access = ArxivAccess()
+        access.write_source_status(
+            finalized_source_status(report, candidates, access.status())
         )
     except (OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
         print(f"finalize failed: {exc}", file=sys.stderr)

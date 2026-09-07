@@ -31,6 +31,11 @@ def load_object(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def report_is_current_and_complete(report: dict, source: dict, today: str) -> bool:
+    """Only a fully ready source consumes the remaining recovery windows."""
+    return report.get("date") == today and source.get("state") == "ready"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes", default=str(Path.home() / ".local/bin/hermes"))
@@ -43,7 +48,7 @@ def main() -> int:
         return 0
     access = ArxivAccess()
     source = access.read_source_status()
-    if load_object(REPORT).get("date") == today and source.get("state") in {"ready", "degraded"}:
+    if report_is_current_and_complete(load_object(REPORT), source, today):
         print(f"paper radar already current: {today}")
         return 0
     if source.get("attempted_report_date") == today and int(source.get("automatic_attempts") or 0) >= 3:

@@ -74,6 +74,10 @@ paper sections, keeps the one-shot focus request pending, and can still refresh 
 industry sources. The latest page labels the paper source date and exposes the current
 cooldown without replacing valid content with an empty report. The catch-up timer runs
 at two jittered windows after 08:00 and never exceeds the initial run plus two retries.
+A degraded run remains eligible for the next catch-up; only a fully ready run consumes
+the remaining recovery windows. Successful finalization records both the latest rendered
+date and the actual paper-source date, and expired cooldown timestamps are cleared instead
+of remaining visible after connectivity recovers.
 This follows arXiv's API terms and OAI bulk-data guidance; IP rotation, parallel scraping
 and rate-limit bypass are explicitly outside the design.
 

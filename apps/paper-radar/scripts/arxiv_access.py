@@ -28,7 +28,7 @@ import requests
 ROOT = Path(__file__).resolve().parents[1]
 USER_AGENT = os.environ.get(
     "RIVERBANK_ARXIV_USER_AGENT",
-    "RiverBank-Edge-PaperRadar/0.26.1 "
+    "RiverBank-Edge-PaperRadar/0.26.2 "
     "(personal research reader; https://github.com/RedAmancy918/riverbank_assistant)",
 )
 ALLOWED_HOSTS = frozenset({"arxiv.org", "export.arxiv.org", "oaipmh.arxiv.org"})
@@ -144,13 +144,26 @@ class ArxivAccess:
     def _save_state(self, state: dict[str, Any]) -> None:
         atomic_write_json(self.state_path, {"version": 1, **state})
 
+    @staticmethod
+    def _clear_expired_cooldown(state: dict[str, Any], now: float) -> bool:
+        cooldown_until = float(state.get("cooldown_until_epoch") or 0)
+        if cooldown_until > now:
+            return False
+        if not cooldown_until and not state.get("cooldown_until"):
+            return False
+        state["cooldown_until_epoch"] = 0
+        state["cooldown_until"] = ""
+        return True
+
     def status(self) -> dict[str, Any]:
         self.root.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             state = self._load_state()
-        now = self.clock()
-        cooldown_until = float(state.get("cooldown_until_epoch") or 0)
+            now = self.clock()
+            if self._clear_expired_cooldown(state, now):
+                self._save_state(state)
+            cooldown_until = float(state.get("cooldown_until_epoch") or 0)
         return {
             **state,
             "cooldown_active": cooldown_until > now,
@@ -184,6 +197,7 @@ class ArxivAccess:
                         iso_timestamp(cooldown_until),
                         max(1, int(cooldown_until - now)),
                     )
+                self._clear_expired_cooldown(state, now)
 
                 last_request = float(state.get("last_request_epoch") or 0)
                 wait_seconds = max(0.0, last_request + self.min_interval_seconds - now)

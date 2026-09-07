@@ -92,8 +92,10 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"ok": True, "service": "paper-radar"})
             return
         if self.api_path() == "/api/source-status":
-            source = ArxivAccess().read_source_status()
-            state = ArxivAccess().status()
+            access = ArxivAccess()
+            source = access.read_source_status()
+            state = access.status()
+            cooldown_active = bool(state.get("cooldown_active"))
             self.send_json(
                 HTTPStatus.OK,
                 {
@@ -101,8 +103,15 @@ class PaperRadarHandler(SimpleHTTPRequestHandler):
                     "state": str(source.get("state") or "unknown"),
                     "message": str(source.get("message") or ""),
                     "attempted_report_date": str(source.get("attempted_report_date") or ""),
+                    "latest_report_date": str(source.get("latest_report_date") or ""),
                     "last_successful_report_date": str(source.get("last_successful_report_date") or ""),
-                    "retry_at": str(source.get("retry_at") or state.get("cooldown_until") or ""),
+                    "paper_source_date": str(source.get("paper_source_date") or ""),
+                    "report_ready": bool(source.get("report_ready")),
+                    "retry_at": (
+                        str(state.get("cooldown_until") or source.get("retry_at") or "")
+                        if cooldown_active
+                        else ""
+                    ),
                     "automatic_attempts": int(source.get("automatic_attempts") or 0),
                 },
             )

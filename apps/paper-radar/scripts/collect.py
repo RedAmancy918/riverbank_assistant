@@ -639,7 +639,11 @@ def collect(
     else:
         source_state = "ready"
     access_state = access.status()
-    retry_at = str(access_state.get("cooldown_until") or "")
+    retry_at = (
+        str(access_state.get("cooldown_until") or "")
+        if access_state.get("cooldown_active")
+        else ""
+    )
     last_successful = latest_successful_report_date()
     source_message = {
         "ready": "arXiv 增量元数据采集完成",

@@ -1,7 +1,7 @@
 # RiverBank Edge 桌面文档同步索引
 
-同步基线：**RiverBank Edge OS v0.26.1 beta**
-同步日期：2026-09-06（Asia/Shanghai）
+同步基线：**RiverBank Edge OS v0.26.2 beta**
+同步日期：2026-09-07（Asia/Shanghai）
 
 | 桌面文件 | 正式来源 | 状态 |
 | --- | --- | --- |
