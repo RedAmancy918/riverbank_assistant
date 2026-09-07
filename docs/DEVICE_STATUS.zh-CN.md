@@ -4,7 +4,7 @@
 
 设备：RiverBank Edge
 
-设备操作系统：**RiverBank Edge OS v0.26.2 beta**
+设备操作系统：**RiverBank Edge OS v0.26.3 beta**
 
 分发模式：`managed-linux-system-layer`
 上游基础发行版：Debian GNU/Linux 12 (bookworm)
@@ -28,8 +28,8 @@
 
 | 产物 | 版本 |
 | --- | --- |
-| RiverBank 发布列车 | `v0.26.2 beta` |
-| RiverBank Edge OS | `v0.26.2 beta` |
+| RiverBank 发布列车 | `v0.26.3 beta` |
+| RiverBank Edge OS | `v0.26.3 beta` |
 | RiverBank iOS | `v0.25.2 beta`，build 3 |
 | RiverBank Call（macOS/Windows） | `v0.25.1 beta` |
 | 上游 Debian/Raspberry Pi OS/Linux | 按设备原版本单独报告 |
@@ -62,14 +62,14 @@ Edge OS、手机端和桌面端是独立产物；版本号不要求相同，通�
 
 ```bash
 sudo riverbank-release seal \
-  --version 0.26.2 \
+  --version 0.26.3 \
   --channel beta \
   --notes "verified RiverBank Edge OS release"
 
 sudo riverbank-release verify --json
 ```
 
-当前 `v0.26.2 beta` 已于 2026-09-07 10:08（Asia/Shanghai）完成实机部署与封存：10 个组件、185 个关键文件，`drift_count: 0`。设备源码统一位于 `/home/geo/riverbank-edge-os`；表情与提示音等本地授权资产位于 `/home/geo/.local/share/riverbank/assets/`；日报状态位于 `RIVERBANK_DATA/paper-radar/`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
+当前 `v0.26.3 beta` 已于 2026-09-07 10:20（Asia/Shanghai）完成实机部署与封存：10 个组件、185 个关键文件，`drift_count: 0`。设备源码统一位于 `/home/geo/riverbank-edge-os`；表情与提示音等本地授权资产位于 `/home/geo/.local/share/riverbank/assets/`；日报状态位于 `RIVERBANK_DATA/paper-radar/`。封存后直接修改被清单覆盖的文件会产生发布漂移；不要用重新封存掩盖来源不明的改动。
 
 ## 当前正式能力摘要
 

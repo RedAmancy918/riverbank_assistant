@@ -1,4 +1,49 @@
+const inlineScriptNotation = /(^|[^A-Za-z0-9_\u0370-\u03ff])([A-Za-z\u0370-\u03ff])((?:[_^](?:\{[^{}\r\n]{1,24}\}|[A-Za-z0-9])){1,2})(?![A-Za-z0-9])/g;
+const scriptPartNotation = /([_^])(?:\{([^{}\r\n]{1,24})\}|([A-Za-z0-9]))/g;
+
+const renderReadableMath = (target, value) => {
+  const text = String(value || "");
+  const documentRef = target.ownerDocument;
+  const fragment = documentRef.createDocumentFragment();
+  let cursor = 0;
+  let match;
+  inlineScriptNotation.lastIndex = 0;
+  while ((match = inlineScriptNotation.exec(text)) !== null) {
+    const leading = match[1] || "";
+    const tokenStart = match.index + leading.length;
+    fragment.append(documentRef.createTextNode(text.slice(cursor, tokenStart)));
+
+    const token = documentRef.createElement("span");
+    token.className = "math-token";
+    const base = documentRef.createElement("span");
+    base.className = "math-base";
+    base.textContent = match[2];
+    token.append(base);
+
+    const spokenParts = [match[2]];
+    scriptPartNotation.lastIndex = 0;
+    let scriptMatch;
+    while ((scriptMatch = scriptPartNotation.exec(match[3])) !== null) {
+      const script = documentRef.createElement(scriptMatch[1] === "^" ? "sup" : "sub");
+      const scriptText = scriptMatch[2] || scriptMatch[3] || "";
+      script.textContent = scriptText;
+      token.append(script);
+      spokenParts.push(scriptMatch[1] === "^" ? `上标 ${scriptText}` : `下标 ${scriptText}`);
+    }
+    token.setAttribute("aria-label", spokenParts.join("，"));
+    token.title = text.slice(tokenStart, inlineScriptNotation.lastIndex);
+    fragment.append(token);
+    cursor = inlineScriptNotation.lastIndex;
+  }
+  fragment.append(documentRef.createTextNode(text.slice(cursor)));
+  target.replaceChildren(fragment);
+};
+
 (() => {
+  document.querySelectorAll(
+    ".paper-summary, .innovation li, .deep-grid p, .inference-note p",
+  ).forEach((element) => renderReadableMath(element, element.textContent));
+
   const bar = document.querySelector(".reading-progress span");
   if (bar) {
     const updateProgress = () => {
@@ -256,7 +301,7 @@
       if (message.state === "failed") row.classList.add("is-error");
       if (["queued", "running"].includes(message.state)) row.classList.add("is-pending");
       label.textContent = role === "user" ? "你" : "具身智讯";
-      bubble.textContent = messageContent(message);
+      renderReadableMath(bubble, messageContent(message));
       row.append(label, bubble);
       container.append(row);
     });

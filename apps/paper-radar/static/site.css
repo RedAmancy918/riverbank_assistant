@@ -125,6 +125,10 @@ a { color: inherit; text-decoration: none; }
 .paper-chat-message { display: grid; gap: 4px; max-width: 84%; }
 .paper-chat-message > span { color: var(--muted); font: 700 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
 .paper-chat-message > p { margin: 0; padding: 11px 13px; border: 1px solid var(--line); background: var(--paper); font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.math-token { white-space: nowrap; font-family: "STIX Two Text", "Times New Roman", serif; }
+.math-token .math-base { font-style: italic; }
+.math-token sup, .math-token sub { position: relative; margin-left: .03em; font-size: .72em; line-height: 0; vertical-align: baseline; }
+.math-token sup { top: -.48em; }.math-token sub { bottom: -.14em; }
 .paper-chat-message.user { justify-self: end; }.paper-chat-message.user > span { text-align: right; }.paper-chat-message.user > p { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .paper-chat-message.is-pending > p { color: var(--muted); animation: paper-chat-pulse 1.2s ease-in-out infinite alternate; }
 .paper-chat-message.is-error > p { color: #b72d18; border-color: rgba(183,45,24,.4); }
