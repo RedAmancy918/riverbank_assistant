@@ -1,6 +1,6 @@
 # RiverBank Edge 批量部署待办
 
-当前基线：**RiverBank Edge OS v0.26.4 beta**
+当前基线：**RiverBank Edge OS v0.26.5 beta**
 目标：把单台验证设备演进为可复现生产、直接烧录、可安全升级和恢复的 RiverBank Edge 整机。
 
 ## 已具备

@@ -54,6 +54,7 @@
   "font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
   "status_font_path": "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
   "latin_font_path": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "latin_font_scale": 1.06,
   "radial_menu": [
     {
       "id": "voice",

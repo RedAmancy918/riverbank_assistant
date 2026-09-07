@@ -553,10 +553,14 @@ class MixedGlyphFont:
         cjk_path: str,
         latin_path: str,
         size: int,
+        latin_scale: float = 1.0,
     ) -> None:
         self.pygame = pygame_module
         self.cjk = pygame_module.font.Font(cjk_path, size)
-        self.latin = pygame_module.font.Font(latin_path, size)
+        self.latin = pygame_module.font.Font(
+            latin_path,
+            max(1, round(size * latin_scale)),
+        )
 
     def font_runs(self, text: object) -> list[tuple[object, str]]:
         return [
@@ -1417,6 +1421,11 @@ class PersistentExpressionDisplay:
         if not latin_font_path.is_file():
             log(f"latin font missing, using CJK font only: {latin_font_path}")
             latin_font_path = Path(font_path)
+        try:
+            latin_font_scale = float(config.get("latin_font_scale", 1.06))
+        except (TypeError, ValueError):
+            latin_font_scale = 1.06
+        latin_font_scale = max(1.0, min(latin_font_scale, 1.12))
 
         def mixed_font(primary_path: str, size: int) -> MixedGlyphFont:
             return MixedGlyphFont(
@@ -1424,6 +1433,7 @@ class PersistentExpressionDisplay:
                 primary_path,
                 str(latin_font_path),
                 size,
+                latin_font_scale,
             )
 
         self.font_small = mixed_font(font_path, 21)

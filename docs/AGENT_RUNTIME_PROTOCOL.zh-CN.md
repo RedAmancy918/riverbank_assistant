@@ -2,7 +2,7 @@
 
 本文定义 RiverBank Edge OS 中上层产品调用智能体的稳定边界。目标不是隐藏模型名称，而是让 Chat、后台任务、工坊、日报与语音交互不再依赖某一个 Agent 框架的命令行参数、Python 内部模块或会话存储格式。
 
-当前协议版本为 `riverbank.agent/v1`，属于 Edge OS `v0.26.4 beta` 的系统接口。当前后端适配器是 Hermes；替换后端时，上层产品协议不变。
+当前协议版本为 `riverbank.agent/v1`，属于 Edge OS `v0.26.5 beta` 的系统接口。当前后端适配器是 Hermes；替换后端时，上层产品协议不变。
 
 ## 1. 架构边界
 
