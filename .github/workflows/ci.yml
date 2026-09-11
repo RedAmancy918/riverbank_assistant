@@ -76,7 +76,7 @@ jobs:
         run: node --check main.js && node --check preload.js && node --check renderer.js
       - name: Build unsigned beta package
         run: npm run ${{ matrix.script }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: apps/video-call/windows-client/dist/*
@@ -105,7 +105,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "$RUNNER_TEMP/riverbank-ios/Build/Products/Release-iphoneos/RiverBank.app" \
             "$RUNNER_TEMP/RiverBank-iOS-${ios_version}-unsigned.app.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: riverbank-ios-unsigned
           path: ${{ runner.temp }}/RiverBank-iOS-*-unsigned.app.zip
