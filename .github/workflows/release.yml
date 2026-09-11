@@ -67,7 +67,7 @@ jobs:
             | gzip -9 > "release-assets/RiverBank-Edge-OS-${version}.tar.gz"
           cd release-assets
           sha256sum RiverBank-Edge-OS-* > SHA256SUMS-edge-os.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-edge-os
           path: release-assets/*
@@ -94,7 +94,7 @@ jobs:
         run: |
           cd dist
           shasum -a 256 *.dmg *.zip > SHA256SUMS-macos.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-call-macos
           path: apps/video-call/windows-client/dist/*
@@ -122,7 +122,7 @@ jobs:
         run: |
           cd dist
           sha256sum *.exe > SHA256SUMS-windows.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-call-windows
           path: apps/video-call/windows-client/dist/*
@@ -155,7 +155,7 @@ jobs:
             "release-assets/RiverBank-iOS-${version}-unsigned.app.zip"
           cd release-assets
           shasum -a 256 RiverBank-iOS-* > SHA256SUMS-ios.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-ios
           path: release-assets/*
