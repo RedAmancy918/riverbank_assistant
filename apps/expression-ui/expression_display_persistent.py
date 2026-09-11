@@ -11274,7 +11274,7 @@ class PersistentExpressionDisplay:
                 width,
             )
         if self.menu_level == "applications":
-            title = self.font_small.render(
+            title = self.font_medium.render(
                 "应用",
                 True,
                 (151, 205, 222),

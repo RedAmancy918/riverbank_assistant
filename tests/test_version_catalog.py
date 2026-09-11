@@ -35,14 +35,14 @@ class VersionCatalogTests(unittest.TestCase):
         self.assertEqual(
             VERSIONCTL.expected_tags(catalog),
             {
-                "suite": "suite/v0.26.5-beta",
-                "edge-os": "edge-os/v0.26.5-beta",
+                "suite": "suite/v0.26.6-beta",
+                "edge-os": "edge-os/v0.26.6-beta",
                 "ios": "ios/v0.25.2-beta",
                 "call": "call/v0.25.1-beta",
             },
         )
-        self.assertEqual(VERSIONCTL.validate_tag(catalog, "edge-os/v0.26.5-beta"), [])
-        self.assertTrue(VERSIONCTL.validate_tag(catalog, "v0.26.5"))
+        self.assertEqual(VERSIONCTL.validate_tag(catalog, "edge-os/v0.26.6-beta"), [])
+        self.assertTrue(VERSIONCTL.validate_tag(catalog, "v0.26.6"))
 
     def test_release_workflow_uses_edge_os_scope(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
